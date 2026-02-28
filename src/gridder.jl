@@ -168,12 +168,31 @@ function _process_l2_file!(filepath::String, config::DataSourceConfig,
             co += 1
         end
 
+        # Extract values and corners for filtered soundings
+        vals = mat_in[idx, :]
+        lat_c = lat_bnd[idx, :]
+        lon_c = lon_bnd[idx, :]
+
+        # Filter out soundings with NaN/Inf in data or corners
+        finite_mask = vec(all(isfinite, vals, dims=2)) .&
+                      vec(all(isfinite, lat_c, dims=2)) .&
+                      vec(all(isfinite, lon_c, dims=2))
+        if !all(finite_mask)
+            vals = vals[finite_mask, :]
+            lat_c = lat_c[finite_mask, :]
+            lon_c = lon_c[finite_mask, :]
+        end
+
+        if isempty(vals)
+            return
+        end
+
         # Convert corner coordinates to fractional grid indices
         n_lat = length(grid_spec.lat)
         n_lon = length(grid_spec.lon)
-        ilat = ((lat_bnd[idx, :] .- grid_spec.lat_min) /
+        ilat = ((lat_c .- grid_spec.lat_min) /
                 (grid_spec.lat_max - grid_spec.lat_min) * n_lat) .+ 1
-        ilon = ((lon_bnd[idx, :] .- grid_spec.lon_min) /
+        ilon = ((lon_c .- grid_spec.lon_min) /
                 (grid_spec.lon_max - grid_spec.lon_min) * n_lon) .+ 1
 
         # Determine n_oversample
@@ -196,8 +215,8 @@ function _process_l2_file!(filepath::String, config::DataSourceConfig,
         lons1 = zeros(n)
 
         accumulate_footprint!(grid_data, grid_std, grid_weights, compute_std,
-                              ilat, ilon, mat_in[idx, :],
-                              length(idx), length(config.grid_vars), n,
+                              ilat, ilon, vals,
+                              size(vals, 1), length(config.grid_vars), n,
                               points_buf, ix_buf, iy_buf,
                               lats0, lons0, lats1, lons1)
     finally
@@ -260,12 +279,31 @@ function _process_l2_file_ka!(filepath::String, config::DataSourceConfig,
             co += 1
         end
 
+        # Extract values and corners for filtered soundings
+        vals = mat_in[idx, :]
+        lat_c = lat_bnd[idx, :]
+        lon_c = lon_bnd[idx, :]
+
+        # Filter out soundings with NaN/Inf in data or corners
+        finite_mask = vec(all(isfinite, vals, dims=2)) .&
+                      vec(all(isfinite, lat_c, dims=2)) .&
+                      vec(all(isfinite, lon_c, dims=2))
+        if !all(finite_mask)
+            vals = vals[finite_mask, :]
+            lat_c = lat_c[finite_mask, :]
+            lon_c = lon_c[finite_mask, :]
+        end
+
+        if isempty(vals)
+            return
+        end
+
         # Convert corner coordinates to fractional grid indices
         n_lat = length(grid_spec.lat)
         n_lon = length(grid_spec.lon)
-        ilat = T.((lat_bnd[idx, :] .- grid_spec.lat_min) /
+        ilat = T.((lat_c .- grid_spec.lat_min) /
                    (grid_spec.lat_max - grid_spec.lat_min) .* T(n_lat)) .+ one(T)
-        ilon = T.((lon_bnd[idx, :] .- grid_spec.lon_min) /
+        ilon = T.((lon_c .- grid_spec.lon_min) /
                    (grid_spec.lon_max - grid_spec.lon_min) .* T(n_lon)) .+ one(T)
 
         # Determine n_oversample
@@ -278,7 +316,7 @@ function _process_l2_file_ka!(filepath::String, config::DataSourceConfig,
         end
 
         accumulate_batch!(backend, grid_sum, grid_weights,
-                          ilat, ilon, mat_in[idx, :], n, length(config.grid_vars))
+                          ilat, ilon, vals, n, length(config.grid_vars))
     finally
         close(fin)
     end
@@ -295,10 +333,12 @@ function _write_time_slice!(ds_out, nc_vars, config, grid_data, grid_std,
         for (key, _) in config.grid_vars
             da = round.(grid_data[:, :, co], sigdigits=8)
             da[grid_weights .< 1e-10] .= -999.0f0
+            da[.!isfinite.(da)] .= -999.0f0
             nc_vars[key][ct, :, :] = da
             if compute_std
                 da_std = round.(grid_std[:, :, co], sigdigits=6)
                 da_std[grid_weights .< 1e-10] .= -999.0f0
+                da_std[.!isfinite.(da_std)] .= -999.0f0
                 nc_vars[key * "_std"][ct, :, :] = da_std
             end
             co += 1
