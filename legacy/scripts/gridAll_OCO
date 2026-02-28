@@ -1,0 +1,12 @@
+# All modes:
+~/code/julia-1.0.3/bin/julia ./gridL2_Dates.jl --Dict oco2_all.json  --startDate 2014-01-01 --stopDate 2015-01-01 --dDay 8 --dLat 0.083333333 --dLon 0.083333333 -o /net/fluo/data2/projects/julia_gridded/oco2_all_2014.nc
+~/code/julia-1.0.3/bin/julia ./gridL2_Dates.jl --Dict oco2_all.json  --startDate 2015-01-01 --stopDate 2016-01-01 --dDay 8 --dLat 0.083333333 --dLon 0.083333333 -o /net/fluo/data2/projects/julia_gridded/oco2_all_2015.nc
+~/code/julia-1.0.3/bin/julia ./gridL2_Dates.jl --Dict oco2_all.json  --startDate 2016-01-01 --stopDate 2017-01-01 --dDay 8 --dLat 0.083333333 --dLon 0.083333333 -o /net/fluo/data2/projects/julia_gridded/oco2_all_2016.nc
+~/code/julia-1.0.3/bin/julia ./gridL2_Dates.jl --Dict oco2_all.json  --startDate 2017-01-01 --stopDate 2018-01-01 --dDay 8 --dLat 0.083333333 --dLon 0.083333333 -o /net/fluo/data2/projects/julia_gridded/oco2_all_2017.nc
+~/code/julia-1.0.3/bin/julia ./gridL2_Dates.jl --Dict oco2_all.json  --startDate 2018-01-01 --stopDate 2019-01-01 --dDay 8 --dLat 0.083333333 --dLon 0.083333333 -o /net/fluo/data2/projects/julia_gridded/oco2_all_2018.nc
+# Nadir only
+~/code/julia-1.0.3/bin/julia ./gridL2_Dates.jl --Dict oco2_nadir.json  --startDate 2014-01-01 --stopDate 2015-01-01 --dDay 8 --dLat 0.083333333 --dLon 0.083333333 -o /net/fluo/data2/projects/julia_gridded/oco2_nadir_2014.nc
+~/code/julia-1.0.3/bin/julia ./gridL2_Dates.jl --Dict oco2_nadir.json  --startDate 2015-01-01 --stopDate 2016-01-01 --dDay 8 --dLat 0.083333333 --dLon 0.083333333 -o /net/fluo/data2/projects/julia_gridded/oco2_nadir_2015.nc
+~/code/julia-1.0.3/bin/julia ./gridL2_Dates.jl --Dict oco2_nadir.json  --startDate 2016-01-01 --stopDate 2017-01-01 --dDay 8 --dLat 0.083333333 --dLon 0.083333333 -o /net/fluo/data2/projects/julia_gridded/oco2_nadir_2016.nc
+~/code/julia-1.0.3/bin/julia ./gridL2_Dates.jl --Dict oco2_nadir.json  --startDate 2017-01-01 --stopDate 2018-01-01 --dDay 8 --dLat 0.083333333 --dLon 0.083333333 -o /net/fluo/data2/projects/julia_gridded/oco2_nadir_2017.nc
+~/code/julia-1.0.3/bin/julia ./gridL2_Dates.jl --Dict oco2_nadir.json  --startDate 2018-01-01 --stopDate 2019-01-01 --dDay 8 --dLat 0.083333333 --dLon 0.083333333 -o /net/fluo/data2/projects/julia_gridded/oco2_nadir_2018.nc 

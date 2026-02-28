@@ -1,0 +1,17 @@
+{
+	"basic":{
+    	"lat": "BAND6_RADIANCE/STANDARD_MODE/GEODATA/latitude",
+    	"lon": "BAND6_RADIANCE/STANDARD_MODE/GEODATA/longitude",
+    	"lat_bnd": "BAND6_RADIANCE/STANDARD_MODE/GEODATA/latitude_bounds",
+    	"lon_bnd": "BAND6_RADIANCE/STANDARD_MODE/GEODATA/longitude_bounds",
+    	"sza": "BAND6_RADIANCE/STANDARD_MODE/GEODATA/solar_zenith_angle",
+    	"vza": "BAND6_RADIANCE/STANDARD_MODE/GEODATA/viewing_zenith_angle",
+    	"time": "BAND6_RADIANCE/STANDARD_MODE/OBSERVATIONS/time"
+},
+	"grid":{
+		"sza": "BAND6_RADIANCE/STANDARD_MODE/GEODATA/solar_zenith_angle"
+	},
+	"filter_lt":{"BAND6_RADIANCE/STANDARD_MODE/GEODATA/solar_zenith_angle": 80},
+	"filePattern": "YYYY/S5P_OFFL_L1B_RA_BD6_YYYYMMDD*.nc",
+	"folder": "/net/fluo/data3/projects/TROPOMI/ESA/L1/"
+}

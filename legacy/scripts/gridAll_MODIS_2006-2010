@@ -1,0 +1,7 @@
+# All modes:
+~/code/julia-1.0.3/bin/julia ./modis_grid_lyh.jl --Dict modis_all.json  --dDay 8 --dLat 0.083333333 --dLon 0.083333333  --startDate 2006-01-01 --stopDate 2006-12-31 -o /net/fluo/data2/projects/julia_gridded/modis_2006.nc &>logs/modis_2006.log &
+~/code/julia-1.0.3/bin/julia ./modis_grid_lyh.jl --Dict modis_all.json  --dDay 8 --dLat 0.083333333 --dLon 0.083333333  --startDate 2007-01-01 --stopDate 2007-12-31 -o /net/fluo/data2/projects/julia_gridded/modis_2007.nc &>logs/modis_2007.log &
+~/code/julia-1.0.3/bin/julia ./modis_grid_lyh.jl --Dict modis_all.json  --dDay 8 --dLat 0.083333333 --dLon 0.083333333  --startDate 2008-01-01 --stopDate 2008-12-31 -o /net/fluo/data2/projects/julia_gridded/modis_2008.nc &>logs/modis_2008.log &
+~/code/julia-1.0.3/bin/julia ./modis_grid_lyh.jl --Dict modis_all.json  --dDay 8 --dLat 0.083333333 --dLon 0.083333333  --startDate 2009-01-01 --stopDate 2009-12-31 -o /net/fluo/data2/projects/julia_gridded/modis_2009.nc &>logs/modis_2009.log &
+~/code/julia-1.0.3/bin/julia ./modis_grid_lyh.jl --Dict modis_all.json  --dDay 8 --dLat 0.083333333 --dLon 0.083333333  --startDate 2010-01-01 --stopDate 2010-12-31 -o /net/fluo/data2/projects/julia_gridded/modis_2010.nc &>logs/modis_2010.log &
+~/code/julia-1.0.3/bin/julia ./modis_grid_lyh.jl --Dict modis_all.json  --dDay 8 --dLat 0.083333333 --dLon 0.083333333  --startDate 2011-01-01 --stopDate 2011-12-31 -o /net/fluo/data2/projects/julia_gridded/modis_2011.nc &>logs/modis_2011.log &

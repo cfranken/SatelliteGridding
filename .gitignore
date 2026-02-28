@@ -1,0 +1,24 @@
+# Julia
+Manifest.toml
+*.jl.cov
+*.jl.*.cov
+*.jl.mem
+
+# Output files
+*.nc
+*.nc4
+*.log
+nohup.out
+
+# macOS
+.DS_Store
+._*
+
+# Editors
+.vscode/
+.idea/
+
+# Binary artifacts
+*.kmz
+*.pdf
+*.shp

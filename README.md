@@ -1,139 +1,271 @@
-# Generic Gridding Routine
-One single Julia code `gridL2_Dates.jl` to grid all kinds of satellite data onto rectangular grid at arbitrary spacing (and determined spatial and temporal resolution). Input defined just via json files, which makes it generic as long as you have corner coordinates for your satellite dataset (you can grid XCO2, methane CO, etc from TROPOMI or SIF from OCO-2, OCO-3, TROPOMI, GOME-2, etc)..
+# SatelliteGridding.jl
 
-The main program, gridL2_Dates.jl, can compute gridded averages and save everything into a netCDF4 file that can be read via tools such as python, Julia, Panoply, etc ( 3D dataset with time/lat/lon). Most importantly, it can oversample, i.e. the gridding takes the actual footprint overlap with the final grid into account. This is done by splitting a footprint via its corner coordinates into a set of points nxn within that footprint (typicall n=10, i.e. 100 points). For these, a simple "in-the-box" gridding routine will be applied, i.e. tha algorithm finds in which grid boxe each sub-pixel of a footprint falls. This results in fractional "samples" per grid box.
+[![Docs](https://img.shields.io/badge/docs-dev-blue.svg)](https://cfranken.github.io/SatelliteGridding/dev/)
 
-The program was written as a first step into Julia (as everything else was too slow and C++ development time just too long). So, some things are still clumsy and not really "Julian". Feel free to make things more elegant and create a pull request if you have done so. 
+A Julia package for gridding satellite Level-2 data onto regular lat/lon grids with footprint-aware oversampling.
 
-## Install Julia
+Satellite instruments observe through irregularly shaped footprints (quadrilaterals defined by 4 corner coordinates) that can overlap multiple grid cells. This package subdivides each footprint into n×n sub-pixels and distributes the observation across all grid cells the sub-pixels fall in. It supports any Level-2 satellite product with corner coordinates in NetCDF format — TROPOMI SIF/NO₂/CH₄/CO, OCO-2/3 SIF/XCO₂, GOSAT, and more.
 
-The current version works well with Julia versions > 1.0 but I didn't test all of them. Download it for your platform from [Julia's old
-releases](https://julialang.org/downloads/oldreleases/#v131_dec_30_2019).
+## Prerequisites
 
-You might have to install a couple of Julia packages, this can done like in Julia using the built-in package manager (press `]` at the Julia prompt):
+**Julia ≥ 1.9** is required.
+
+If you don't have Julia installed:
+
+1. Download from [julialang.org/downloads](https://julialang.org/downloads/)
+2. Follow the platform-specific install instructions
+3. Verify: `julia --version`
+
+## Installation
+
+From the Julia REPL (`julia` or press `]` for Pkg mode):
 
 ```julia
-julia> ]
-(v1.3) pkg> add ArgParse, Statistics, Glob, JSON, Dates, Printf
+using Pkg
+Pkg.add(url="https://github.com/cfranken/SatelliteGridding.git")
 ```
 
-## How to run the program
+This installs the package and all its dependencies (NCDatasets, KernelAbstractions, ArgParse, etc.) automatically.
 
-Hint for first time users, you need to use the console/terminal to use it properly. On a Mac, it is good to add an alias, e.g. 
+For development (editable local clone):
 
-```
-alias julia /Applications/Julia-1.3.app/Contents/Resources/julia/bin/julia
-```
-
-in your .bash_profile or whatever you are using.
-
-Once this is done, you can test out what options there are (I often do this myself):
-
-```
-$ julia ./gridL2_Dates.jl --help
-usage: gridL2_Dates.jl [--Dict DICT] [-o OUTFILE] [--monthly]
-                       [--compSTD] [--latMin LATMIN] [--latMax LATMAX]
-                       [--lonMin LONMIN] [--lonMax LONMAX]
-                       [--dLat DLAT] [--dLon DLON]
-                       [--startDate STARTDATE] [--stopDate STOPDATE]
-                       [--dDays DDAYS] [-h]
-
-optional arguments:
-  --Dict DICT           JSON dictionary file to use (default:
-                        "/home/cfranken/code/gitHub/Gridding/gridding/tropomi_all.json")
-  -o, --outFile OUTFILE
-                        output filename (default OCO2_SIF_map.nc)
-                        (default: "OCO2_SIF_map.nc")
-  --monthly             Use time-steps in terms of months (not days)
-  --compSTD             compute standard deviation within dataset
-  --latMin LATMIN       Lower latitude bound (type: Float32, default:
-                        -90.0)
-  --latMax LATMAX       Upper latitude bound (type: Float32, default:
-                        90.0)
-  --lonMin LONMIN       Lower longitude bound (type: Float32, default:
-                        -180.0)
-  --lonMax LONMAX       Upper longitude bound (type: Float32, default:
-                        180.0)
-  --dLat DLAT           latitude resolution (type: Float32, default:
-                        1.0)
-  --dLon DLON           longitude resolution (type: Float32, default:
-                        1.0)
-  --startDate STARTDATE
-                        Start Date (in YYYY-MM-DD) (default:
-                        "2018-03-07")
-  --stopDate STOPDATE   Stop Date (in YYYY-MM-DD) (default:
-                        "2018-10-31")
-  --dDays DDAYS         Time steps in days (or months if --monthly is
-                        set) (type: Int64, default: 8)
-  -h, --help            show this help message and exit
+```julia
+Pkg.develop(url="https://github.com/cfranken/SatelliteGridding.git")
 ```
 
-The most important part of this script is `--Dict` as most description about the files you want to grid are within the json file you will use here. You can also change the spatial resolution (e.g. `--dLat`), the lat/lon boundaries if you don't want the globe and the date ranges and temporal resolution you are interested in (`--startDate`, `--stopDate`, `--dDays` defines the number of days you want to aggregate together (if you set `--monthly`, this will be the step in months). If you set `--compSTD`, the standard deviation of the data within a grid box will be computed (the original variable name will be kept with an `_std` added to it and currently discarding all attributes). This is not necessarily an uncertainty estimate but the true spread of data within a grid box. 
+## Quick Start — Julia API
 
-An example on how to run this is
+```julia
+using SatelliteGridding, Dates
 
-```
-julia ./gridL2_Dates.jl --dLat 1 --dLon 1  --dDays 16 --startDate 2019-02-01 --stopDate 2020-01-30  --Dict oco2_all.json  -o ~/oco2_16day_1deg_scf.nc
-```
+# 1. Load a TOML config that describes the satellite data source
+config = load_config("examples/tropomi_sif.toml")
 
-### JSON files
-Now to the most important part, the json structure makes the code very general (check out https://www.json.org/json-en.html).
-An example file content is below:
-```
-{
-    "basic":{
-    "lat": "latitude",
-        "lon": "longitude",
-        "lat_bnd": "Latitude_Corners",
-        "lon_bnd": "Longitude_Corners",
-        "time": "time"
-},
-    "grid":{
-        "sif_757": "Daily_SIF_757nm",
-        "sif_771": "Daily_SIF_771nm",
-        "sif_757_relative": "Science/SIF_Relative_757nm",
-        "sif_771_relative": "Science/SIF_Relative_771nm",
-        "dcCorr": "Science/daily_correction_factor"
-    },
-    "filePattern": "YYYY/MM/oco2_LtSIF_??MMDD_*.nc4",
-    "folder": "/net/fluo/data2/groupMembers/cfranken/data/kurosu/test_data/daily/oco2/new/"
-}
+# 2. Define the output grid (global, 0.5° resolution)
+grid_spec = GridSpec(
+    lat_min = -90f0,  lat_max = 90f0,
+    lon_min = -180f0, lon_max = 180f0,
+    dlat = 0.5f0, dlon = 0.5f0
+)
+
+# 3. Define the time range (8-day composites for a full year)
+time_spec = TimeSpec(
+    DateTime("2019-01-01"),
+    DateTime("2019-12-31"),
+    Dates.Day(8)
+)
+
+# 4. Run the gridding
+grid_l2(config, grid_spec, time_spec;
+        outfile = "tropomi_sif_2019.nc")
 ```
 
-The structure will be used to define dictionaries in Julia, with a key (the left side, pointing to internal variables in the code) and a value (this is actually the path to the respetive dataset within the files you want to grid). What is needed for sure is the key/value pair for `lat_bnd` and `lon_bnd` as these corner coordinates in the files are used to perform proper gridding and over-sampling (I think time is not even used right now). The other part is in the `grid` group, eveything you will add here will be gridded, i.e. all variables on the left side of the key/value pairs (and saved how you call it on the left). 
+### Reading the output
 
-Last but not least, we need a `filePattern`, which defines where to look for the data (`YYYY`, `MM` and `DD` are keywords, which will be internally used to find the right matching years, months and days). Wildcards can be used (`?`, `*`, etc). Then you need to provide the main folder where the data is located (the full path is `folder/filePattern`).
+```julia
+using NCDatasets
 
-### Filter criteria:
-You can add filter criteria as well, as we sometimes want to make sure that quality filters are applied, angles are within a specific range, and so forth. Within the json file, this can be done by adding groups called `filter_eq`, `filter_gt`, or `filter_lt`). These test for equalities, greater than or lower than. An example is here:
+ds = Dataset("tropomi_sif_2019.nc")
+sif     = ds["sif_743"][:, :, 1]   # gridded SIF, first time step
+weights = ds["n"][:, :, 1]          # observation count per cell
+close(ds)
 ```
-{
-    "basic":{
-    "lat": "PRODUCT/latitude",
-    "lon": "PRODUCT/longitude",
-    "lat_bnd": "PRODUCT/SUPPORT_DATA/GEOLOCATIONS/latitude_bounds",
-    "lon_bnd": "PRODUCT/SUPPORT_DATA/GEOLOCATIONS/longitude_bounds",
-    "time": "PRODUCT/time_utc"
-},
-    "grid":{
-        "ch4": "PRODUCT/methane_mixing_ratio_bias_corrected",
-        "altitude": "PRODUCT/SUPPORT_DATA/INPUT_DATA/surface_altitude"
-    },
-    "filter_gt":{
-        "PRODUCT/qa_value": 0.3,
-        "PRODUCT/methane_mixing_ratio_bias_corrected": 1600
-    },
-    "filter_lt":{
-        "PRODUCT/methane_mixing_ratio_bias_corrected": 2200
-    },
-    "filePattern": "S5P_*_L2__CH4____YYYYMMDD*.zip",
-    "folder": "/net/fluo/data2/projects/TROPOMI_GASES/ch4/"
-}
+
+### Key options for `grid_l2`
+
+| Keyword | Default | Description |
+|:--------|:--------|:------------|
+| `n_oversample` | `nothing` (auto) | Sub-pixel factor per footprint side. `nothing` = auto-compute from footprint/grid ratio |
+| `compute_std` | `false` | Also compute per-cell standard deviation (sequential backend only) |
+| `outfile` | `"gridded_output.nc"` | Output NetCDF file path |
+| `backend` | `nothing` (sequential) | Compute backend — `nothing`, `CPU()`, or `CUDABackend()` (see [Backends](#backends)) |
+
+### Center-coordinate gridding (MODIS)
+
+For instruments without footprint bounds, use `grid_center`:
+
+```julia
+config = load_config("examples/modis_reflectance.toml")
+grid_spec = GridSpec(dlat=0.05f0, dlon=0.05f0)
+time_spec = TimeSpec(DateTime("2019-01-01"), DateTime("2019-12-31"), Dates.Day(1))
+
+grid_center(config, grid_spec, time_spec;
+            veg_indices=true, outfile="modis_2019.nc")
 ```
-here, we want to make sure that the `qa_value` is larger than 0.3 and that the methane mixing ratio is within a reasonable range (be careful doing things like this, just added for demonstration).
 
-## Code of Conduct:
-Please feel free to use this tool but make sure that you help the community if you find bugs, improve it etc. Any modifications that are useful should be made publicly available, you can fork and create a pull request. Also, let us know if you find bugs. On top of that, please acknowledge the tool if you use it in publications.
+## Quick Start — Command Line
 
-## MODIS files
-We use these as well but I have no time to document all of them right now. Contact us if you want to use them (cfranken"at"caltech.edu).
+The CLI entry point is `bin/grid.jl`. It has two commands: **`l2`** (footprint oversampling) and **`center`** (MODIS-style).
+
+```bash
+# TROPOMI SIF — 8-day composites at 0.5°
+julia --project=. bin/grid.jl l2 \
+    --config examples/tropomi_sif.toml \
+    --dLat 0.5 --dLon 0.5 --dDays 8 \
+    --startDate 2019-01-01 --stopDate 2019-12-31 \
+    -o tropomi_sif_2019.nc
+
+# OCO-2 XCO₂ — monthly composites at 2°
+julia --project=. bin/grid.jl l2 \
+    --config examples/oco2_xco2.toml \
+    --dLat 2.0 --dLon 2.0 --monthly --dDays 1 \
+    --startDate 2015-01-01 --stopDate 2020-12-31 \
+    -o oco2_xco2_monthly.nc
+
+# TROPOMI NO₂ with KA CPU backend for parallel execution
+julia --project=. bin/grid.jl l2 \
+    --config examples/tropomi_no2.toml \
+    --backend cpu --dLat 0.25 --dLon 0.25 \
+    --startDate 2019-01-01 --stopDate 2019-12-31 \
+    -o tropomi_no2.nc
+
+# MODIS reflectance — center-coordinate mode with vegetation indices
+julia --project=. bin/grid.jl center \
+    --config examples/modis_reflectance.toml \
+    --dLat 0.05 --dLon 0.05 --vegIndices \
+    --startDate 2019-01-01 --stopDate 2019-12-31 \
+    -o modis_2019.nc
+```
+
+Run `julia --project=. bin/grid.jl l2 --help` for all options.
+
+### CLI flags (`l2` command)
+
+| Flag | Default | Description |
+|:-----|:--------|:------------|
+| `--config`, `-c` | *required* | TOML (or JSON) configuration file |
+| `--outFile`, `-o` | `gridded_output.nc` | Output NetCDF path |
+| `--dLat` / `--dLon` | 1.0 | Grid resolution in degrees |
+| `--latMin` / `--latMax` | -90 / 90 | Latitude bounds |
+| `--lonMin` / `--lonMax` | -180 / 180 | Longitude bounds |
+| `--startDate` / `--stopDate` | `2018-03-07` / `2018-10-31` | Date range (YYYY-MM-DD) |
+| `--dDays` | 8 | Time step in days (or months with `--monthly`) |
+| `--monthly` | false | Use months instead of days |
+| `--nOversample` | 0 (auto) | Sub-pixel factor (0 = auto-compute) |
+| `--compSTD` | false | Compute standard deviation |
+| `--backend` | `sequential` | `sequential`, `cpu`, or `cuda` |
+
+## Configuration Files
+
+Data sources are defined in TOML files. Each config tells the package where to find input files, which NetCDF variables to grid, and what quality filters to apply:
+
+```toml
+filePattern = "S5P_PAL__L2B_SIF____YYYYMMDD*.nc"
+folder = "/path/to/tropomi/data/"
+
+[basic]
+lat = "PRODUCT/latitude"
+lon = "PRODUCT/longitude"
+lat_bnd = "PRODUCT/SUPPORT_DATA/GEOLOCATIONS/latitude_bounds"
+lon_bnd = "PRODUCT/SUPPORT_DATA/GEOLOCATIONS/longitude_bounds"
+
+[grid]
+sif_743 = "PRODUCT/SIF_743"
+sif_735 = "PRODUCT/SIF_735"
+
+[filter]
+"PRODUCT/SUPPORT_DATA/GEOLOCATIONS/solar_zenith_angle" = "< 80"
+"PRODUCT/qa_value" = "> 0.5"
+```
+
+### Sections
+
+| Section | Required | Description |
+|:--------|:---------|:------------|
+| `[basic]` | yes | Variable paths for `lat`, `lon`, `lat_bnd`, `lon_bnd` |
+| `[grid]` | yes | Output name → input variable path. All listed variables are gridded |
+| `[filter]` | no | Quality filters using string expressions (see below) |
+| `filePattern` | yes | Glob pattern with `YYYY`/`MM`/`DD`/`DOY`/`YYMMDD` placeholders |
+| `folder` | yes | Root directory for input files (also supports date placeholders) |
+
+### Filter expressions
+
+Filters are defined in the `[filter]` section using intuitive string syntax:
+
+| Expression | Meaning | Example |
+|:-----------|:--------|:--------|
+| `"< value"` | Less than | `"< 80"` |
+| `"> value"` | Greater than | `"> 0.5"` |
+| `"== value"` | Equality | `"== 0"` |
+| `"lo < x < hi"` | Range (exclusive) | `"1600 < x < 2200"` |
+
+All filters are combined with AND logic.
+
+### Available example configs
+
+| File | Instrument | Variables |
+|:-----|:-----------|:----------|
+| `examples/tropomi_sif.toml` | TROPOMI | SIF 743nm, SIF 735nm, cloud fraction |
+| `examples/tropomi_no2.toml` | TROPOMI | Tropospheric NO₂ column |
+| `examples/tropomi_ch4.toml` | TROPOMI | CH₄ mixing ratio |
+| `examples/tropomi_co.toml` | TROPOMI | CO total column |
+| `examples/oco2_sif.toml` | OCO-2 | SIF 757nm, SIF 771nm |
+| `examples/oco2_xco2.toml` | OCO-2 | XCO₂, AOD, albedo |
+| `examples/modis_reflectance.toml` | MODIS | Surface reflectance bands |
+
+## Backends
+
+The package supports three compute backends:
+
+| Backend | CLI flag | Julia API | Description |
+|:--------|:---------|:----------|:------------|
+| Sequential | `--backend sequential` | default (`backend=nothing`) | Welford's online algorithm. Single-threaded. Supports `--compSTD`. |
+| KA CPU | `--backend cpu` | `backend=CPU()` | KernelAbstractions CPU kernels. Parallel corner sorting + sub-pixel computation. Sum-based accumulation. |
+| KA CUDA | `--backend cuda` | `backend=CUDABackend()` | Full GPU pipeline. Requires CUDA.jl (`using CUDA`). |
+
+The KA backends use sum-based accumulation (`mean = sum/weight`) instead of Welford's incremental mean, which is fully parallelizable but does not support `--compSTD` in a single pass.
+
+### GPU example
+
+```julia
+using CUDA, KernelAbstractions, SatelliteGridding, Dates
+
+config = load_config("examples/tropomi_sif.toml")
+grid_spec = GridSpec(dlat=0.5f0, dlon=0.5f0)
+time_spec = TimeSpec(DateTime("2019-07-01"), DateTime("2019-07-31"), Dates.Day(16))
+
+grid_l2(config, grid_spec, time_spec;
+        backend=CUDABackend(), outfile="output.nc")
+```
+
+## How oversampling works
+
+Each satellite footprint is a quadrilateral defined by 4 corner lat/lon pairs:
+
+1. Corners are sorted into counter-clockwise (CCW) order
+2. Two opposite edges are subdivided into n equally-spaced points
+3. Corresponding points on opposite edges are connected and subdivided into n points
+4. Result: n×n sub-pixel positions filling the footprint interior
+5. Each sub-pixel is mapped to a grid cell via `floor()` and contributes weight `1/n²`
+
+**Fast path**: When all 4 corners fall in the same grid cell, the full weight goes to that cell (no sub-pixel computation).
+
+**Adaptive n**: By default, n is auto-computed from the footprint-to-grid-cell size ratio (~3 sub-pixels per grid cell width, clamped to [2, 20]). Override with `n_oversample=10` or `--nOversample 10`.
+
+**Corner ordering**: Different satellite products store corners in different orders. The package normalizes them to CCW order automatically using a 5-comparator sorting network.
+
+## Running tests
+
+```julia
+using Pkg
+Pkg.test("SatelliteGridding")
+```
+
+Tests use synthetic data only — no real satellite files needed. Currently 220 tests covering oversampling, filtering, corner sorting, KA kernels, and I/O.
+
+## Documentation
+
+Full documentation is available at **[cfranken.github.io/SatelliteGridding](https://cfranken.github.io/SatelliteGridding/dev/)**.
+
+Docs are built automatically via GitHub Actions on every push to `master`. To build locally:
+
+```bash
+julia --project=docs -e 'using Pkg; Pkg.develop(PackageSpec(path=pwd())); Pkg.instantiate()'
+julia --project=docs docs/make.jl
+```
+
+The generated HTML will be in `docs/build/`.
+
+## Legacy scripts
+
+The original standalone scripts are preserved in `legacy/` for reference. The canonical script was `gridL2_Dates.jl`. Legacy JSON configuration files are in `legacy/jsonFiles/`.

@@ -1,0 +1,14 @@
+{
+	"basic":{
+    "lat": "Geolocation/latitude",
+    "lon": "Geolocation/longitude",
+    "time": "time"
+},
+	"grid":{
+	  "LST": "SDS/LST"
+	},
+
+		"filePatternGEO": "ECOSTRESS_L1B_GEO_*_*_YYYYMMDDT*.h5",
+		"filePatternLST": "ECOSTRESS_L2_LSTE_*_*_YYYYMMDDT*.h5",
+		"folder": "/net/fluo/data3/data/RemoteSensing/ECOSTRESS/test/eco-example-data-regrid"
+}

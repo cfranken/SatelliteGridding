@@ -11,12 +11,12 @@
         "altitude": "PRODUCT/SUPPORT_DATA/INPUT_DATA/surface_altitude"
     },
     "filter_gt":{
-        "PRODUCT/qa_value": 0.3,
+        "PRODUCT/qa_value": 0.5,
         "PRODUCT/methane_mixing_ratio_bias_corrected": 1600
     },
     "filter_lt":{
         "PRODUCT/methane_mixing_ratio_bias_corrected": 2200
     },
-    "filePattern": "S5P_*_L2__CH4____YYYYMMDD*.zip",
-    "folder": "/net/fluo/data2/projects/TROPOMI_GASES/ch4/"
+    "filePattern": "S5P_*_L2__CH4____YYYYMMDD*.nc",
+    "folder": "/net/fluo/data2/projects/TROPOMI_GASES/ch4/ESA"
 }

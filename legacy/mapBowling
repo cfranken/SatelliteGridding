@@ -1,0 +1,93 @@
+from mpl_toolkits.basemap import Basemap,maskoceans
+#from mpl_toolkits.basemap import Basemap, shiftgrid,  interp
+import numpy as np
+import matplotlib
+import matplotlib.pyplot as plt
+from netCDF4 import Dataset
+from netCDF4 import netcdftime
+from netCDF4 import num2date
+matplotlib.rcParams['savefig.dpi'] = 200
+# Load SIF data
+d = Dataset("/Volumes/cfranken/code/gitHub/Gridding/gridding/tropomi_2018_evergreen.nc","r")
+dM = Dataset("/Volumes/cfranken/code/gitHub/Gridding/gridding/modis.nc","r")
+sif = d.variables["sif"][:]
+NIRv = dM.variables["NIRv"][:]
+print(sif.shape, NIRv.shape)
+dcCorr = d.variables["dcCorr"]
+lat = d.variables["lat"][:]
+lon = d.variables["lon"][:]
+nctime = d.variables["time"][:]
+t_unit = d.variables["time"].units # get unit  "days since 1950-01-01T00:00:00Z"
+print(t_unit)
+try :
+    t_cal = d.variables["time"].calendar
+except AttributeError : # Attribute doesn't exist
+    t_cal = u"gregorian" # or standard
+datevar = []
+datevar.append(num2date(nctime,units = t_unit,calendar = t_cal))
+dat = datevar[0]
+
+loni = [-105.54889,-118.98700,-119.00602,-119.19500,-119.26219,-119.73228,-145.75136,-147.50258,-122.33033,-121.95191,-87.39327,-84.46861,-81.99343,-82.21878]
+lati = [40.03066,37.06700,37.00583,37.06700,37.03337,37.10878,63.88112,65.15401,45.76243,45.82049,32.95046,31.19484,29.68927,29.73796]
+siff = sif*dcCorr
+sif_mean = np.nanmean(siff, axis=2)
+sif_max = np.nanmax(siff, axis=2)
+siff[siff<-100]=np.NaN
+
+n_growing = sif_mean*0
+for i in range(22):
+	gt = siff[:,:,i]>0.25*sif_max
+	n_growing[gt]+=1 
+
+print(sif_mean)
+NIRv_mean = np.nanmean(NIRv, axis=2)
+cmap = plt.cm.get_cmap('YlGn', 11)
+cmap2 = plt.cm.get_cmap('viridis', 11)
+# lon_0 is central longitude of projection.
+# resolution = 'c' means use crude resolution coastlines.
+#for i in range(23):
+index = 10
+f, axs = plt.subplots(1,2,figsize=(12,5.25))
+plt.sca(axs[0])
+#m = Basemap(llcrnrlon=-151,llcrnrlat=20,urcrnrlon=-62,urcrnrlat=70,projection='lcc',lat_1=32,lat_2=45,lon_0=-95)
+
+m = Basemap(projection='lcc', resolution=None,
+            width=8E6, height=8E6, 
+            lat_0=45, lon_0=-100,)
+#m.drawmapboundary(fill_color='aqua')
+#m.fillcontinents(color='coral',lake_color='aqua')
+#m.drawcoastlines()
+# draw parallels and meridians.
+#m.drawparallels(np.arange(-90.,120.,30.))
+#m.drawmeridians(np.arange(0.,360.,60.))
+#m.drawmapboundary(fill_color='aqua')
+m.bluemarble()
+
+x, y = m(*np.meshgrid(lon,lat))
+m.pcolormesh(x,y,sif_max,shading='flat',cmap=cmap, vmin=0, vmax=1, rasterized=True)
+m.plot(loni, lati, 'r+', alpha=0.5,latlon=True)
+#m.drawlsmask(land_color=None, ocean_color='w')
+plt.colorbar()
+strr = r'Max dSIF (mW/m$^2$/sr/nm)'
+plt.title(strr)
+plt.sca(axs[1])
+m2 = Basemap(projection='lcc', resolution=None,
+            width=8E6, height=8E6, 
+            lat_0=45, lon_0=-100,)
+#m2.drawmapboundary(fill_color='aqua')
+#m2.fillcontinents(color='coral',lake_color='aqua')
+#m2.drawcoastlines()
+m2.bluemarble()
+lons, lats = np.meshgrid(lon,lat)
+x, y = m2(*np.meshgrid(lon,lat))
+NIR_mask = maskoceans(lons, lats, NIRv_mean)
+m2.pcolormesh(x,y,n_growing*16,shading='flat',cmap=cmap2, vmin=60, vmax=220, rasterized=True)
+m2.plot(loni, lati, 'r+', alpha=0.5,latlon=True)
+strr = 'Growing Season Length (days)'
+plt.title(strr)
+plt.colorbar()
+plt.tight_layout()
+#f.title(str(dat[index]))
+fileName = '/Users/cfranken/SIF_Bowling.pdf'
+print(fileName)
+plt.savefig(fileName)

@@ -1,0 +1,18 @@
+filePattern = "oco2_LtCO2_YYMMDD_*.nc4"
+folder = "/net/fluo/data1/data/OCO2/B9_SIF/"
+
+[basic]
+lat = "latitude"
+lon = "longitude"
+lat_bnd = "vertex_latitude"
+lon_bnd = "vertex_longitude"
+
+[grid]
+xco2 = "xco2"
+aod = "Retrieval/aod_total"
+albedo_1 = "Retrieval/albedo_o2a"
+albedo_2 = "Retrieval/albedo_wco2"
+albedo_3 = "Retrieval/albedo_sco2"
+
+[filter]
+xco2_quality_flag = "== 0"

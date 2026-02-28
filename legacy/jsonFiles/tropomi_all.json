@@ -20,5 +20,5 @@
 	},
 	"filter_lt":{"sza": 80},
 	"filePattern": "TROPO_SIF_YYYY-MM-DD_*.nc",
-	"folder": "/net/fluo/data3/projects/TROPOMI/nc_ungridded/"
+	"folder": "/net/fluo/data3/data/RemoteSensing/TROPOMI/TROPOMI_SIF740nm/original/"
 }

@@ -1,0 +1,7 @@
+# All modes:
+# Glint only
+~/code/julia-1.0.3/bin/julia ./gridL2_Dates.jl --Dict oco2_glint.json  --startDate 2014-01-01 --stopDate 2015-01-01 --dDay 8 --dLat 0.083333333 --dLon 0.083333333 -o /net/fluo/data2/projects/julia_gridded/oco2_glint_2014.nc
+~/code/julia-1.0.3/bin/julia ./gridL2_Dates.jl --Dict oco2_glint.json  --startDate 2015-01-01 --stopDate 2016-01-01 --dDay 8 --dLat 0.083333333 --dLon 0.083333333 -o /net/fluo/data2/projects/julia_gridded/oco2_glint_2015.nc
+~/code/julia-1.0.3/bin/julia ./gridL2_Dates.jl --Dict oco2_glint.json  --startDate 2016-01-01 --stopDate 2017-01-01 --dDay 8 --dLat 0.083333333 --dLon 0.083333333 -o /net/fluo/data2/projects/julia_gridded/oco2_glint_2016.nc
+~/code/julia-1.0.3/bin/julia ./gridL2_Dates.jl --Dict oco2_glint.json  --startDate 2017-01-01 --stopDate 2018-01-01 --dDay 8 --dLat 0.083333333 --dLon 0.083333333 -o /net/fluo/data2/projects/julia_gridded/oco2_glint_2017.nc
+~/code/julia-1.0.3/bin/julia ./gridL2_Dates.jl --Dict oco2_glint.json  --startDate 2018-01-01 --stopDate 2019-01-01 --dDay 8 --dLat 0.083333333 --dLon 0.083333333 -o /net/fluo/data2/projects/julia_gridded/oco2_glint_2018.nc 

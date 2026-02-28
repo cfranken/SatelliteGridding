@@ -1,0 +1,1 @@
+~/code/julia-1.0.3/bin/julia ./gridL2_Dates.jl --Dict oco2_all.json -o testOCO2.nc --startDate 2014-09-01

@@ -6,7 +6,7 @@ using Base, Dates, Printf
 # NetCDF tools for reading and writing
 using NCDatasets
 # Basic statistics
-using Statistics
+using Statistics, Interpolations
 # File search and completion
 using Glob
 # JSON files
@@ -152,7 +152,8 @@ function getNC_var(fin, path, DD::Bool)
             end
         else
 	#@show gr[loc[end]]
-            return reshape(gr[loc[end]].var[:],prod(si))
+            return gr[loc[end]].var[:]
+            #return reshape(gr[loc[end]].var[:],prod(si))
         end
     end
 
@@ -161,7 +162,7 @@ end
 
 function getNC_attrib(fin, path, attri)
     loc = split(path ,r"/")
-    #println(loc)
+    println(loc)
     if length(loc)==1
         return fin[path].attrib[attri]
     elseif length(loc)>1
@@ -295,6 +296,7 @@ function main()
     println("Output file dimension (time/lon/lat):")
     println(cT, "/", length(lon),"/", length(lat))
     # Create output file:
+    @show ar["outFile"]
     dsOut = Dataset(ar["outFile"],"c")
     defDim(dsOut,"lon",length(lon))
     defDim(dsOut,"lat",length(lat))
@@ -323,7 +325,9 @@ function main()
     f_lt = getFilter("filter_lt",jsonDict)
 
     # Get file naming pattern (needs YYYY MM and DD in there)
-    fPattern = jsonDict["filePattern"]
+    fPatternGEO = jsonDict["filePatternGEO"]
+    fPatternLST = jsonDict["filePatternLST"]
+
     # Get main folder for files:
     folder   = jsonDict["folder"]
 
@@ -368,36 +372,62 @@ function main()
         println("Gridding time slice ", d, " (",cT,"/", nTime,")")
         ProgressMeter.next!(p1; showvalues = [(:Time, d)])
         files = String[];
+        filesLST = String[];
         for di in d:Dates.Day(1):d+dDay*ar["oversample_temporal"]-Dates.Day(1)
             #println("$(@sprintf("%04i-%02i-%02i", Dates.year(di),Dates.month(di),Dates.day(di)))")
 
-            filePattern = reduce(replace,["YYYY" => lpad(Dates.year(di),4,"0"), "MM" => lpad(Dates.month(di),2,"0"),  "DD" => lpad(Dates.day(di),2,"0")], init=fPattern)
+            filePattern = reduce(replace,["YYYY" => lpad(Dates.year(di),4,"0"), "MM" => lpad(Dates.month(di),2,"0"),  "DD" => lpad(Dates.day(di),2,"0")], init=fPatternGEO)
+            filePatternLST = reduce(replace,["YYYY" => lpad(Dates.year(di),4,"0"), "MM" => lpad(Dates.month(di),2,"0"),  "DD" => lpad(Dates.day(di),2,"0")], init=fPatternLST)
             #println(filePattern, " ", folder)
             files = [files;glob(filePattern, folder)]
+            filesLST = [filesLST;glob(filePatternLST, folder)]
         end
         fileSize = Int[];
         for f in files
             fileSize = [fileSize;stat(f).size]
         end
-        #println(files)
-
+        println(files)
+        println(filesLST)
+        @assert length(files)==length(filesLST)
         # Loop through all files
         p = Progress(length(files))
 
-        for a in files[fileSize.>0]
-            try
-                fin = Dataset(a)
+        for iFile in eachindex(files)
+            #try
+                @show files[iFile], filesLST[iFile]
+                fin = Dataset(files[iFile])
+                fin_LST = Dataset(filesLST[iFile])
                 #println("Read, ", a)
                 
                 lat_center = getNC_var(fin, d2["lat"],false)
                 lon_center = getNC_var(fin, d2["lon"],false)
-    
+    		#@show lat_center
                 bool_found = (lat_center.>latMin) .+ (lat_center.<latMax) .+ (lon_center.>lonMin) .+ (lon_center.<lonMax)
                 if any(bool_found.==4)
     
                     # Read lat/lon bounds (required, maybe can change this to simple gridding in the future with just center):
-                    lat_in_ = getNC_var(fin, d2["lat_bnd"],true)
-                    lon_in_ = getNC_var(fin, d2["lon_bnd"],true)
+                    di = size(lat_center)
+                    inter_lat = linear_interpolation((1:di[1], 1:di[2]), lat_center, extrapolation_bc = Line())
+                    inter_lon = linear_interpolation((1:di[1], 1:di[2]), lon_center, extrapolation_bc = Line())
+                    lat_in_ = zeros(eltype(lat_center),(di[1],di[2],4));
+                    lon_in_ = zeros(eltype(lat_center),(di[1],di[2],4));
+                    # Construct bounding boxes:
+                    for i in CartesianIndices(lat_center)
+                        lat_in_[i[1],i[2],1] = inter_lat(i[1]-0.5,i[2]-0.5)
+                        lat_in_[i[1],i[2],2] = inter_lat(i[1]-0.5,i[2]+0.5)
+                        lat_in_[i[1],i[2],3] = inter_lat(i[1]+0.5,i[2]+0.5)
+                        lat_in_[i[1],i[2],4] = inter_lat(i[1]+0.5,i[2]-0.5)
+                        lon_in_[i[1],i[2],1] = inter_lon(i[1]-0.5,i[2]-0.5)
+                        lon_in_[i[1],i[2],2] = inter_lon(i[1]-0.5,i[2]+0.5)
+                        lon_in_[i[1],i[2],3] = inter_lon(i[1]+0.5,i[2]+0.5)
+                        lon_in_[i[1],i[2],4] = inter_lon(i[1]+0.5,i[2]-0.5)
+                    end
+                    lat_in_ = reshape(lat_in_,(di[1]*di[2],4));
+                    lon_in_ = reshape(lon_in_,(di[1]*di[2],4));
+                    lat_center = reshape(lat_center,(di[1]*di[2]));
+                    lon_center = reshape(lon_center,(di[1]*di[2]));
+                    #lat_in_ = getNC_var(fin, d2["lat_bnd"],true)
+                    #lon_in_ = getNC_var(fin, d2["lon_bnd"],true)
                     
                     #println("Read")
                     dim = size(lat_in_)
@@ -420,7 +450,7 @@ function main()
                     bCounter = 5
                     # Look for equalities
                     for (key, value) in f_eq
-                        #println(key, " ", value)
+                       # println(key, " ", value)
                         bool_add += (getNC_var(fin, key,false).==value)
                         bCounter+=1
                     end
@@ -437,7 +467,7 @@ function main()
     
                     # If all were true, bool_add woule be bCounter!
                     idx = findall(bool_add.==bCounter)
-                    ProgressMeter.next!(p; showvalues = [(:File, a), (:N_pixels, size(idx))])
+                    ProgressMeter.next!(p; showvalues = [(:File, filesLST[iFile]), (:N_pixels, size(idx))])
                     # Read data only for non-empty indices
                     if length(idx) > 0
                         #print(size(lat_in_))
@@ -446,14 +476,14 @@ function main()
                         # Read in all entries defined in JSON file:
                         co = 1
                         
-                        # Do this onlye once:
+                        # Do this only once:
                         if fillAttrib
                             for (key, value) in dGrid
     		    	# Need to change this soon to just go over keys(attrib), not this hard-coded thing. Just want to avoid another fill_value!
                                 attribs = ["units","long_name","valid_range","description","unit","longname"]
                                 for at in attribs
                                     try
-                                        NCDict[key].attrib[at] = getNC_attrib(fin, value, at)
+                                        NCDict[key].attrib[at] = getNC_attrib(fin_LST, value, at)
                                     catch e
                                         #@show e
                                         #println(" Couldn't write attrib ", at)
@@ -465,7 +495,7 @@ function main()
     
                         for (key, value) in dGrid
                             #println(key, value)
-                            mat_in[:,co]=getNC_var(fin, value,false)
+                            mat_in[:,co]=getNC_var(fin_LST, value,false)[:]
                             co += 1
                         end
     
@@ -484,9 +514,9 @@ function main()
                 end
 
                 
-            catch
-               println("Error in file caught")
-            end
+            #catch
+            #   println("Error in file caught")
+            #end
         end
         # Filter all data, set averages, still need to change row/column order here in the future!
         dims = size(mat_data)

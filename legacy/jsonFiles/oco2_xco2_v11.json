@@ -1,0 +1,29 @@
+{
+    "basic":{
+    	"lat": "latitude",
+    	"lon": "longitude",
+    	"lat_bnd": "vertex_latitude",
+    	"lon_bnd": "vertex_longitude",
+    	"time": "time"
+},
+    "grid":{
+	"xco2": "xco2",
+	"xco2_prior":"xco2_apriori",
+	"aod": "Retrieval/aod_total",
+	"albedo_1": "Retrieval/albedo_o2a",
+	"albedo_2": "Retrieval/albedo_wco2",
+	"albedo_3": "Retrieval/albedo_sco2"
+},
+    "filter_eq":{
+	"xco2_quality_flag": 0
+},
+"filter_lt":{
+	"solar_zenith_angle": 70,
+	"Retrieval/aod_total": 0.5
+},
+"filter_gt":{
+	"xco2": 100
+},
+     "filePattern": "YYYY/oco2_LtCO2_??MMDD_*.nc4",
+      "folder": "/net/fluo/data3/data/RemoteSensing/OCO/XCO2/original/"
+}

@@ -1,0 +1,126 @@
+"""
+    load_config(config_path::String) -> DataSourceConfig
+
+Load a configuration file (TOML or JSON) and return a `DataSourceConfig`.
+
+The file must contain `[basic]` and `[grid]` sections. Filters are defined in an
+optional `[filter]` section using intuitive string expressions:
+
+# Example TOML
+```toml
+filePattern = "S5P_PAL__L2B_SIF____YYYYMMDD*.nc"
+folder = "/path/to/data/"
+
+[basic]
+lat = "PRODUCT/latitude"
+lon = "PRODUCT/longitude"
+lat_bnd = "PRODUCT/SUPPORT_DATA/GEOLOCATIONS/latitude_bounds"
+lon_bnd = "PRODUCT/SUPPORT_DATA/GEOLOCATIONS/longitude_bounds"
+
+[grid]
+sif_743 = "PRODUCT/SIF_743"
+sif_735 = "PRODUCT/SIF_735"
+
+[filter]
+"PRODUCT/SUPPORT_DATA/GEOLOCATIONS/solar_zenith_angle" = "< 80"
+"PRODUCT/qa_value" = "> 0.5"
+"PRODUCT/methane" = "1600 < x < 2200"
+"PRODUCT/mode" = "== 1"
+```
+
+The legacy JSON format with separate `filter_gt`/`filter_lt`/`filter_eq` sections
+is still supported for backward compatibility.
+"""
+function load_config(config_path::String)::DataSourceConfig
+    if endswith(config_path, ".json")
+        d = JSON.parsefile(config_path)
+    else
+        d = TOML.parsefile(config_path)
+    end
+
+    # Required sections
+    haskey(d, "basic") || error("Config missing required 'basic' section: $config_path")
+    haskey(d, "grid") || error("Config missing required 'grid' section: $config_path")
+
+    basic = Dict{String,String}(k => string(v) for (k, v) in d["basic"])
+
+    # Preserve key order for grid variables (band order matters for MODIS)
+    grid_vars = OrderedDict{String,String}()
+    for (k, v) in d["grid"]
+        grid_vars[k] = string(v)
+    end
+
+    # Parse filters
+    filters = FilterRule[]
+
+    # New unified [filter] section with string expressions
+    if haskey(d, "filter")
+        for (var, expr) in d["filter"]
+            push!(filters, _parse_filter_expr(var, expr))
+        end
+    end
+
+    # Legacy format: separate filter_gt / filter_lt / filter_eq sections
+    for (key, value) in get(d, "filter_gt", Dict())
+        push!(filters, FilterRule(string(key), :gt, Float64(value)))
+    end
+    for (key, value) in get(d, "filter_lt", Dict())
+        push!(filters, FilterRule(string(key), :lt, Float64(value)))
+    end
+    for (key, value) in get(d, "filter_eq", Dict())
+        push!(filters, FilterRule(string(key), :eq, Float64(value)))
+    end
+
+    file_pattern = get(d, "filePattern", "")
+    folder = get(d, "folder", "")
+
+    DataSourceConfig(basic, grid_vars, filters, file_pattern, folder)
+end
+
+"""
+    _parse_filter_expr(variable, expr) -> FilterRule
+
+Parse a filter expression string into a `FilterRule`.
+
+Supported formats:
+- `"< 80"` → less than
+- `"> 0.5"` → greater than
+- `"== 1"` → equality
+- `"1600 < x < 2200"` → range (between, exclusive)
+"""
+function _parse_filter_expr(variable::String, expr)::FilterRule
+    s = strip(string(expr))
+
+    # Range: "1600 < x < 2200" or "1600 <x< 2200"
+    m = match(r"^(-?[\d.eE+\-]+)\s*<\s*\w+\s*<\s*(-?[\d.eE+\-]+)$", s)
+    if m !== nothing
+        return FilterRule(variable, :between, parse(Float64, m[1]), parse(Float64, m[2]))
+    end
+
+    # Less than: "< 80"
+    m = match(r"^<\s*(-?[\d.eE+\-]+)$", s)
+    if m !== nothing
+        return FilterRule(variable, :lt, parse(Float64, m[1]))
+    end
+
+    # Greater than: "> 0.5"
+    m = match(r"^>\s*(-?[\d.eE+\-]+)$", s)
+    if m !== nothing
+        return FilterRule(variable, :gt, parse(Float64, m[1]))
+    end
+
+    # Equality: "== 1"
+    m = match(r"^==\s*(-?[\d.eE+\-]+)$", s)
+    if m !== nothing
+        return FilterRule(variable, :eq, parse(Float64, m[1]))
+    end
+
+    # Plain number (from TOML integer/float value, not a string) — treat as equality
+    m = match(r"^(-?[\d.eE+\-]+)$", s)
+    if m !== nothing
+        return FilterRule(variable, :eq, parse(Float64, m[1]))
+    end
+
+    error("Cannot parse filter expression for '$variable': \"$expr\"\n" *
+          "Expected: \"< 80\", \"> 0.5\", \"== 1\", or \"1600 < x < 2200\"")
+end

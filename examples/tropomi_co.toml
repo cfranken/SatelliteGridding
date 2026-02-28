@@ -1,0 +1,15 @@
+filePattern = "S5P_OFFL_L2__CO_____YYYYMMDD*.zip"
+folder = "/net/fluo/data2/projects/TROPOMI_GASES/co/"
+
+[basic]
+lat = "PRODUCT/latitude"
+lon = "PRODUCT/longitude"
+lat_bnd = "PRODUCT/SUPPORT_DATA/GEOLOCATIONS/latitude_bounds"
+lon_bnd = "PRODUCT/SUPPORT_DATA/GEOLOCATIONS/longitude_bounds"
+
+[grid]
+co = "PRODUCT/carbonmonoxide_total_column"
+altitude = "PRODUCT/SUPPORT_DATA/INPUT_DATA/surface_altitude"
+
+[filter]
+"PRODUCT/qa_value" = "> 0.3"

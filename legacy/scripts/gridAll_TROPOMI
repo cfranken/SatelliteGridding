@@ -1,0 +1,2 @@
+# All modes:
+~/code/julia-1.0.3/bin/julia ./gridL2_Dates.jl --Dict tropomi_all.json  --startDate 2018-01-01 --stopDate 2019-03-01 --dDay 8 --dLat 0.083333333 --dLon 0.083333333 -o /net/fluo/data2/projects/julia_gridded/tropomi_all_2018.nc 

@@ -1,0 +1,19 @@
+filePattern = "S5P_PAL__L2B_SIF____YYYYMMDD*.nc"
+folder = "/kiwi-data/Data/satellite/TROPOMI/TROPOMI_SIF_S5P-PAL/original/"
+
+[basic]
+lat = "PRODUCT/latitude"
+lon = "PRODUCT/longitude"
+lat_bnd = "PRODUCT/SUPPORT_DATA/GEOLOCATIONS/latitude_bounds"
+lon_bnd = "PRODUCT/SUPPORT_DATA/GEOLOCATIONS/longitude_bounds"
+
+[grid]
+sif_743 = "PRODUCT/SIF_743"
+sif_743_corr = "PRODUCT/SIF_Corr_743"
+sif_743_err = "PRODUCT/SIF_ERROR_743"
+sif_735 = "PRODUCT/SIF_735"
+sif_735_corr = "PRODUCT/SIF_Corr_735"
+cloud_fraction = "PRODUCT/SUPPORT_DATA/INPUT_DATA/cloud_fraction_L2"
+
+[filter]
+"PRODUCT/SUPPORT_DATA/GEOLOCATIONS/solar_zenith_angle" = "< 80"

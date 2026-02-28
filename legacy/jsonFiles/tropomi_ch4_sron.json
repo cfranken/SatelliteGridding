@@ -1,0 +1,24 @@
+{
+    "basic":{
+    "lat": "instrument/latitude_center",
+    "lon": "instrument/longitude_center",
+    "lat_bnd": "instrument/latitude_corners",
+    "lon_bnd": "instrument/longitude_corners",
+    "time": "instrument/time"
+},
+    "grid":{
+        "xch4_raw": "target_product/xch4",
+	"xch4": "target_product/xch4_corrected",
+	"xch4_prior": "target_product/xch4_apriori",
+	"aerosol_column": "side_product/aerosol_column",
+        "altitude": "meteo/surface_altitude"
+    },
+    "filter_gt":{
+        "diagnostics/qa_value": 0.6
+    },
+    "filter_lt":{
+    	"target_product/xch4_corrected": 5000.0
+    },
+    "filePattern": "s5p_l2_ch4_0446_YYYY_MM_DD_*.nc",
+    "folder": "/net/fluo/data2/projects/TROPOMI_GASES/ch4/19_446/"
+}

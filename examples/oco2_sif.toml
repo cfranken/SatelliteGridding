@@ -1,0 +1,18 @@
+filePattern = "oco2_LtSIF_YYMMDD_*.nc4"
+folder = "/kiwi-data/Data/satellite/OCO2/L2_Lite_SIF/B11012Ar/original/"
+
+[basic]
+lat = "Latitude"
+lon = "Longitude"
+lat_bnd = "Latitude_Corners"
+lon_bnd = "Longitude_Corners"
+
+[grid]
+sif_757 = "Daily_SIF_757nm"
+sif_771 = "Daily_SIF_771nm"
+sif_740 = "Daily_SIF_740nm"
+sif_740_raw = "SIF_740nm"
+sif_740_sigma = "SIF_Uncertainty_740nm"
+
+[filter]
+Quality_Flag = "== 0"

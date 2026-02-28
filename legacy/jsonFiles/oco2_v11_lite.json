@@ -1,0 +1,30 @@
+{
+	"basic":{
+    	"lat": "Geolocation/latitude",
+    	"lon": "Geolocation/longitude",
+    	"lat_bnd": "Geolocation/footprint_latitude_vertices",
+    	"lon_bnd": "Geolocation/footprint_longitude_vertices",
+		"sza": "SZA",
+    	"vza": "VZA",
+		"qa": "Quality_Flag"
+},
+	"grid":{
+		"sif_757": "Science/SIF_757nm",
+		"sif_771": "Science/SIF_771nm",
+		"sif_757_relative": "Science/SIF_Relative_757nm",
+		"sif_771_relative": "Science/SIF_Relative_771nm",
+	    "sif_757_sigma": "Science/SIF_Uncertainty_757nm",
+		"sif_771_sigma": "Science/SIF_Uncertainty_771nm",
+	    "Daily_SIF_740nm": "Daily_SIF_740nm"
+	},
+	"filter_lt":{
+		"Quality_Flag": 2,
+		"SZA": 80,
+		"Daily_SIF_740nm": 4.0
+	},
+	"filter_gt":{
+		"Daily_SIF_740nm": -4.0
+	},
+	"filePattern": "YYYY/oco2_LtSIF_??MMDD_*.nc4",
+	"folder": "/net/fluo/data3/data/RemoteSensing/OCO/SIF_v11/original/"
+}

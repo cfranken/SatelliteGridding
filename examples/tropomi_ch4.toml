@@ -1,0 +1,16 @@
+filePattern = "S5P_*_L2__CH4____YYYYMMDD*.nc"
+folder = "/net/fluo/data2/projects/TROPOMI_GASES/ch4/ESA"
+
+[basic]
+lat = "PRODUCT/latitude"
+lon = "PRODUCT/longitude"
+lat_bnd = "PRODUCT/SUPPORT_DATA/GEOLOCATIONS/latitude_bounds"
+lon_bnd = "PRODUCT/SUPPORT_DATA/GEOLOCATIONS/longitude_bounds"
+
+[grid]
+ch4 = "PRODUCT/methane_mixing_ratio_bias_corrected"
+altitude = "PRODUCT/SUPPORT_DATA/INPUT_DATA/surface_altitude"
+
+[filter]
+"PRODUCT/qa_value" = "> 0.5"
+"PRODUCT/methane_mixing_ratio_bias_corrected" = "1600 < x < 2200"
