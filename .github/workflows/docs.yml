@@ -9,12 +9,41 @@ on:
 permissions:
   contents: write
   statuses: write
+  pages: write
 
 jobs:
   docs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Configure GitHub Pages source
+        if: github.event_name == 'push'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Set Pages to deploy from gh-pages branch (PUT = update, POST = create)
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X PUT \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/pages" \
+            -d '{"build_type":"legacy","source":{"branch":"gh-pages","path":"/"}}')
+          if [ "$HTTP_CODE" = "204" ]; then
+            echo "Pages source set to gh-pages branch"
+          elif [ "$HTTP_CODE" = "404" ]; then
+            curl -s -X POST \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${{ github.repository }}/pages" \
+              -d '{"build_type":"legacy","source":{"branch":"gh-pages","path":"/"}}'
+            echo "Pages site created with gh-pages source"
+          else
+            echo "Warning: Pages API returned HTTP $HTTP_CODE (may need manual config)"
+          fi
+
       - uses: julia-actions/setup-julia@v2
         with:
           version: '1'
@@ -28,3 +57,20 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: julia --project=docs docs/make.jl
+
+      - name: Ensure .nojekyll on gh-pages
+        if: github.event_name == 'push'
+        run: |
+          git fetch origin gh-pages
+          git checkout gh-pages
+          if [ ! -f .nojekyll ]; then
+            touch .nojekyll
+            git add .nojekyll
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git commit -m "Add .nojekyll to prevent Jekyll processing"
+            git push origin gh-pages
+            echo ".nojekyll file added"
+          else
+            echo ".nojekyll already exists"
+          fi
