@@ -141,8 +141,8 @@ for CUDA setup.
 
 ## Next Steps
 
-- [Tutorial](@ref): Step-by-step walkthrough with TROPOMI SIF data
-- [Configuration](@ref): TOML config reference and filter expressions
+- [Tutorial](@ref "Tutorial: Gridding TROPOMI SIF Data"): Step-by-step walkthrough with TROPOMI SIF data
+- [Configuration](@ref "Configuration Reference"): TOML config reference and filter expressions
 - [Algorithm](@ref): How footprint oversampling works under the hood
 - [CLI Reference](@ref): All command-line flags
 - [GPU Acceleration](@ref): CUDA setup and performance guide
