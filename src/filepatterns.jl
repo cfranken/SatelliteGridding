@@ -3,7 +3,7 @@
 
 Find input files matching the given pattern for a specific date.
 
-Resolves `YYYY`, `MM`, `DD`, and `DOY` placeholders in both `pattern` and `folder`,
+Resolves `YYYY`, `YY`, `MM`, `DD`, and `DOY` placeholders in both `pattern` and `folder`,
 then globs for matching files. Returns only non-empty files.
 """
 function find_files(pattern::String, folder::String, date::DateTime)::Vector{String}
@@ -30,6 +30,7 @@ end
 function _resolve_date_placeholders(s::String, date::DateTime)::String
     reduce(replace, [
         "YYYY" => lpad(Dates.year(date), 4, "0"),
+        "YY"   => lpad(Dates.year(date) % 100, 2, "0"),
         "MM"   => lpad(Dates.month(date), 2, "0"),
         "DD"   => lpad(Dates.day(date), 2, "0"),
         "DOY"  => lpad(Dates.dayofyear(date), 3, "0"),

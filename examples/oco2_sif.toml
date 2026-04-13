@@ -8,11 +8,12 @@ lat_bnd = "Latitude_Corners"
 lon_bnd = "Longitude_Corners"
 
 [grid]
-sif_757 = "Daily_SIF_757nm"
-sif_771 = "Daily_SIF_771nm"
-sif_740 = "Daily_SIF_740nm"
-sif_740_raw = "SIF_740nm"
-sif_740_sigma = "SIF_Uncertainty_740nm"
+daily_sif_757 = "Daily_SIF_757nm"
+daily_sif_771 = "Daily_SIF_771nm"
+sif_757 = "Science/SIF_757nm"
+sif_771 = "Science/SIF_771nm"
+sif_unadj_757 = "Science/SIF_Unadjusted_757nm"
+sif_unadj_771 = "Science/SIF_Unadjusted_771nm"
 
 [filter]
 Quality_Flag = "== 0"
