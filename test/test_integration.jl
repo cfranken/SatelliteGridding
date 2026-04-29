@@ -72,7 +72,7 @@
         """
         write(config_file, config_toml)
 
-        # --- Run grid_l2 ---
+        # --- Run through dispatch API ---
         output_file = joinpath(test_dir, "output.nc")
         config = load_config(config_file)
         grid_spec = GridSpec(lat_min=0.0f0, lat_max=10.0f0,
@@ -81,8 +81,8 @@
         time_spec = TimeSpec(DateTime("2020-01-01"), DateTime("2020-01-01"),
                              Dates.Day(1); oversample_temporal=1.0f0)
 
-        grid_l2(config, grid_spec, time_spec;
-                n_oversample=10, compute_std=true, outfile=output_file)
+        grid(config, grid_spec, time_spec, SubpixelGridding(n_oversample=10);
+             compute_std=true, outfile=output_file)
 
         # --- Verify output ---
         ds_out = Dataset(output_file)
@@ -124,6 +124,122 @@
         close(ds_out)
 
         # Cleanup
+        rm(test_dir; recursive=true)
+    end
+
+    @testset "Synthetic center-coordinate file → grid_center pipeline" begin
+        test_dir = mktempdir()
+        input_file = joinpath(test_dir, "CENTER_2020-01-01.nc")
+
+        ds = Dataset(input_file, "c")
+        defDim(ds, "y", 2)
+        defDim(ds, "x", 2)
+        v_lat = defVar(ds, "lat", Float32, ("y", "x"))
+        v_lon = defVar(ds, "lon", Float32, ("y", "x"))
+        v_band = defVar(ds, "band", Float32, ("y", "x"))
+
+        v_lat[:, :] = Float32[0.5 0.5; 2.5 2.5]
+        v_lon[:, :] = Float32[0.5 2.5; 0.5 2.5]
+        v_band[:, :] = Float32[10 20; 30 40]
+        close(ds)
+
+        config_file = joinpath(test_dir, "center_config.toml")
+        config_toml = """
+        filePattern = "CENTER_YYYY-MM-DD.nc"
+        folder = "$(replace(test_dir, "\\" => "/"))/"
+
+        [basic]
+        lat = "lat"
+        lon = "lon"
+
+        [center]
+        min_count = 1
+
+        [grid]
+        band = "band"
+        """
+        write(config_file, config_toml)
+
+        output_file = joinpath(test_dir, "center_output.nc")
+        config = load_config(config_file)
+        grid_spec = GridSpec(lat_min=0.0f0, lat_max=4.0f0,
+                             lon_min=0.0f0, lon_max=4.0f0,
+                             dlat=2.0f0, dlon=2.0f0)
+        time_spec = TimeSpec(DateTime("2020-01-01"), DateTime("2020-01-01"),
+                             Dates.Day(1))
+
+        grid(config, grid_spec, time_spec, CenterPointGridding(); outfile=output_file)
+
+        ds_out = Dataset(output_file)
+        weights = ds_out["n"][1, :, :]
+        band = ds_out["band"][1, :, :]
+
+        @test weights ≈ Float32[1 1; 1 1]
+        @test band[1, 1] ≈ 10.0f0
+        @test band[2, 1] ≈ 20.0f0
+        @test band[1, 2] ≈ 30.0f0
+        @test band[2, 2] ≈ 40.0f0
+
+        close(ds_out)
+        rm(test_dir; recursive=true)
+    end
+
+    @testset "Generated MODIS geolocation cache → grid_center pipeline" begin
+        test_dir = mktempdir()
+        input_file = joinpath(test_dir, "MCD43A4.A2020001.h18v09.test.nc")
+
+        lat_ul, lon_ul = modis_sinusoidal_latlon(8, 4, 1, 1)
+        @test lat_ul ≈ 49.997917f0 atol=1f-5
+        @test lon_ul ≈ -155.5624f0 atol=1f-4
+
+        ds = Dataset(input_file, "c")
+        defDim(ds, "y", 2)
+        defDim(ds, "x", 2)
+        v_band = defVar(ds, "Nadir_Reflectance_Band1", Float32, ("y", "x"))
+        v_band[:, :] = Float32[10 20; 30 40]
+        close(ds)
+
+        config_file = joinpath(test_dir, "modis_center_config.toml")
+        config_toml = """
+        filePattern = "MCD43A4.AYYYYDOY.*.nc"
+        folder = "$(replace(test_dir, "\\" => "/"))/"
+
+        [center]
+        min_count = 1
+        modis_pixels = 2
+
+        [grid]
+        band = "Nadir_Reflectance_Band1"
+        """
+        write(config_file, config_toml)
+
+        output_file = joinpath(test_dir, "modis_center_output.nc")
+        geo_cache = joinpath(test_dir, "geo_cache")
+        config = load_config(config_file)
+        grid_spec = GridSpec(lat_min=-10.0f0, lat_max=0.0f0,
+                             lon_min=0.0f0, lon_max=10.0f0,
+                             dlat=5.0f0, dlon=5.0f0)
+        time_spec = TimeSpec(DateTime("2020-01-01"), DateTime("2020-01-01"),
+                             Dates.Day(1))
+
+        grid(config, grid_spec, time_spec, CenterPointGridding();
+             geo_cache=geo_cache,
+             geo_provider=:modis,
+             outfile=output_file)
+
+        @test isfile(modis_tile_cache_path(geo_cache, 18, 9; pixels=2))
+
+        ds_out = Dataset(output_file)
+        weights = ds_out["n"][1, :, :]
+        band = ds_out["band"][1, :, :]
+
+        @test weights ≈ Float32[1 1; 1 1]
+        @test band[1, 1] ≈ 30.0f0
+        @test band[2, 1] ≈ 40.0f0
+        @test band[1, 2] ≈ 10.0f0
+        @test band[2, 2] ≈ 20.0f0
+
+        close(ds_out)
         rm(test_dir; recursive=true)
     end
 

@@ -3,8 +3,12 @@
 
 Load a configuration file (TOML or JSON) and return a `DataSourceConfig`.
 
-The file must contain `[basic]` and `[grid]` sections. Filters are defined in an
-optional `[filter]` section using intuitive string expressions:
+The file must contain a `[grid]` section plus `filePattern` and `folder`.
+Footprint-aware L2 gridding also requires `[basic]` entries for `lat`, `lon`,
+`lat_bnd`, and `lon_bnd`. Center-coordinate gridding can use `[basic]` `lat`
+and `lon`, a geolocation lookup table, or generated MODIS sinusoidal geolocation.
+Filters are defined in an optional `[filter]` section using intuitive string
+expressions:
 
 # Example TOML
 ```toml
@@ -38,11 +42,14 @@ function load_config(config_path::String)::DataSourceConfig
         d = TOML.parsefile(config_path)
     end
 
-    # Required sections
-    haskey(d, "basic") || error("Config missing required 'basic' section: $config_path")
+    # Required sections. Center-coordinate gridding can derive geolocation from
+    # a separate lookup table, so `[basic]` is optional there.
     haskey(d, "grid") || error("Config missing required 'grid' section: $config_path")
 
-    basic = Dict{String,String}(k => string(v) for (k, v) in d["basic"])
+    basic = Dict{String,String}()
+    if haskey(d, "basic")
+        basic = Dict{String,String}(k => string(v) for (k, v) in d["basic"])
+    end
 
     # Preserve key order for grid variables (band order matters for MODIS)
     grid_vars = OrderedDict{String,String}()
@@ -71,10 +78,36 @@ function load_config(config_path::String)::DataSourceConfig
         push!(filters, FilterRule(string(key), :eq, Float64(value)))
     end
 
-    file_pattern = get(d, "filePattern", "")
-    folder = get(d, "folder", "")
+    file_pattern = string(get(d, "filePattern", ""))
+    folder = string(get(d, "folder", ""))
+    !isempty(file_pattern) || error("Config missing required 'filePattern': $config_path")
+    !isempty(folder) || error("Config missing required 'folder': $config_path")
 
-    DataSourceConfig(basic, grid_vars, filters, file_pattern, folder)
+    options = Dict{String,Any}()
+    for section in ("options", "center", "modis")
+        if haskey(d, section)
+            for (k, v) in d[section]
+                options[string(k)] = v
+            end
+        end
+    end
+    _warn_unknown_options(options)
+
+    DataSourceConfig(basic, grid_vars, filters, file_pattern, folder, options)
+end
+
+function _warn_unknown_options(options::Dict{String,Any})
+    known = Set([
+        "scale_factor", "add_offset", "fill_value", "valid_min", "valid_max",
+        "transpose_data", "min_count", "min_nir_reflectance", "modis_pixels",
+        "vegetation_red", "vegetation_nir", "vegetation_blue", "vegetation_swir",
+    ])
+    for key in keys(options)
+        if !(key in known)
+            @warn "Unknown config option; it will be ignored unless custom code reads it" option=key
+        end
+    end
+    nothing
 end
 
 """

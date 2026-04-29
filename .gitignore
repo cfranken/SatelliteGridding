@@ -9,6 +9,8 @@ Manifest.toml
 *.nc4
 *.log
 nohup.out
+docs/build/
+docs/src/generated/
 
 # macOS
 .DS_Store

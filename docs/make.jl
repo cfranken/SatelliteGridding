@@ -31,7 +31,9 @@ makedocs(
         canonical  = "https://cfranken.github.io/SatelliteGridding/",
     ),
     checkdocs = :exports,
-    warnonly  = true,
+    warnonly  = get(ENV, "DOCUMENTER_STRICT", "false") != "true",
 )
 
-deploydocs(repo = "github.com/cfranken/SatelliteGridding.git", devbranch = "master")
+if get(ENV, "CI", nothing) == "true"
+    deploydocs(repo = "github.com/cfranken/SatelliteGridding.git", devbranch = "master")
+end

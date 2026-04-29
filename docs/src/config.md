@@ -48,7 +48,7 @@ filePattern = "oco2_LtCO2_YYMMDD_*.nc4"
 folder = "/data/OCO2/B9_SIF/"
 ```
 
-## `[basic]` Section (Required)
+## `[basic]` Section
 
 Maps internal coordinate keys to NetCDF variable paths.
 
@@ -59,7 +59,10 @@ Maps internal coordinate keys to NetCDF variable paths.
 | `lat_bnd` | Corner latitude bounds (N×4 or 4×N array) |
 | `lon_bnd` | Corner longitude bounds (N×4 or 4×N array) |
 
-For center-coordinate gridding (`grid_center`), only `lat` and `lon` are needed.
+For footprint-aware L2 gridding (`grid_l2`), all four keys are required. For
+center-coordinate gridding (`grid_center`), only `lat` and `lon` are needed. For
+MODIS sinusoidal tiles, `[basic]` can be omitted and geolocation can be generated
+from the tile ID in the filename.
 
 NetCDF group paths use `/` separators (e.g., `"PRODUCT/SUPPORT_DATA/GEOLOCATIONS/latitude_bounds"`).
 
@@ -74,8 +77,24 @@ sif_743 = "PRODUCT/SIF_743"           # Output name = "sif_743"
 cloud_fraction = "PRODUCT/SUPPORT_DATA/INPUT_DATA/cloud_fraction_L2"
 ```
 
-Variables are gridded in the order they appear. For MODIS data, band order matters
-for vegetation index computation.
+Variables are gridded in the order they appear. For MODIS vegetation indices,
+use explicit band-role options in `[center]` so the result does not depend on
+implicit column order.
+
+## `[center]` Section (Optional)
+
+Center-coordinate options are used by `grid_center`:
+
+| Key | Description |
+|:----|:------------|
+| `scale_factor` | Multiplicative scale applied to raw values |
+| `add_offset` | Offset added after scaling |
+| `fill_value` | Raw value to reject |
+| `valid_min` / `valid_max` | Raw valid range |
+| `min_count` | Minimum observations required before writing a grid-cell value |
+| `min_nir_reflectance` | Optional low-NIR filter after scaling |
+| `modis_pixels` | MODIS pixels per tile edge; `2400` for 500 m MCD43A4 |
+| `vegetation_red` / `vegetation_nir` / `vegetation_blue` / `vegetation_swir` | `[grid]` keys used for EVI, NDVI, NIRv, and NDWI |
 
 ## `[filter]` Section (Optional)
 
@@ -168,6 +187,35 @@ methane = "PRODUCT/methane_mixing_ratio_bias_corrected"
 [filter]
 "PRODUCT/qa_value" = "> 0.5"
 "PRODUCT/methane_mixing_ratio_bias_corrected" = "1600 < x < 2200"
+```
+
+### MODIS MCD43A4
+
+```toml
+filePattern = "MCD43A4.AYYYYDOY.*.hdf"
+folder = "/path/to/MODIS/MCD43A4/YYYY/DOY/"
+
+[center]
+scale_factor = 0.0001
+fill_value = 32767
+valid_min = 0
+valid_max = 32766
+min_count = 5
+min_nir_reflectance = 0.03
+modis_pixels = 2400
+vegetation_red = "refl_band1"
+vegetation_nir = "refl_band2"
+vegetation_blue = "refl_band3"
+vegetation_swir = "refl_band5"
+
+[grid]
+refl_band1 = "Nadir_Reflectance_Band1"
+refl_band2 = "Nadir_Reflectance_Band2"
+refl_band3 = "Nadir_Reflectance_Band3"
+refl_band4 = "Nadir_Reflectance_Band4"
+refl_band5 = "Nadir_Reflectance_Band5"
+refl_band6 = "Nadir_Reflectance_Band6"
+refl_band7 = "Nadir_Reflectance_Band7"
 ```
 
 ## Legacy JSON Format

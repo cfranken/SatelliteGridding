@@ -126,6 +126,14 @@ julia --project=. bin/grid.jl l2 \
     --config SatelliteGridding/examples/tropomi_no2.toml \
     --backend cpu --dLat 0.25 --dLon 0.25 \
     -o tropomi_no2.nc
+
+# MODIS MCD43A4 with generated per-tile sinusoidal geolocation
+julia --project=. bin/grid.jl center \
+    --config SatelliteGridding/examples/modis_reflectance.toml \
+    --geoProvider modis --dLat 0.05 --dLon 0.05 \
+    --startDate 2019-01-01 --stopDate 2019-12-31 \
+    --vegIndices \
+    -o modis_2019.nc
 ```
 
 See the [CLI Reference](@ref) for all options and the [GPU Acceleration](@ref) page

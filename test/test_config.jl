@@ -103,6 +103,29 @@
         rm(tmpfile)
     end
 
+    @testset "load_config — center config without basic section" begin
+        toml_content = """
+        filePattern = "*.hdf"
+        folder = "/data/"
+
+        [center]
+        scale_factor = 0.0001
+
+        [grid]
+        var1 = "Nadir_Reflectance_Band1"
+        """
+        tmpfile = tempname() * ".toml"
+        write(tmpfile, toml_content)
+
+        config = load_config(tmpfile)
+
+        @test isempty(config.basic)
+        @test config.options["scale_factor"] == 0.0001
+        @test config.grid_vars["var1"] == "Nadir_Reflectance_Band1"
+
+        rm(tmpfile)
+    end
+
     @testset "load_config — missing required section" begin
         toml_content = """
         [basic]

@@ -38,6 +38,7 @@ julia --project=. bin/grid.jl l2 [options]
 | `--nOversample` | Int | 0 (auto) | Sub-pixel factor (0 = auto-compute) |
 | `--compSTD` | Flag | false | Compute standard deviation |
 | `--backend` | String | `sequential` | Compute backend: `sequential`, `cpu`, or `cuda` |
+| `--keepGoing` | Flag | false | Continue after per-file processing errors |
 
 #### Examples
 
@@ -99,8 +100,11 @@ julia --project=. bin/grid.jl center [options]
 | `--stopDate` | String | `2018-12-31` | Stop date (YYYY-MM-DD) |
 | `--dDays` | Int | 1 | Time step in days (or months with `--monthly`) |
 | `--monthly` | Flag | false | Use months instead of days for time step |
-| `--geoTable` | String | *(none)* | Path to geolocation lookup table (NetCDF) |
+| `--geoProvider` | String | `auto` | Center geolocation provider: `auto`, `variables`, `lut`, or `modis` |
+| `--geoTable` | String | *(none)* | Path to legacy monolithic geolocation lookup table (NetCDF) |
+| `--geoCache` | String | user cache | Directory for generated per-tile MODIS sinusoidal geolocation |
 | `--vegIndices` | Flag | false | Compute vegetation indices (EVI, NDVI, NIRv, NDWI) |
+| `--keepGoing` | Flag | false | Continue after per-file processing errors |
 
 #### Example
 
@@ -109,8 +113,18 @@ julia --project=. bin/grid.jl center \
     --config examples/modis_reflectance.toml \
     --dLat 0.05 --dLon 0.05 \
     --startDate 2019-01-01 --stopDate 2019-12-31 \
+    --geoProvider modis \
     --vegIndices \
     -o modis_2019.nc
+```
+
+MODIS geolocation tiles are generated on demand into the user cache. They can
+also be generated ahead of time:
+
+```bash
+julia --project=. bin/generate_modis_geolocation.jl \
+    --tiles h08v04,h09v04 \
+    --cacheDir ~/.cache/SatelliteGridding/modis/sinusoidal_2400px_v1
 ```
 
 ## Backends

@@ -35,7 +35,7 @@ using Dates
 # "PRODUCT/SUPPORT_DATA/GEOLOCATIONS/solar_zenith_angle" = "< 80"
 # ```
 
-config = load_config("examples/tropomi_sif.toml")
+config = load_config(joinpath(pkgdir(SatelliteGridding), "examples", "tropomi_sif.toml"))
 
 # The `config` object contains:
 # - `basic`: Coordinate variable paths (lat, lon, and corner bounds)
@@ -137,6 +137,7 @@ time_spec = TimeSpec(
 # time_spec = TimeSpec(DateTime("2019-01-01"), DateTime("2019-12-31"),
 #                      Dates.Day(1))
 # grid_center(config, grid_spec, time_spec;
+#             geo_provider=:modis,
 #             veg_indices=true,
 #             outfile="modis_2019.nc")
 # ```

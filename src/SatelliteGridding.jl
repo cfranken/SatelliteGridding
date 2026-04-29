@@ -41,28 +41,44 @@ using ArgParse
 using ProgressMeter
 using KernelAbstractions
 using Atomix: @atomic
+using Libdl
 
 include("types.jl")
 include("config.jl")
 include("filepatterns.jl")
+include("system_netcdf.jl")
 include("ncio.jl")
+include("geolocation.jl")
 include("filters.jl")
 include("oversampling.jl")
+include("geometry.jl")
 include("averaging.jl")
 include("vegetation.jl")
 include("gridder.jl")
+include("methods.jl")
 include("cli.jl")
 
 export GridSpec, DataSourceConfig, TimeSpec, FilterRule
+export AbstractGriddingMethod, SubpixelGridding, CenterPointGridding,
+       ExactIntersectionGridding
 export load_config, find_files
-export read_nc_variable, read_nc_attribute, create_output_dataset
+export read_nc_variable, read_nc_attribute, read_variable_from_file, read_array_from_file,
+       create_output_dataset
+export read_system_netcdf_variable
+export AbstractCenterGeolocation, BasicVariableGeolocation,
+       ModisMonolithicLUTGeolocation, ModisSinusoidalGeolocation
+export default_cache_dir, default_modis_cache_dir, parse_modis_tile,
+       modis_sinusoidal_latlon, generate_modis_tile_geolocation,
+       modis_tile_cache_path, write_modis_tile_geolocation,
+       read_modis_tile_geolocation, load_or_generate_modis_tile_geolocation
 export apply_filters
 export compute_subpixels!, floor_indices!, compute_n_oversample
+export polygon_area, exact_footprint_weights, footprint_weights
 export sort_corners_ccw, sort_corners_ccw!, sort_corners_ccw_ka!
 export compute_footprint_indices_ka!, scatter_accumulate!, scatter_accumulate_ka!
 export accumulate_footprint!, accumulate_batch!, accumulate_center!
 export finalize_mean!
-export grid_l2, grid_center
+export grid, grid_l2, grid_center
 export compute_evi, compute_ndvi, compute_nirv, compute_ndwi
 export parse_l2_args, parse_center_args, args_to_grid_spec, args_to_time_spec
 

@@ -16,6 +16,10 @@ If you don't have Julia installed:
 2. Follow the platform-specific install instructions
 3. Verify: `julia --version`
 
+MODIS HDF4/HDF-EOS2 files may require a system `libnetcdf` built with HDF4
+support. The package first tries normal `NCDatasets.jl` reads and then falls
+back to the system NetCDF C library for flat MODIS variables.
+
 ## Installation
 
 From the Julia REPL (`julia` or press `]` for Pkg mode):
@@ -82,7 +86,9 @@ close(ds)
 
 ### Center-coordinate gridding (MODIS)
 
-For instruments without footprint bounds, use `grid_center`:
+For instruments without footprint bounds, use `grid_center`. MODIS sinusoidal
+tile geolocation can be generated and cached per tile, so a large global lat/lon
+lookup table is not required:
 
 ```julia
 config = load_config("examples/modis_reflectance.toml")
@@ -90,7 +96,26 @@ grid_spec = GridSpec(dlat=0.05f0, dlon=0.05f0)
 time_spec = TimeSpec(DateTime("2019-01-01"), DateTime("2019-12-31"), Dates.Day(1))
 
 grid_center(config, grid_spec, time_spec;
+            geo_provider=:modis,
             veg_indices=true, outfile="modis_2019.nc")
+```
+
+Experienced users can also use the dispatch-based library entry point:
+
+```julia
+grid(config, grid_spec, time_spec, SubpixelGridding(n_oversample=20);
+     outfile="l2_output.nc")
+
+grid(config, grid_spec, time_spec, CenterPointGridding();
+     geo_provider=:modis, outfile="modis_output.nc")
+```
+
+To pre-generate one or more MODIS geolocation tiles:
+
+```bash
+julia --project=. bin/generate_modis_geolocation.jl \
+    --tiles h08v04,h09v04 \
+    --cacheDir ~/.cache/SatelliteGridding/modis/sinusoidal_2400px_v1
 ```
 
 ## Quick Start — Command Line
@@ -122,7 +147,7 @@ julia --project=. bin/grid.jl l2 \
 # MODIS reflectance — center-coordinate mode with vegetation indices
 julia --project=. bin/grid.jl center \
     --config examples/modis_reflectance.toml \
-    --dLat 0.05 --dLon 0.05 --vegIndices \
+    --dLat 0.05 --dLon 0.05 --geoProvider modis --vegIndices \
     --startDate 2019-01-01 --stopDate 2019-12-31 \
     -o modis_2019.nc
 ```
@@ -172,9 +197,10 @@ sif_735 = "PRODUCT/SIF_735"
 
 | Section | Required | Description |
 |:--------|:---------|:------------|
-| `[basic]` | yes | Variable paths for `lat`, `lon`, `lat_bnd`, `lon_bnd` |
+| `[basic]` | required for `l2`; optional for `center` | Variable paths for `lat`, `lon`, `lat_bnd`, `lon_bnd`. Center mode only needs `lat`/`lon`, and MODIS can use generated sinusoidal geolocation instead |
 | `[grid]` | yes | Output name → input variable path. All listed variables are gridded |
 | `[filter]` | no | Quality filters using string expressions (see below) |
+| `[center]` | no | Scale/fill options, MODIS pixel count, and explicit vegetation-index band roles for center gridding |
 | `filePattern` | yes | Glob pattern with `YYYY`/`MM`/`DD`/`DOY`/`YYMMDD` placeholders |
 | `folder` | yes | Root directory for input files (also supports date placeholders) |
 

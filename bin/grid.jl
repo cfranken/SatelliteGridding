@@ -5,7 +5,7 @@
 # Usage:
 #   julia --project=. bin/grid.jl l2 --config examples/tropomi_sif.toml --dLat 0.5 --dLon 0.5 -o output.nc
 #   julia --project=. bin/grid.jl l2 --config examples/tropomi_sif.toml --backend cpu -o output.nc
-#   julia --project=. bin/grid.jl center --config examples/modis_reflectance.toml -o modis_out.nc
+#   julia --project=. bin/grid.jl center --config examples/modis_reflectance.toml --geoProvider modis -o modis_out.nc
 #
 # For help:
 #   julia --project=. bin/grid.jl l2 --help
@@ -65,11 +65,11 @@ function main()
         n_over = args["nOversample"] > 0 ? args["nOversample"] : nothing
         backend = resolve_backend(args["backend"])
 
-        grid_l2(config, grid_spec, time_spec;
-                n_oversample=n_over,
-                compute_std=args["compSTD"],
-                outfile=args["outFile"],
-                backend=backend)
+        grid(config, grid_spec, time_spec, SubpixelGridding(n_over);
+             compute_std=args["compSTD"],
+             outfile=args["outFile"],
+             backend=backend,
+             keep_going=args["keepGoing"])
 
     elseif command == "center"
         args = parse_center_args(ARGS)
@@ -77,11 +77,15 @@ function main()
         grid_spec = args_to_grid_spec(args)
         time_spec = args_to_time_spec(args)
         geo = isempty(args["geoTable"]) ? nothing : args["geoTable"]
+        geo_cache = isempty(args["geoCache"]) ? nothing : args["geoCache"]
 
-        grid_center(config, grid_spec, time_spec;
-                    geo_table=geo,
-                    veg_indices=args["vegIndices"],
-                    outfile=args["outFile"])
+        grid(config, grid_spec, time_spec, CenterPointGridding();
+             geo_table=geo,
+             geo_cache=geo_cache,
+             geo_provider=args["geoProvider"],
+             veg_indices=args["vegIndices"],
+             outfile=args["outFile"],
+             keep_going=args["keepGoing"])
     else
         error("Unknown command: $command. Use 'l2' or 'center'.")
     end

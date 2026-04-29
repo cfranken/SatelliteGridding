@@ -39,6 +39,7 @@ Configuration loaded from a TOML/JSON file that defines a satellite data source.
 - `filters`: Quality filter rules parsed from `[filter]` section
 - `file_pattern`: Glob pattern with YYYY/MM/DD/DOY placeholders for finding input files
 - `folder`: Root folder for input data (may also contain YYYY/MM/DD placeholders)
+- `options`: Optional processing settings from `[options]`, `[center]`, or `[modis]`
 """
 struct DataSourceConfig
     basic::Dict{String,String}
@@ -46,7 +47,12 @@ struct DataSourceConfig
     filters::Vector{FilterRule}
     file_pattern::String
     folder::String
+    options::Dict{String,Any}
 end
+
+DataSourceConfig(basic::Dict{String,String}, grid_vars::OrderedDict{String,String},
+                 filters::Vector{FilterRule}, file_pattern::String, folder::String) =
+    DataSourceConfig(basic, grid_vars, filters, file_pattern, folder, Dict{String,Any}())
 
 """
     GridSpec{T<:AbstractFloat}
@@ -111,3 +117,44 @@ function TimeSpec(start_date::DateTime, stop_date::DateTime,
                   oversample_temporal::Float32=1.0f0)
     TimeSpec(start_date, stop_date, time_step, oversample_temporal)
 end
+
+"""
+    AbstractGriddingMethod
+
+Dispatch marker for choosing how observations are mapped onto the output grid.
+Use [`SubpixelGridding`](@ref) for footprint-aware oversampling,
+[`CenterPointGridding`](@ref) for fast center-coordinate binning, and
+[`ExactIntersectionGridding`](@ref) as the future exact geometry hook.
+"""
+abstract type AbstractGriddingMethod end
+
+"""
+    SubpixelGridding(; n_oversample=nothing)
+
+Footprint-aware gridding by sampling an `n × n` grid of subpoints inside each
+quadrilateral footprint. `nothing` keeps the existing automatic oversampling
+heuristic.
+"""
+struct SubpixelGridding <: AbstractGriddingMethod
+    n_oversample::Union{Nothing,Int}
+end
+
+SubpixelGridding(; n_oversample::Union{Nothing,Int}=nothing) =
+    SubpixelGridding(n_oversample)
+
+"""
+    CenterPointGridding()
+
+Fast center-coordinate gridding. Each observation or pixel contributes to the
+single output cell containing its center coordinate.
+"""
+struct CenterPointGridding <: AbstractGriddingMethod end
+
+"""
+    ExactIntersectionGridding()
+
+Reserved method for exact footprint/grid-cell intersection gridding. This is not
+implemented yet, but the type keeps the public API open for an exact geometry
+backend without changing callers.
+"""
+struct ExactIntersectionGridding <: AbstractGriddingMethod end

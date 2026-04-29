@@ -9,7 +9,7 @@ function parse_l2_args(args=ARGS)
 
     @add_arg_table! s begin
         "--config", "-c"
-            help = "JSON configuration file defining the data source"
+            help = "TOML or JSON configuration file defining the data source"
             arg_type = String
             required = true
         "--outFile", "-o"
@@ -70,6 +70,9 @@ function parse_l2_args(args=ARGS)
             help = "Compute backend: 'cpu' for KA CPU kernels, 'cuda' for GPU (default: sequential)"
             arg_type = String
             default = "sequential"
+        "--keepGoing"
+            help = "Continue after per-file processing errors and report failures at the end"
+            action = :store_true
     end
     parse_args(args, s)
 end
@@ -84,7 +87,7 @@ function parse_center_args(args=ARGS)
 
     @add_arg_table! s begin
         "--config", "-c"
-            help = "JSON configuration file"
+            help = "TOML or JSON configuration file"
             arg_type = String
             required = true
         "--outFile", "-o"
@@ -131,11 +134,22 @@ function parse_center_args(args=ARGS)
             arg_type = Int64
             default = 1
         "--geoTable"
-            help = "Path to geolocation lookup table (NetCDF)"
+            help = "Path to legacy monolithic geolocation lookup table (NetCDF)"
             arg_type = String
             default = ""
+        "--geoCache"
+            help = "Directory for generated per-tile MODIS sinusoidal geolocation cache"
+            arg_type = String
+            default = ""
+        "--geoProvider"
+            help = "Center geolocation provider: auto, variables, lut, or modis"
+            arg_type = String
+            default = "auto"
         "--vegIndices"
             help = "Compute vegetation indices (EVI, NDVI, NIRv, NDWI)"
+            action = :store_true
+        "--keepGoing"
+            help = "Continue after per-file processing errors and report failures at the end"
             action = :store_true
     end
     parse_args(args, s)

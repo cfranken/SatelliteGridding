@@ -47,6 +47,72 @@ function _read_flat_variable(dataset, varname::String, bounds::Bool)
 end
 
 """
+    read_variable_from_file(path, variable; bounds=false)
+
+Read a variable from a NetCDF-like file. Falls back to the system `libnetcdf`
+for flat HDF4/HDF-EOS variables when the Julia NetCDF build cannot open them.
+"""
+function read_variable_from_file(path::String, variable::String; bounds::Bool=false)
+    try
+        ds = Dataset(path)
+        try
+            return read_nc_variable(ds, variable; bounds=bounds)
+        finally
+            close(ds)
+        end
+    catch e
+        if bounds
+            rethrow(e)
+        end
+        try
+            return read_system_netcdf_variable(path, variable)
+        catch fallback_error
+            error("Could not read variable '$variable' from '$path' with NCDatasets ($(sprint(showerror, e))) or system libnetcdf fallback ($(sprint(showerror, fallback_error)))")
+        end
+    end
+end
+
+"""
+    read_array_from_file(path, variable)
+
+Read a variable while preserving its native dimensionality.
+"""
+function read_array_from_file(path::String, variable::String)
+    try
+        ds = Dataset(path)
+        try
+            return _read_nc_array(ds, variable)
+        finally
+            close(ds)
+        end
+    catch e
+        try
+            return read_system_netcdf_variable(path, variable)
+        catch fallback_error
+            error("Could not read variable '$variable' from '$path' with NCDatasets ($(sprint(showerror, e))) or system libnetcdf fallback ($(sprint(showerror, fallback_error)))")
+        end
+    end
+end
+
+function _read_nc_array(dataset, path::String)
+    loc = split(path, "/")
+    if length(loc) == 1
+        return _read_full_array(dataset[path])
+    end
+
+    gr = dataset.group[loc[1]]
+    for i in 2:length(loc)-1
+        gr = gr.group[loc[i]]
+    end
+    _read_full_array(gr[loc[end]])
+end
+
+function _read_full_array(var)
+    selectors = ntuple(_ -> Colon(), ndims(var))
+    var[selectors...]
+end
+
+"""
     read_nc_attribute(dataset, path::String, attr::String)
 
 Read an attribute from a possibly group-nested variable.

@@ -1,5 +1,18 @@
 filePattern = "MCD43A4.AYYYYDOY.*.hdf"
-folder = "/net/fluo/data3/projects/MODIS/MODV6_Cmp_B/MOTA/MCD43A4.006/YYYY.MM.DD/"
+folder = "/path/to/MODIS/MCD43A4/YYYY/DOY/"
+
+[center]
+scale_factor = 0.0001
+fill_value = 32767
+valid_min = 0
+valid_max = 32766
+min_count = 5
+min_nir_reflectance = 0.03
+modis_pixels = 2400
+vegetation_red = "refl_band1"
+vegetation_nir = "refl_band2"
+vegetation_blue = "refl_band3"
+vegetation_swir = "refl_band5"
 
 [grid]
 refl_band1 = "Nadir_Reflectance_Band1"

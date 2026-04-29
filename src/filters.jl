@@ -49,7 +49,7 @@ Apply spatial bounding box filter for center-coordinate gridding (no footprint b
 Returns CartesianIndices of pixels within the grid bounds.
 """
 function apply_center_filters(lat::AbstractArray, lon::AbstractArray,
-                              grid_spec::GridSpec)::Vector{CartesianIndex{2}}
+                              grid_spec::GridSpec)
     findall((lat .> grid_spec.lat_min) .& (lat .< grid_spec.lat_max) .&
             (lon .> grid_spec.lon_min) .& (lon .< grid_spec.lon_max))
 end
