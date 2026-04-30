@@ -13,6 +13,18 @@ function _subpixel_rectangle_weights(xmin, xmax, ymin, ymax, n_oversample;
                       n_lon=n_lon, n_lat=n_lat)
 end
 
+function _circular_weights(center_lon, center_lat, radius_lon, radius_lat, n_oversample;
+                           n_lon=6, n_lat=6)
+    lat_corners = Float32[center_lat - radius_lat, center_lat - radius_lat,
+                          center_lat + radius_lat, center_lat + radius_lat]
+    lon_corners = Float32[center_lon - radius_lon, center_lon + radius_lon,
+                          center_lon + radius_lon, center_lon - radius_lon]
+    circle_footprint_weights(Float32(center_lat), Float32(center_lon),
+                             lat_corners, lon_corners;
+                             n_lon=n_lon, n_lat=n_lat,
+                             n_oversample=n_oversample)
+end
+
 function _accumulate_synthetic_rectangles(rectangles, values, n_oversample; n_lon=6, n_lat=6)
     n_pixels = length(rectangles)
     grid_data = zeros(Float32, n_lon, n_lat, 1)
@@ -92,9 +104,33 @@ end
         @test maximum(abs.(actual_mean[mask] .- expected_mean[mask])) < 0.15f0
     end
 
-    @testset "Method dispatch exposes approximate, center, and exact hooks" begin
+    @testset "Circular footprint weights split a symmetric circle by area" begin
+        weights = _circular_weights(3.0, 3.0, 1.0, 1.0, 100; n_lon=5, n_lat=5)
+        weights_from_radius = circle_footprint_weights(3.0f0, 3.0f0, 1.0f0, 1.0f0;
+                                                       n_lon=5, n_lat=5,
+                                                       n_oversample=100)
+        center = footprint_weights(CenterPointGridding(),
+                                   Float32[2, 2, 4, 4],
+                                   Float32[2, 4, 4, 2];
+                                   n_lon=5, n_lat=5)
+
+        @test sum(weights) ≈ 1.0f0 rtol=2f-5
+        @test weights_from_radius ≈ weights
+        @test weights[2, 2] ≈ 0.25f0 atol=0.01f0
+        @test weights[3, 2] ≈ 0.25f0 atol=0.01f0
+        @test weights[2, 3] ≈ 0.25f0 atol=0.01f0
+        @test weights[3, 3] ≈ 0.25f0 atol=0.01f0
+        @test count(x -> !iszero(x), weights) == 4
+
+        @test center[3, 3] == 1.0f0
+        @test count(x -> !iszero(x), center) == 1
+    end
+
+    @testset "Method dispatch exposes approximate, circular, center, and exact hooks" begin
         @test SubpixelGridding().n_oversample === nothing
         @test SubpixelGridding(12).n_oversample == 12
+        @test CircularFootprintGridding().n_oversample === nothing
+        @test CircularFootprintGridding(12).n_oversample == 12
         @test CenterPointGridding() isa AbstractGriddingMethod
         @test ExactIntersectionGridding() isa AbstractGriddingMethod
 
@@ -118,5 +154,10 @@ end
         @test sum(exact) ≈ 1.0f0
         @test center[2, 2] == 1.0f0
         @test sum(center) == 1.0f0
+
+        circle = footprint_weights(CircularFootprintGridding(50),
+                                   lat_corners, lon_corners;
+                                   n_lon=4, n_lat=4)
+        @test sum(circle) ≈ 1.0f0 rtol=2f-5
     end
 end

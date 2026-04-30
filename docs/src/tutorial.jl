@@ -94,7 +94,8 @@ time_spec = TimeSpec(
 #   distribution but slower. Default: auto-computed from footprint/grid ratio.
 # - `compute_std`: Set to `true` to also compute per-cell standard deviation.
 # - `backend`: Compute backend — `nothing` (sequential Welford), `CPU()` (KA parallel),
-#   or `CUDABackend()` (GPU).
+#   `CUDABackend()` (NVIDIA GPU), `MetalBackend()` (Apple GPU), or another compatible
+#   KernelAbstractions backend.
 #
 # ### Using the KA Backend
 #
@@ -109,6 +110,23 @@ time_spec = TimeSpec(
 #
 # The KA backend uses sum-based accumulation (instead of Welford's incremental mean),
 # which is fully parallelizable. The mean is computed at the end: `mean = sum / weight`.
+
+# ### Circular Footprints (GOSAT)
+#
+# Some products, such as GOSAT SIF, describe a circular footprint with four
+# bounding coordinates or with center coordinates plus a radius. Use
+# `CircularFootprintGridding` for those products:
+#
+# ```julia
+# gosat_config = load_config("examples/gosat_sif_center_radius.toml")
+# grid(gosat_config, grid_spec, time_spec,
+#      CircularFootprintGridding(n_oversample=80);
+#      backend=resolve_backend("cpu"),
+#      outfile="gosat_sif.nc")
+# ```
+#
+# For center-plus-radius configs, set `[basic] lat`, `[basic] lon`, and either
+# `[basic] radius` or scalar `[circle] radius`.
 
 # ## Step 5: Inspect the Output
 #

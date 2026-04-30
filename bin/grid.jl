@@ -15,24 +15,6 @@ using Pkg
 Pkg.activate(joinpath(@__DIR__, ".."))
 
 using SatelliteGridding
-using KernelAbstractions
-
-function resolve_backend(name::String)
-    if name == "sequential"
-        return nothing
-    elseif name == "cpu"
-        return CPU()
-    elseif name == "cuda"
-        try
-            @eval using CUDA
-            return @eval CUDABackend()
-        catch e
-            error("CUDA backend requested but CUDA.jl is not available: $e")
-        end
-    else
-        error("Unknown backend: '$name'. Use 'sequential', 'cpu', or 'cuda'.")
-    end
-end
 
 function main()
     if length(ARGS) < 1 || ARGS[1] in ["-h", "--help"]
@@ -46,9 +28,9 @@ function main()
         println("  center  Grid data using center coordinates (MODIS-style)")
         println()
         println("Backends:")
-        println("  --backend sequential  Sequential Welford (default, supports --compSTD)")
-        println("  --backend cpu         KA CPU kernels (parallel sort + subpixels)")
-        println("  --backend cuda        KA GPU kernels (requires CUDA.jl)")
+        for line in backend_help_lines()
+            println("  --backend ", line)
+        end
         println()
         println("Run 'julia --project=. bin/grid.jl <command> --help' for command-specific options.")
         return
@@ -64,8 +46,16 @@ function main()
         time_spec = args_to_time_spec(args)
         n_over = args["nOversample"] > 0 ? args["nOversample"] : nothing
         backend = resolve_backend(args["backend"])
+        footprint = lowercase(args["footprint"])
+        method = if footprint in ("quad", "quadrilateral", "subpixel")
+            SubpixelGridding(n_over)
+        elseif footprint in ("circle", "circular")
+            CircularFootprintGridding(n_over)
+        else
+            error("Unknown footprint geometry: $(args["footprint"]). Use quad or circle.")
+        end
 
-        grid(config, grid_spec, time_spec, SubpixelGridding(n_over);
+        grid(config, grid_spec, time_spec, method;
              compute_std=args["compSTD"],
              outfile=args["outFile"],
              backend=backend,

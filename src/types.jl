@@ -34,7 +34,7 @@ FilterRule(variable::String, op::Symbol, value::Real) =
 Configuration loaded from a TOML/JSON file that defines a satellite data source.
 
 # Fields
-- `basic`: Maps internal keys (`"lat"`, `"lon"`, `"lat_bnd"`, `"lon_bnd"`) to variable paths in the NetCDF files
+- `basic`: Maps internal keys (`"lat"`, `"lon"`, `"lat_bnd"`, `"lon_bnd"`, `"radius"`) to variable paths in the NetCDF files
 - `grid_vars`: Ordered mapping of output variable names to input variable paths (all will be gridded)
 - `filters`: Quality filter rules parsed from `[filter]` section
 - `file_pattern`: Glob pattern with YYYY/MM/DD/DOY placeholders for finding input files
@@ -123,6 +123,7 @@ end
 
 Dispatch marker for choosing how observations are mapped onto the output grid.
 Use [`SubpixelGridding`](@ref) for footprint-aware oversampling,
+[`CircularFootprintGridding`](@ref) for circular or near-circular footprints,
 [`CenterPointGridding`](@ref) for fast center-coordinate binning, and
 [`ExactIntersectionGridding`](@ref) as the future exact geometry hook.
 """
@@ -141,6 +142,21 @@ end
 
 SubpixelGridding(; n_oversample::Union{Nothing,Int}=nothing) =
     SubpixelGridding(n_oversample)
+
+"""
+    CircularFootprintGridding(; n_oversample=nothing)
+
+Footprint-aware gridding for circular or near-circular footprints described by
+a center coordinate and four bounding coordinates. The implementation samples an
+`n × n` grid over the footprint bounding box and keeps points inside the inferred
+circle or ellipse. `nothing` keeps the existing automatic oversampling heuristic.
+"""
+struct CircularFootprintGridding <: AbstractGriddingMethod
+    n_oversample::Union{Nothing,Int}
+end
+
+CircularFootprintGridding(; n_oversample::Union{Nothing,Int}=nothing) =
+    CircularFootprintGridding(n_oversample)
 
 """
     CenterPointGridding()

@@ -44,6 +44,7 @@ using Atomix: @atomic
 using Libdl
 
 include("types.jl")
+include("backends.jl")
 include("config.jl")
 include("filepatterns.jl")
 include("system_netcdf.jl")
@@ -59,8 +60,10 @@ include("methods.jl")
 include("cli.jl")
 
 export GridSpec, DataSourceConfig, TimeSpec, FilterRule
-export AbstractGriddingMethod, SubpixelGridding, CenterPointGridding,
-       ExactIntersectionGridding
+export AbstractGriddingMethod, SubpixelGridding, CircularFootprintGridding,
+       CenterPointGridding, ExactIntersectionGridding
+export supported_backend_names, backend_help_lines, resolve_backend,
+       cuda_backend, metal_backend
 export load_config, find_files
 export read_nc_variable, read_nc_attribute, read_variable_from_file, read_array_from_file,
        create_output_dataset
@@ -73,10 +76,14 @@ export default_cache_dir, default_modis_cache_dir, parse_modis_tile,
        read_modis_tile_geolocation, load_or_generate_modis_tile_geolocation
 export apply_filters
 export compute_subpixels!, floor_indices!, compute_n_oversample
-export polygon_area, exact_footprint_weights, footprint_weights
+export polygon_area, exact_footprint_weights, circle_footprint_weights,
+       footprint_weights
 export sort_corners_ccw, sort_corners_ccw!, sort_corners_ccw_ka!
-export compute_footprint_indices_ka!, scatter_accumulate!, scatter_accumulate_ka!
-export accumulate_footprint!, accumulate_batch!, accumulate_center!
+export compute_footprint_indices_ka!, compute_circular_footprint_indices_ka!,
+       scatter_accumulate!, scatter_accumulate_ka!,
+       scatter_accumulate_circular!, scatter_accumulate_circular_ka!
+export accumulate_footprint!, accumulate_circular_footprint!, accumulate_batch!,
+       accumulate_circular_batch!, accumulate_center!
 export finalize_mean!
 export grid, grid_l2, grid_center
 export compute_evi, compute_ndvi, compute_nirv, compute_ndwi

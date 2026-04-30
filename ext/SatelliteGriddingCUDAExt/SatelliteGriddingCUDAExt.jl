@@ -11,7 +11,8 @@ using KernelAbstractions
 """
     cuda_backend()
 
-Return the CUDA backend for use with `grid_l2` and `grid_center`.
+Return the CUDA backend for use with `grid_l2` or the dispatch-based `grid`
+API. Requires `using CUDA`.
 
 # Example
 ```julia

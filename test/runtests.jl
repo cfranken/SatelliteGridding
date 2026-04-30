@@ -10,6 +10,7 @@ using KernelAbstractions
     include("test_oversampling.jl")
     include("test_averaging.jl")
     include("test_ka_kernels.jl")
+    include("test_backends.jl")
     include("test_filters.jl")
     include("test_config.jl")
     include("test_ncio.jl")

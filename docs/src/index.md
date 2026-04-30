@@ -6,19 +6,20 @@ with footprint-aware oversampling.
 ## Overview
 
 Satellite instruments observe through irregularly shaped footprints — typically
-quadrilaterals defined by 4 corner coordinates. These footprints can overlap multiple
-output grid cells. `SatelliteGridding.jl` handles this by subdividing each footprint
-into n×n sub-pixels and using "point-in-box" binning to distribute observations across
+quadrilaterals defined by 4 corner coordinates or circular footprints defined by
+bounds or center-plus-radius metadata. These footprints can overlap multiple output
+grid cells. `SatelliteGridding.jl` handles this by subdividing each footprint into
+n×n sub-pixels and using "point-in-box" binning to distribute observations across
 the grid.
 
 ### Key Features
 
-- **Footprint oversampling**: Subdivide footprints into n×n sub-pixels for proper
-  spatial overlap handling
+- **Footprint oversampling**: Subdivide quadrilateral or circular footprints into
+  n×n sub-pixels for proper spatial overlap handling
 - **TOML configuration**: Declarative data source definitions with filter expressions
 - **Date-based file discovery**: Automatic file matching using YYYY/MM/DD/DOY placeholders
 - **Quality filtering**: Flexible filter syntax (`"< 80"`, `"> 0.5"`, `"== 1"`, `"1600 < x < 2200"`)
-- **Multiple backends**: Sequential (Welford), KA CPU, or KA GPU (CUDA) execution
+- **Multiple backends**: Sequential (Welford), KA CPU, CUDA, or Metal execution
 - **Standard deviation**: Optional per-cell standard deviation via Welford's algorithm
 - **Center-coordinate gridding**: MODIS-style gridding where each pixel maps to one cell
 - **Vegetation indices**: Built-in EVI, NDVI, NIRv, NDWI computation for MODIS data
@@ -27,8 +28,9 @@ the grid.
 
 - **TROPOMI**: SIF, NO₂, CH₄, CO (S5P Level-2)
 - **OCO-2/3**: SIF, XCO₂ (Level-2)
+- **GOSAT**: SIF products with circular footprints
 - **MODIS**: Surface reflectance (center-coordinate gridding)
-- Any Level-2 product with corner coordinates in NetCDF format
+- Any Level-2 product with corner, bounding, or center-plus-radius coordinates in NetCDF format
 
 ## Prerequisites
 
@@ -100,7 +102,7 @@ close(ds)
 | `n_oversample` | `nothing` (auto) | Sub-pixel factor. `nothing` = auto-compute from footprint/grid ratio |
 | `compute_std` | `false` | Compute per-cell standard deviation (sequential backend only) |
 | `outfile` | `"gridded_output.nc"` | Output NetCDF file path |
-| `backend` | `nothing` (sequential) | `CPU()` for KA parallel, `CUDABackend()` for GPU |
+| `backend` | `nothing` (sequential) | `CPU()`, `CUDABackend()`, `MetalBackend()`, or another compatible KernelAbstractions backend |
 
 ## Quick Start — Command Line
 
@@ -127,6 +129,13 @@ julia --project=. bin/grid.jl l2 \
     --backend cpu --dLat 0.25 --dLon 0.25 \
     -o tropomi_no2.nc
 
+# GOSAT SIF circular footprints
+julia --project=. bin/grid.jl l2 \
+    --config SatelliteGridding/examples/gosat_sif_center_radius.toml \
+    --footprint circle --nOversample 80 \
+    --backend cpu \
+    -o gosat_sif.nc
+
 # MODIS MCD43A4 with generated per-tile sinusoidal geolocation
 julia --project=. bin/grid.jl center \
     --config SatelliteGridding/examples/modis_reflectance.toml \
@@ -145,7 +154,8 @@ for CUDA setup.
 |:--------|:---------|:----------|:------------|
 | Sequential | `--backend sequential` | default (`backend=nothing`) | Welford's online mean. Supports `--compSTD`. |
 | KA CPU | `--backend cpu` | `backend=CPU()` | Parallel sort + subpixels. Sum-based accumulation. |
-| KA CUDA | `--backend cuda` | `backend=CUDABackend()` | Full GPU pipeline. Requires `using CUDA`. |
+| KA CUDA | `--backend cuda` | `backend=resolve_backend("cuda")` or `CUDABackend()` | NVIDIA GPU pipeline. Requires CUDA.jl. |
+| KA Metal | `--backend metal` | `backend=resolve_backend("metal")` or `MetalBackend()` | Apple GPU pipeline. Requires Metal.jl on macOS/Apple GPU. |
 
 ## Next Steps
 

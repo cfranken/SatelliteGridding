@@ -1,0 +1,27 @@
+# Example GOSAT SIF configuration when the product or user workflow provides
+# footprint center coordinates plus a circular footprint radius instead of
+# corner coordinates.
+#
+# The scalar radius below is used for every sounding. If the product provides a
+# per-sounding radius variable, move it to `[basic]` as:
+# radius = "FootprintRadius"
+
+filePattern = "YYYY/MM/GOSAT-SIF-L2-??MMDD-B9200-fv1.nc"
+folder = "/path/to/GOSAT_LITE/"
+
+[basic]
+lat = "Latitude"
+lon = "Longitude"
+
+[circle]
+radius = 5.25
+radius_unit = "km"
+
+[grid]
+sif = "Daily_Averaged_SIF"
+sif_757P = "SIF_P_757nm"
+sif_771P = "SIF_P_771nm"
+dcCorr = "daily_correction_factor"
+
+[filter]
+SZA = "< 80"

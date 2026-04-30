@@ -4,7 +4,7 @@
 
 A Julia package for gridding satellite Level-2 data onto regular lat/lon grids with footprint-aware oversampling.
 
-Satellite instruments observe through irregularly shaped footprints (quadrilaterals defined by 4 corner coordinates) that can overlap multiple grid cells. This package subdivides each footprint into n×n sub-pixels and distributes the observation across all grid cells the sub-pixels fall in. It supports any Level-2 satellite product with corner coordinates in NetCDF format — TROPOMI SIF/NO₂/CH₄/CO, OCO-2/3 SIF/XCO₂, GOSAT, and more.
+Satellite instruments observe through irregularly shaped footprints that can overlap multiple grid cells. This package subdivides each footprint into n×n sub-pixels and distributes the observation across all grid cells the sub-pixels fall in. It supports quadrilateral footprints, circular footprints represented by four bounding coordinates or center-plus-radius metadata, and center-coordinate products such as MODIS.
 
 ## Prerequisites
 
@@ -80,9 +80,10 @@ close(ds)
 | Keyword | Default | Description |
 |:--------|:--------|:------------|
 | `n_oversample` | `nothing` (auto) | Sub-pixel factor per footprint side. `nothing` = auto-compute from footprint/grid ratio |
+| `footprint_method` | `SubpixelGridding(...)` | Geometry method for direct `grid_l2` calls. Use `CircularFootprintGridding(...)` for circular footprints |
 | `compute_std` | `false` | Also compute per-cell standard deviation (sequential backend only) |
 | `outfile` | `"gridded_output.nc"` | Output NetCDF file path |
-| `backend` | `nothing` (sequential) | Compute backend — `nothing`, `CPU()`, or `CUDABackend()` (see [Backends](#backends)) |
+| `backend` | `nothing` (sequential) | Compute backend — `nothing`, `CPU()`, `CUDABackend()`, `MetalBackend()`, or another compatible KernelAbstractions backend |
 
 ### Center-coordinate gridding (MODIS)
 
@@ -105,6 +106,15 @@ Experienced users can also use the dispatch-based library entry point:
 ```julia
 grid(config, grid_spec, time_spec, SubpixelGridding(n_oversample=20);
      outfile="l2_output.nc")
+
+grid(config, grid_spec, time_spec, CircularFootprintGridding(n_oversample=80);
+     outfile="gosat_sif.nc")
+
+center_radius_config = load_config("examples/gosat_sif_center_radius.toml")
+grid(center_radius_config, grid_spec, time_spec,
+     CircularFootprintGridding(n_oversample=80);
+     backend=resolve_backend("cpu"),
+     outfile="gosat_sif_center_radius.nc")
 
 grid(config, grid_spec, time_spec, CenterPointGridding();
      geo_provider=:modis, outfile="modis_output.nc")
@@ -144,6 +154,24 @@ julia --project=. bin/grid.jl l2 \
     --startDate 2019-01-01 --stopDate 2019-12-31 \
     -o tropomi_no2.nc
 
+# GOSAT SIF with circular footprints
+julia --project=. bin/grid.jl l2 \
+    --config examples/gosat_sif_circular.toml \
+    --footprint circle --nOversample 80 \
+    --backend cpu \
+    --dLat 1.0 --dLon 1.0 \
+    --startDate 2010-01-01 --stopDate 2010-12-31 \
+    -o gosat_sif_2010.nc
+
+# GOSAT SIF with center coordinates plus a scalar 5.25 km radius
+julia --project=. bin/grid.jl l2 \
+    --config examples/gosat_sif_center_radius.toml \
+    --footprint circle --nOversample 80 \
+    --backend cpu \
+    --dLat 1.0 --dLon 1.0 \
+    --startDate 2010-01-01 --stopDate 2010-12-31 \
+    -o gosat_sif_2010_radius.nc
+
 # MODIS reflectance — center-coordinate mode with vegetation indices
 julia --project=. bin/grid.jl center \
     --config examples/modis_reflectance.toml \
@@ -167,8 +195,9 @@ Run `julia --project=. bin/grid.jl l2 --help` for all options.
 | `--dDays` | 8 | Time step in days (or months with `--monthly`) |
 | `--monthly` | false | Use months instead of days |
 | `--nOversample` | 0 (auto) | Sub-pixel factor (0 = auto-compute) |
+| `--footprint` | `quad` | Footprint geometry: `quad` or `circle` |
 | `--compSTD` | false | Compute standard deviation |
-| `--backend` | `sequential` | `sequential`, `cpu`, or `cuda` |
+| `--backend` | `sequential` | `sequential`, `cpu`, `cuda`, or `metal` |
 
 ## Configuration Files
 
@@ -197,10 +226,11 @@ sif_735 = "PRODUCT/SIF_735"
 
 | Section | Required | Description |
 |:--------|:---------|:------------|
-| `[basic]` | required for `l2`; optional for `center` | Variable paths for `lat`, `lon`, `lat_bnd`, `lon_bnd`. Center mode only needs `lat`/`lon`, and MODIS can use generated sinusoidal geolocation instead |
+| `[basic]` | required for `l2`; optional for `center` | Variable paths for `lat`, `lon`, `lat_bnd`, `lon_bnd`, and optional circular `radius`. Center mode only needs `lat`/`lon`, and MODIS can use generated sinusoidal geolocation instead |
 | `[grid]` | yes | Output name → input variable path. All listed variables are gridded |
 | `[filter]` | no | Quality filters using string expressions (see below) |
 | `[center]` | no | Scale/fill options, MODIS pixel count, and explicit vegetation-index band roles for center gridding |
+| `[circle]` | no | Circular-footprint options: scalar `radius` and `radius_unit` (`degrees`, `km`, or `m`) |
 | `filePattern` | yes | Glob pattern with `YYYY`/`MM`/`DD`/`DOY`/`YYMMDD` placeholders |
 | `folder` | yes | Root directory for input files (also supports date placeholders) |
 
@@ -227,36 +257,43 @@ All filters are combined with AND logic.
 | `examples/tropomi_co.toml` | TROPOMI | CO total column |
 | `examples/oco2_sif.toml` | OCO-2 | SIF 757nm, SIF 771nm |
 | `examples/oco2_xco2.toml` | OCO-2 | XCO₂, AOD, albedo |
+| `examples/gosat_sif_circular.toml` | GOSAT | SIF with circular footprint gridding |
+| `examples/gosat_sif_center_radius.toml` | GOSAT | SIF with center coordinates plus scalar circular radius |
 | `examples/modis_reflectance.toml` | MODIS | Surface reflectance bands |
+
+Runnable GOSAT API examples are `examples/gosat_sif_circular.jl` and
+`examples/gosat_sif_center_radius.jl`. Set `SATGRID_BACKEND=cpu`, `cuda`, or
+`metal` to use a KA backend.
 
 ## Backends
 
-The package supports three compute backends:
+The package supports sequential gridding plus KernelAbstractions backends:
 
 | Backend | CLI flag | Julia API | Description |
 |:--------|:---------|:----------|:------------|
 | Sequential | `--backend sequential` | default (`backend=nothing`) | Welford's online algorithm. Single-threaded. Supports `--compSTD`. |
 | KA CPU | `--backend cpu` | `backend=CPU()` | KernelAbstractions CPU kernels. Parallel corner sorting + sub-pixel computation. Sum-based accumulation. |
-| KA CUDA | `--backend cuda` | `backend=CUDABackend()` | Full GPU pipeline. Requires CUDA.jl (`using CUDA`). |
+| KA CUDA | `--backend cuda` | `backend=resolve_backend("cuda")` or `CUDABackend()` | NVIDIA GPU pipeline. Requires CUDA.jl. |
+| KA Metal | `--backend metal` | `backend=resolve_backend("metal")` or `MetalBackend()` | Apple GPU pipeline. Requires Metal.jl on macOS/Apple Silicon. |
 
 The KA backends use sum-based accumulation (`mean = sum/weight`) instead of Welford's incremental mean, which is fully parallelizable but does not support `--compSTD` in a single pass.
 
 ### GPU example
 
 ```julia
-using CUDA, KernelAbstractions, SatelliteGridding, Dates
+using SatelliteGridding, Dates
 
 config = load_config("examples/tropomi_sif.toml")
 grid_spec = GridSpec(dlat=0.5f0, dlon=0.5f0)
 time_spec = TimeSpec(DateTime("2019-07-01"), DateTime("2019-07-31"), Dates.Day(16))
 
 grid_l2(config, grid_spec, time_spec;
-        backend=CUDABackend(), outfile="output.nc")
+        backend=resolve_backend("cuda"), outfile="output.nc")
 ```
 
 ## How oversampling works
 
-Each satellite footprint is a quadrilateral defined by 4 corner lat/lon pairs:
+Quadrilateral satellite footprints are defined by 4 corner lat/lon pairs:
 
 1. Corners are sorted into counter-clockwise (CCW) order
 2. Two opposite edges are subdivided into n equally-spaced points
@@ -270,6 +307,13 @@ Each satellite footprint is a quadrilateral defined by 4 corner lat/lon pairs:
 
 **Corner ordering**: Different satellite products store corners in different orders. The package normalizes them to CCW order automatically using a 5-comparator sorting network.
 
+For circular products such as GOSAT, use `CircularFootprintGridding` or
+`--footprint circle`. The footprint can be represented by four bounding
+coordinates or by center `lat`/`lon` plus either a per-sounding `basic.radius`
+variable or a scalar `[circle] radius`. Radius units can be `degrees`, `km`, or
+`m`. This path supports the sequential backend plus KA CPU, CUDA, Metal, and
+other compatible KernelAbstractions backends.
+
 ## Running tests
 
 ```julia
@@ -277,7 +321,7 @@ using Pkg
 Pkg.test("SatelliteGridding")
 ```
 
-Tests use synthetic data only — no real satellite files needed. Currently 220 tests covering oversampling, filtering, corner sorting, KA kernels, and I/O.
+Tests use synthetic data only — no real satellite files needed. Currently 320 tests covering oversampling, filtering, corner sorting, footprint geometry, KA kernels, and I/O.
 
 ## Documentation
 

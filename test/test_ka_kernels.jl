@@ -87,6 +87,29 @@
         @test all(ix[1, :] .== Int32(-1))
     end
 
+    @testset "compute_circular_footprint_indices_ka! — masked circle" begin
+        center_lat = Float32[3.0]
+        center_lon = Float32[3.0]
+        lat_corners = Float32[2.0 2.0 4.0 4.0]
+        lon_corners = Float32[2.0 4.0 4.0 2.0]
+        n = 10
+
+        ix = zeros(Int32, 1, n^2)
+        iy = zeros(Int32, 1, n^2)
+        inside_count = zeros(Int32, 1)
+        skip = zeros(Int32, 1)
+
+        compute_circular_footprint_indices_ka!(backend, ix, iy, inside_count,
+                                               skip, center_lat, center_lon,
+                                               lat_corners, lon_corners, n)
+
+        @test skip[1] == Int32(0)
+        @test inside_count[1] == Int32(80)
+        @test count(x -> x > 0, ix) == 80
+        @test all(2 .<= ix[ix .> 0] .<= 3)
+        @test all(2 .<= iy[iy .> 0] .<= 3)
+    end
+
     @testset "accumulate_batch! — single cell fast path" begin
         grid_sum = zeros(Float32, 10, 10, 1)
         grid_weights = zeros(Float32, 10, 10)
@@ -130,6 +153,70 @@
             if grid_weights[i, j] > 0.01
                 @test grid_sum[i, j, 1] ≈ V rtol=1e-3
             end
+        end
+    end
+
+    @testset "accumulate_circular_batch! — symmetric circle" begin
+        grid_sum = zeros(Float32, 6, 6, 1)
+        grid_weights = zeros(Float32, 6, 6)
+        center_lat = Float32[3.0]
+        center_lon = Float32[3.0]
+        lat_corners = Float32[2.0 2.0 4.0 4.0]
+        lon_corners = Float32[2.0 4.0 4.0 2.0]
+        vals = Float32[42.0;;]
+
+        accumulate_circular_batch!(backend, grid_sum, grid_weights,
+                                   center_lat, center_lon,
+                                   lat_corners, lon_corners, vals, 100, 1)
+
+        @test sum(grid_weights) ≈ 1.0f0 rtol=2f-5
+        @test grid_weights[2, 2] ≈ 0.25f0 atol=0.01f0
+        @test grid_weights[3, 2] ≈ 0.25f0 atol=0.01f0
+        @test grid_weights[2, 3] ≈ 0.25f0 atol=0.01f0
+        @test grid_weights[3, 3] ≈ 0.25f0 atol=0.01f0
+
+        finalize_mean!(grid_sum, grid_weights)
+        for idx in CartesianIndices(grid_weights)
+            if grid_weights[idx] > 0
+                @test grid_sum[idx[1], idx[2], 1] ≈ 42.0f0
+            end
+        end
+    end
+
+    @testset "accumulate_circular_batch! matches sequential circular path" begin
+        n_over = 30
+        n_fp = 80
+        n_vars = 2
+
+        center_lat = rand(Float32, n_fp) .* 4 .+ 4
+        center_lon = rand(Float32, n_fp) .* 4 .+ 4
+        radius_lat = rand(Float32, n_fp) .* 0.6f0 .+ 0.3f0
+        radius_lon = rand(Float32, n_fp) .* 0.6f0 .+ 0.3f0
+        lat_corners = hcat(center_lat .- radius_lat, center_lat .- radius_lat,
+                           center_lat .+ radius_lat, center_lat .+ radius_lat)
+        lon_corners = hcat(center_lon .- radius_lon, center_lon .+ radius_lon,
+                           center_lon .+ radius_lon, center_lon .- radius_lon)
+        vals = randn(Float32, n_fp, n_vars)
+
+        grid_sum = zeros(Float32, 12, 12, n_vars)
+        grid_w_ka = zeros(Float32, 12, 12)
+        accumulate_circular_batch!(backend, grid_sum, grid_w_ka,
+                                   center_lat, center_lon,
+                                   lat_corners, lon_corners, vals, n_over, n_vars)
+        finalize_mean!(grid_sum, grid_w_ka)
+
+        grid_data = zeros(Float32, 12, 12, n_vars)
+        grid_std = zeros(Float32, 12, 12, n_vars)
+        grid_w_seq = zeros(Float32, 12, 12)
+        accumulate_circular_footprint!(grid_data, grid_std, grid_w_seq, false,
+                                       center_lat, center_lon,
+                                       lat_corners, lon_corners, vals,
+                                       n_fp, n_vars, n_over)
+
+        @test grid_w_ka ≈ grid_w_seq rtol=1e-4
+        mask = grid_w_seq .> 0.01f0
+        for z in 1:n_vars
+            @test grid_sum[:, :, z][mask] ≈ grid_data[:, :, z][mask] rtol=1e-3
         end
     end
 

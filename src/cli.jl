@@ -66,8 +66,12 @@ function parse_l2_args(args=ARGS)
             help = "Sub-pixel factor for footprint oversampling (default: auto-compute)"
             arg_type = Int64
             default = 0
+        "--footprint"
+            help = "Footprint geometry: quad for corner quadrilaterals, circle for circular footprints"
+            arg_type = String
+            default = "quad"
         "--backend"
-            help = "Compute backend: 'cpu' for KA CPU kernels, 'cuda' for GPU (default: sequential)"
+            help = "Compute backend: sequential, cpu, cuda, or metal"
             arg_type = String
             default = "sequential"
         "--keepGoing"

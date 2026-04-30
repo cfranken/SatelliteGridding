@@ -77,6 +77,80 @@ function accumulate_footprint!(grid_data::AbstractArray{T,3},
 end
 
 """
+    accumulate_circular_footprint!(grid_data, grid_std, grid_weights, compute_std,
+                                   center_lat_idx, center_lon_idx,
+                                   lat_idx, lon_idx, values,
+                                   n_pixels, n_vars, n_oversample)
+
+Accumulate observations with circular or near-circular footprints. The center
+coordinate gives the footprint center and the four coordinates define its
+bounding box or edge points. Sampling is done in fractional grid-index space.
+"""
+function accumulate_circular_footprint!(grid_data::AbstractArray{T,3},
+                                        grid_std::AbstractArray{T,3},
+                                        grid_weights::AbstractMatrix{T},
+                                        compute_std::Bool,
+                                        center_lat_idx::AbstractVector,
+                                        center_lon_idx::AbstractVector,
+                                        lat_idx::AbstractMatrix,
+                                        lon_idx::AbstractMatrix,
+                                        values::AbstractMatrix,
+                                        n_pixels::Int, n_vars::Int,
+                                        n_oversample::Int) where {T}
+    n_lon, n_lat = size(grid_weights)
+
+    @inbounds for i in 1:n_pixels
+        clat, clon, radius_lat, radius_lon =
+            _circle_footprint_axes(center_lat_idx[i], center_lon_idx[i],
+                                   @view(lat_idx[i, :]), @view(lon_idx[i, :]))
+
+        if radius_lat <= eps(Float64) || radius_lon <= eps(Float64)
+            row = floor(Int, clat)
+            col = floor(Int, clon)
+            if 1 <= col <= n_lon && 1 <= row <= n_lat
+                _welford_update!(grid_data, grid_std, grid_weights, compute_std,
+                                 col, row, values, i, n_vars, T(1))
+            end
+            continue
+        end
+
+        inside_count = 0
+        for iy in 1:n_oversample, ix in 1:n_oversample
+            lat = clat - radius_lat + (iy - 0.5) * (2radius_lat / n_oversample)
+            lon = clon - radius_lon + (ix - 0.5) * (2radius_lon / n_oversample)
+            if _inside_bounded_circle(lat, lon, clat, clon, radius_lat, radius_lon)
+                inside_count += 1
+            end
+        end
+
+        if inside_count == 0
+            row = floor(Int, clat)
+            col = floor(Int, clon)
+            if 1 <= col <= n_lon && 1 <= row <= n_lat
+                _welford_update!(grid_data, grid_std, grid_weights, compute_std,
+                                 col, row, values, i, n_vars, T(1))
+            end
+            continue
+        end
+
+        weight = T(1 / inside_count)
+        for iy in 1:n_oversample, ix in 1:n_oversample
+            lat = clat - radius_lat + (iy - 0.5) * (2radius_lat / n_oversample)
+            lon = clon - radius_lon + (ix - 0.5) * (2radius_lon / n_oversample)
+            if _inside_bounded_circle(lat, lon, clat, clon, radius_lat, radius_lon)
+                row = floor(Int, lat)
+                col = floor(Int, lon)
+                if 1 <= col <= n_lon && 1 <= row <= n_lat
+                    _welford_update!(grid_data, grid_std, grid_weights, compute_std,
+                                     col, row, values, i, n_vars, weight)
+                end
+            end
+        end
+    end
+    nothing
+end
+
+"""
 Welford online update for a single grid cell. Adds observation `values[pixel_idx, :]`
 with the given `weight` to the running mean at `grid_data[col, row, :]`.
 """
@@ -118,7 +192,7 @@ For `compute_std=true`, a two-pass approach is used:
 3. Call `accumulate_std_pass!` with the computed mean to accumulate variance
 
 # Arguments
-- `backend`: KernelAbstractions backend (`CPU()` or `CUDABackend()`)
+- `backend`: KernelAbstractions backend (`CPU()`, `CUDABackend()`, `MetalBackend()`, etc.)
 - `grid_sum`: (n_lon, n_lat, n_vars) — weighted sum accumulator
 - `grid_weights`: (n_lon, n_lat) — weight accumulator
 - `lat_corners`, `lon_corners`: (n_fp, 4) — fractional grid indices of corners
@@ -166,6 +240,65 @@ function accumulate_batch!(backend,
         scatter_accumulate!(grid_sum, grid_weights, ix, iy, skip, val, n, n_vars)
     else
         scatter_accumulate_ka!(backend, grid_sum, grid_weights, ix, iy, skip, val, n, n_vars)
+    end
+
+    nothing
+end
+
+"""
+    accumulate_circular_batch!(backend, grid_sum, grid_weights,
+                               center_lat, center_lon,
+                               lat_corners, lon_corners, values, n, n_vars)
+
+Accumulate circular or near-circular footprints using the KA pipeline. This is
+the sum-based backend counterpart to `accumulate_circular_footprint!` and works
+with KA CPU, CUDA, Metal, and other compatible backends.
+"""
+function accumulate_circular_batch!(backend,
+                                    grid_sum::AbstractArray{T,3},
+                                    grid_weights::AbstractMatrix{T},
+                                    center_lat::AbstractVector,
+                                    center_lon::AbstractVector,
+                                    lat_corners::AbstractMatrix,
+                                    lon_corners::AbstractMatrix,
+                                    values::AbstractMatrix,
+                                    n::Int, n_vars::Int) where {T}
+    n_fp = size(lat_corners, 1)
+    n_fp == 0 && return nothing
+
+    if backend isa CPU
+        clat = center_lat
+        clon = center_lon
+        lat_c = lat_corners
+        lon_c = lon_corners
+        val = values
+    else
+        clat = KernelAbstractions.allocate(backend, T, size(center_lat))
+        copyto!(clat, center_lat)
+        clon = KernelAbstractions.allocate(backend, T, size(center_lon))
+        copyto!(clon, center_lon)
+        lat_c = KernelAbstractions.allocate(backend, T, size(lat_corners))
+        copyto!(lat_c, lat_corners)
+        lon_c = KernelAbstractions.allocate(backend, T, size(lon_corners))
+        copyto!(lon_c, lon_corners)
+        val = KernelAbstractions.allocate(backend, eltype(values), size(values))
+        copyto!(val, values)
+    end
+
+    nsq = n * n
+    ix = KernelAbstractions.zeros(backend, Int32, n_fp, nsq)
+    iy = KernelAbstractions.zeros(backend, Int32, n_fp, nsq)
+    inside_count = KernelAbstractions.zeros(backend, Int32, n_fp)
+    skip = KernelAbstractions.zeros(backend, Int32, n_fp)
+    compute_circular_footprint_indices_ka!(backend, ix, iy, inside_count, skip,
+                                           clat, clon, lat_c, lon_c, n)
+
+    if backend isa CPU
+        scatter_accumulate_circular!(grid_sum, grid_weights, ix, iy, inside_count,
+                                     skip, val, n, n_vars)
+    else
+        scatter_accumulate_circular_ka!(backend, grid_sum, grid_weights, ix, iy,
+                                        inside_count, skip, val, n, n_vars)
     end
 
     nothing

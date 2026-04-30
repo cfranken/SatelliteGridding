@@ -54,15 +54,19 @@ Maps internal coordinate keys to NetCDF variable paths.
 
 | Key | Description |
 |:----|:------------|
-| `lat` | Center latitude variable |
-| `lon` | Center longitude variable |
+| `lat` | Center latitude variable. Optional for L2 if centers can be derived from bounds |
+| `lon` | Center longitude variable. Optional for L2 if centers can be derived from bounds |
 | `lat_bnd` | Corner latitude bounds (N×4 or 4×N array) |
 | `lon_bnd` | Corner longitude bounds (N×4 or 4×N array) |
+| `radius` | Optional circular footprint radius variable for center-plus-radius products |
 
-For footprint-aware L2 gridding (`grid_l2`), all four keys are required. For
-center-coordinate gridding (`grid_center`), only `lat` and `lon` are needed. For
-MODIS sinusoidal tiles, `[basic]` can be omitted and geolocation can be generated
-from the tile ID in the filename.
+For quadrilateral L2 gridding, `lat_bnd` and `lon_bnd` are required. If `lat`
+and `lon` are omitted, centers are derived from the four bound coordinates. For
+circular L2 gridding, either provide `lat_bnd`/`lon_bnd` or provide center
+`lat`/`lon` plus `radius` in `[basic]` or a scalar `[circle] radius`. For
+center-coordinate gridding (`grid_center`), only `lat` and `lon` are needed.
+For MODIS sinusoidal tiles, `[basic]` can be omitted and geolocation can be
+generated from the tile ID in the filename.
 
 NetCDF group paths use `/` separators (e.g., `"PRODUCT/SUPPORT_DATA/GEOLOCATIONS/latitude_bounds"`).
 
@@ -95,6 +99,15 @@ Center-coordinate options are used by `grid_center`:
 | `min_nir_reflectance` | Optional low-NIR filter after scaling |
 | `modis_pixels` | MODIS pixels per tile edge; `2400` for 500 m MCD43A4 |
 | `vegetation_red` / `vegetation_nir` / `vegetation_blue` / `vegetation_swir` | `[grid]` keys used for EVI, NDVI, NIRv, and NDWI |
+
+## `[circle]` Section (Optional)
+
+Circular-footprint options are used by `CircularFootprintGridding`:
+
+| Key | Description |
+|:----|:------------|
+| `radius` | Scalar footprint radius used for every sounding when `[basic] radius` is not present |
+| `radius_unit` | Radius unit: `degrees`, `km`, or `m`. Default: `degrees` |
 
 ## `[filter]` Section (Optional)
 
@@ -188,6 +201,70 @@ methane = "PRODUCT/methane_mixing_ratio_bias_corrected"
 "PRODUCT/qa_value" = "> 0.5"
 "PRODUCT/methane_mixing_ratio_bias_corrected" = "1600 < x < 2200"
 ```
+
+### GOSAT SIF Circular Footprints
+
+With four circular-footprint bounding coordinates:
+
+```toml
+filePattern = "YYYY/MM/GOSAT-SIF-L2-??MMDD-B9200-fv1.nc"
+folder = "/data/GOSAT_LITE/"
+
+[basic]
+# Center latitude/longitude are optional. If omitted, centers are derived from
+# the four footprint coordinates.
+lat = "Latitude"
+lon = "Longitude"
+lat_bnd = "Latitude_corners"
+lon_bnd = "Longitude_corners"
+
+[grid]
+sif = "Daily_Averaged_SIF"
+sif_757P = "SIF_P_757nm"
+sif_771P = "SIF_P_771nm"
+
+[filter]
+SZA = "< 80"
+```
+
+With center coordinates and a scalar footprint radius:
+
+```toml
+filePattern = "YYYY/MM/GOSAT-SIF-L2-??MMDD-B9200-fv1.nc"
+folder = "/data/GOSAT_LITE/"
+
+[basic]
+lat = "Latitude"
+lon = "Longitude"
+
+[circle]
+radius = 5.25
+radius_unit = "km"
+
+[grid]
+sif = "Daily_Averaged_SIF"
+sif_757P = "SIF_P_757nm"
+sif_771P = "SIF_P_771nm"
+
+[filter]
+SZA = "< 80"
+```
+
+If radius varies by sounding, put the variable in `[basic]` instead:
+
+```toml
+[basic]
+lat = "Latitude"
+lon = "Longitude"
+radius = "FootprintRadius"
+
+[circle]
+radius_unit = "km"
+```
+
+Use this config with `CircularFootprintGridding(...)` from Julia or
+`--footprint circle` from the CLI. It supports the sequential backend and KA
+backends such as `--backend cpu`, `--backend cuda`, and `--backend metal`.
 
 ### MODIS MCD43A4
 

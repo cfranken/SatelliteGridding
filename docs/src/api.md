@@ -15,6 +15,16 @@ grid_center
 load_config
 ```
 
+## Backends
+
+```@docs
+supported_backend_names
+backend_help_lines
+resolve_backend
+cuda_backend
+metal_backend
+```
+
 ## Types
 
 ```@docs
@@ -24,6 +34,7 @@ DataSourceConfig
 FilterRule
 AbstractGriddingMethod
 SubpixelGridding
+CircularFootprintGridding
 CenterPointGridding
 ExactIntersectionGridding
 ```
@@ -38,6 +49,7 @@ compute_subpixels!
 floor_indices!
 compute_n_oversample
 compute_footprint_indices_ka!
+compute_circular_footprint_indices_ka!
 ```
 
 ## Geometry
@@ -45,6 +57,7 @@ compute_footprint_indices_ka!
 ```@docs
 polygon_area
 exact_footprint_weights
+circle_footprint_weights
 footprint_weights
 ```
 
@@ -52,10 +65,14 @@ footprint_weights
 
 ```@docs
 accumulate_footprint!
+accumulate_circular_footprint!
 accumulate_batch!
+accumulate_circular_batch!
 accumulate_center!
 scatter_accumulate!
 scatter_accumulate_ka!
+scatter_accumulate_circular!
+scatter_accumulate_circular_ka!
 finalize_mean!
 ```
 

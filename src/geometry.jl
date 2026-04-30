@@ -105,6 +105,100 @@ function exact_footprint_weights(lat_corners, lon_corners; n_lon::Integer, n_lat
     weights
 end
 
+function _circle_footprint_axes(center_lat, center_lon, lat_corners, lon_corners)
+    radius_lat = 0.0
+    radius_lon = 0.0
+    clat = Float64(center_lat)
+    clon = Float64(center_lon)
+
+    @inbounds for i in eachindex(lat_corners)
+        radius_lat = max(radius_lat, abs(Float64(lat_corners[i]) - clat))
+        radius_lon = max(radius_lon, abs(Float64(lon_corners[i]) - clon))
+    end
+
+    clat, clon, radius_lat, radius_lon
+end
+
+@inline function _inside_bounded_circle(lat, lon, center_lat, center_lon,
+                                        radius_lat, radius_lon)
+    lat_norm = (lat - center_lat) / radius_lat
+    lon_norm = (lon - center_lon) / radius_lon
+    lon_norm * lon_norm + lat_norm * lat_norm <= 1.0
+end
+
+function _assign_center_weight!(weights, center_lat, center_lon)
+    row = floor(Int, center_lat)
+    col = floor(Int, center_lon)
+    if 1 <= col <= size(weights, 1) && 1 <= row <= size(weights, 2)
+        weights[col, row] = 1.0f0
+    end
+    weights
+end
+
+"""
+    circle_footprint_weights(center_lat, center_lon, lat_corners, lon_corners;
+                             n_lon, n_lat, n_oversample)
+
+Compute sampled per-cell weights for one circular or near-circular footprint in
+fractional grid-index coordinates. The four coordinates define the footprint
+bounding box or edge points. In grid-index space the sampled shape may be an
+ellipse when the output grid has unequal latitude and longitude resolutions.
+"""
+function circle_footprint_weights(center_lat, center_lon, lat_corners, lon_corners;
+                                  n_lon::Integer, n_lat::Integer,
+                                  n_oversample::Integer)
+    n_oversample > 0 || error("n_oversample must be positive")
+
+    clat, clon, radius_lat, radius_lon =
+        _circle_footprint_axes(center_lat, center_lon, lat_corners, lon_corners)
+    weights = zeros(Float32, n_lon, n_lat)
+
+    if radius_lat <= eps(Float64) || radius_lon <= eps(Float64)
+        return _assign_center_weight!(weights, clat, clon)
+    end
+
+    inside_count = 0
+    @inbounds for iy in 1:n_oversample, ix in 1:n_oversample
+        lat = clat - radius_lat + (iy - 0.5) * (2radius_lat / n_oversample)
+        lon = clon - radius_lon + (ix - 0.5) * (2radius_lon / n_oversample)
+        if _inside_bounded_circle(lat, lon, clat, clon, radius_lat, radius_lon)
+            inside_count += 1
+            row = floor(Int, lat)
+            col = floor(Int, lon)
+            if 1 <= col <= n_lon && 1 <= row <= n_lat
+                weights[col, row] += 1.0f0
+            end
+        end
+    end
+
+    if inside_count == 0
+        return _assign_center_weight!(weights, clat, clon)
+    end
+
+    weights ./= Float32(inside_count)
+    weights
+end
+
+"""
+    circle_footprint_weights(center_lat, center_lon, radius_lat, radius_lon;
+                             n_lon, n_lat, n_oversample)
+
+Convenience overload for a circular or elliptical footprint specified directly
+by center coordinate and radius in fractional grid-index units.
+"""
+function circle_footprint_weights(center_lat, center_lon,
+                                  radius_lat::Real, radius_lon::Real;
+                                  n_lon::Integer, n_lat::Integer,
+                                  n_oversample::Integer)
+    lat_corners = (center_lat - radius_lat, center_lat - radius_lat,
+                   center_lat + radius_lat, center_lat + radius_lat)
+    lon_corners = (center_lon - radius_lon, center_lon + radius_lon,
+                   center_lon + radius_lon, center_lon - radius_lon)
+    circle_footprint_weights(center_lat, center_lon, lat_corners, lon_corners;
+                             n_lon=n_lon, n_lat=n_lat,
+                             n_oversample=n_oversample)
+end
+
 """
     footprint_weights(method, lat_corners, lon_corners; n_lon, n_lat)
 
@@ -146,6 +240,17 @@ function footprint_weights(method::SubpixelGridding, lat_corners, lon_corners;
         end
     end
     weights
+end
+
+function footprint_weights(method::CircularFootprintGridding, lat_corners, lon_corners;
+                           n_lon::Integer, n_lat::Integer)
+    n = method.n_oversample
+    n === nothing && error("Circular footprint_weights requires an explicit n_oversample")
+    center_lat = sum(lat_corners) / length(lat_corners)
+    center_lon = sum(lon_corners) / length(lon_corners)
+
+    circle_footprint_weights(center_lat, center_lon, lat_corners, lon_corners;
+                             n_lon=n_lon, n_lat=n_lat, n_oversample=n)
 end
 
 function footprint_weights(::CenterPointGridding, lat_corners, lon_corners;

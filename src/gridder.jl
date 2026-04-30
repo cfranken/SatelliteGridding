@@ -5,7 +5,10 @@ Grid Level-2 satellite data with footprint-aware oversampling.
 
 Reads input NetCDF files as specified by `config`, applies quality filters, subdivides
 each satellite footprint into sub-pixels for proper overlap handling, and accumulates
-gridded averages. Output is written to a NetCDF4 file.
+gridded averages. Output is written to a NetCDF4 file. Quadrilateral footprints
+are used by default; pass `footprint_method=CircularFootprintGridding(...)` for
+circular products such as GOSAT. Circular footprints can be read from
+`lat_bnd`/`lon_bnd` or from center `lat`/`lon` plus `radius`.
 
 # Arguments
 - `config::DataSourceConfig`: Data source configuration (from TOML/JSON)
@@ -14,23 +17,32 @@ gridded averages. Output is written to a NetCDF4 file.
 
 # Keyword Arguments
 - `n_oversample::Union{Nothing,Int}=nothing`: Sub-pixel factor. `nothing` = auto-compute from footprint/grid ratio.
+- `footprint_method::AbstractGriddingMethod=SubpixelGridding(n_oversample)`: Footprint geometry method.
 - `compute_std::Bool=false`: Also compute per-cell standard deviation
 - `outfile::String="gridded_output.nc"`: Output file path
 - `backend`: KernelAbstractions backend (default: `nothing` for sequential Welford path).
-  Use `CPU()` for threaded KA execution or `CUDABackend()` for GPU.
+  Use `CPU()`, `CUDABackend()`, `MetalBackend()`, or another compatible KA backend.
 - `keep_going::Bool=false`: Continue after per-file errors. By default, the
   first file error stops the run.
 """
 function grid_l2(config::DataSourceConfig, grid_spec::GridSpec{T}, time_spec::TimeSpec;
                  n_oversample::Union{Nothing,Int}=nothing,
+                 footprint_method::AbstractGriddingMethod=SubpixelGridding(n_oversample),
                  compute_std::Bool=false,
                  outfile::String="gridded_output.nc",
                  backend=nothing,
                  keep_going::Bool=false) where {T}
 
-    for key in ("lat", "lon", "lat_bnd", "lon_bnd")
-        haskey(config.basic, key) ||
-            error("grid_l2 requires basic.$key in the data source config")
+    footprint_method isa SubpixelGridding ||
+        footprint_method isa CircularFootprintGridding ||
+        error("grid_l2 supports SubpixelGridding and CircularFootprintGridding; use grid_center for center-coordinate gridding")
+    _validate_l2_geometry_config(config, footprint_method)
+
+    effective_n_oversample = if footprint_method isa Union{SubpixelGridding,CircularFootprintGridding} &&
+                                footprint_method.n_oversample !== nothing
+        footprint_method.n_oversample
+    else
+        n_oversample
     end
 
     dates = collect(time_spec.start_date:time_spec.time_step:time_spec.stop_date)
@@ -82,10 +94,14 @@ function grid_l2(config::DataSourceConfig, grid_spec::GridSpec{T}, time_spec::Ti
                     if use_ka
                         _process_l2_file_ka!(filepath, config, grid_spec, backend,
                                              grid_sum, grid_weights,
-                                             n_oversample, nc_vars, fill_attrib, p_files)
+                                             effective_n_oversample,
+                                             footprint_method,
+                                             nc_vars, fill_attrib, p_files)
                     else
                         _process_l2_file!(filepath, config, grid_spec, grid_data, grid_std_arr,
-                                          grid_weights, compute_std, n_oversample,
+                                          grid_weights, compute_std,
+                                          effective_n_oversample,
+                                          footprint_method,
                                           nc_vars, fill_attrib, p_files)
                     end
                     successful_files += 1
@@ -136,16 +152,160 @@ function grid_l2(config::DataSourceConfig, grid_spec::GridSpec{T}, time_spec::Ti
     nothing
 end
 
+_has_l2_bounds(config::DataSourceConfig) =
+    haskey(config.basic, "lat_bnd") && haskey(config.basic, "lon_bnd")
+
+_has_l2_centers(config::DataSourceConfig) =
+    haskey(config.basic, "lat") && haskey(config.basic, "lon")
+
+_has_l2_radius(config::DataSourceConfig) =
+    haskey(config.basic, "radius") || haskey(config.options, "radius")
+
+function _use_radius_l2_geometry(config::DataSourceConfig,
+                                 footprint_method::AbstractGriddingMethod)
+    footprint_method isa CircularFootprintGridding &&
+        _has_l2_radius(config) && !_has_l2_bounds(config)
+end
+
+function _validate_l2_geometry_config(config::DataSourceConfig,
+                                      footprint_method::AbstractGriddingMethod)
+    has_bounds = _has_l2_bounds(config)
+    has_centers = _has_l2_centers(config)
+    has_radius = _has_l2_radius(config)
+
+    has_lat = haskey(config.basic, "lat")
+    has_lon = haskey(config.basic, "lon")
+    has_lat == has_lon ||
+        error("grid_l2 requires both basic.lat and basic.lon, or neither so centers can be derived from bounds")
+
+    if footprint_method isa CircularFootprintGridding
+        has_bounds || has_radius ||
+            error("CircularFootprintGridding requires either basic.lat_bnd/basic.lon_bnd or center basic.lat/basic.lon plus basic.radius or [circle] radius")
+        if !has_bounds
+            has_centers ||
+                error("Radius-based CircularFootprintGridding requires basic.lat and basic.lon center variables")
+        elseif !has_centers
+            @warn "basic.lat/basic.lon not configured; deriving footprint centers from corner coordinates"
+        end
+    else
+        has_bounds ||
+            error("grid_l2 requires basic.lat_bnd and basic.lon_bnd for quadrilateral footprint gridding")
+        if !has_centers
+            @warn "basic.lat/basic.lon not configured; deriving footprint centers from corner coordinates"
+        end
+    end
+    nothing
+end
+
+function _read_or_derive_l2_centers(fin, config::DataSourceConfig,
+                                    lat_bnd::AbstractMatrix,
+                                    lon_bnd::AbstractMatrix)
+    if haskey(config.basic, "lat") && haskey(config.basic, "lon")
+        return vec(read_nc_variable(fin, config.basic["lat"])),
+               vec(read_nc_variable(fin, config.basic["lon"]))
+    end
+
+    vec(mean(lat_bnd, dims=2)), vec(mean(lon_bnd, dims=2))
+end
+
+function _read_l2_centers(fin, config::DataSourceConfig)
+    _has_l2_centers(config) ||
+        error("Radius-based circular footprint gridding requires basic.lat and basic.lon")
+    vec(read_nc_variable(fin, config.basic["lat"])),
+    vec(read_nc_variable(fin, config.basic["lon"]))
+end
+
+function _read_l2_radius(fin, config::DataSourceConfig, n::Integer)
+    if haskey(config.basic, "radius")
+        radius = vec(read_nc_variable(fin, config.basic["radius"]))
+        length(radius) == n ||
+            error("Radius variable '$(config.basic["radius"])' has $(length(radius)) values, expected $n")
+        return radius
+    end
+
+    haskey(config.options, "radius") ||
+        error("Radius-based circular footprint gridding requires basic.radius or [circle] radius")
+    fill(Float64(config.options["radius"]), n)
+end
+
+function _radius_to_degrees(radius::Real, lat::Real, unit::AbstractString)
+    unit_lc = lowercase(strip(unit))
+    if unit_lc in ("degree", "degrees", "deg")
+        r = Float64(radius)
+    elseif unit_lc in ("kilometer", "kilometers", "km")
+        r = Float64(radius) / 111.32
+    elseif unit_lc in ("meter", "meters", "m")
+        r = Float64(radius) / 111_320.0
+    else
+        error("Unknown [circle] radius_unit '$unit'. Use degrees, km, or m.")
+    end
+
+    lon_scale = max(abs(cosd(Float64(lat))), 1e-6)
+    r, r / lon_scale
+end
+
+function _circle_bounds_from_radius(lat_center, lon_center, radius,
+                                    config::DataSourceConfig)
+    unit = string(get(config.options, "radius_unit", "degrees"))
+    n = length(lat_center)
+    lat_bnd = zeros(Float64, n, 4)
+    lon_bnd = zeros(Float64, n, 4)
+
+    @inbounds for i in 1:n
+        if !isfinite(radius[i]) || radius[i] < 0
+            lat_bnd[i, :] .= NaN
+            lon_bnd[i, :] .= NaN
+            continue
+        end
+        rlat, rlon = _radius_to_degrees(radius[i], lat_center[i], unit)
+        lat_bnd[i, 1] = lat_center[i] - rlat
+        lat_bnd[i, 2] = lat_center[i] - rlat
+        lat_bnd[i, 3] = lat_center[i] + rlat
+        lat_bnd[i, 4] = lat_center[i] + rlat
+        lon_bnd[i, 1] = lon_center[i] - rlon
+        lon_bnd[i, 2] = lon_center[i] + rlon
+        lon_bnd[i, 3] = lon_center[i] + rlon
+        lon_bnd[i, 4] = lon_center[i] - rlon
+    end
+
+    lat_bnd, lon_bnd
+end
+
+function _read_l2_geometry(fin, config::DataSourceConfig,
+                           footprint_method::AbstractGriddingMethod)
+    if _use_radius_l2_geometry(config, footprint_method)
+        lat_center, lon_center = _read_l2_centers(fin, config)
+        radius = _read_l2_radius(fin, config, length(lat_center))
+        lat_bnd, lon_bnd = _circle_bounds_from_radius(lat_center, lon_center,
+                                                      radius, config)
+        return lat_center, lon_center, lat_bnd, lon_bnd
+    end
+
+    lat_bnd = read_nc_variable(fin, config.basic["lat_bnd"]; bounds=true)
+    lon_bnd = read_nc_variable(fin, config.basic["lon_bnd"]; bounds=true)
+
+    if size(lat_bnd, 1) == 4 && ndims(lat_bnd) == 2
+        lat_bnd = lat_bnd'
+        lon_bnd = lon_bnd'
+    end
+
+    sort_corners_ccw!(lat_bnd, lon_bnd)
+    lat_center, lon_center = _read_or_derive_l2_centers(fin, config,
+                                                        lat_bnd, lon_bnd)
+    lat_center, lon_center, lat_bnd, lon_bnd
+end
+
 function _process_l2_file!(filepath::String, config::DataSourceConfig,
                            grid_spec::GridSpec{T}, grid_data, grid_std,
                            grid_weights, compute_std, n_oversample_override,
+                           footprint_method::AbstractGriddingMethod,
                            nc_vars, fill_attrib, progress) where {T}
     fin = Dataset(filepath)
     try
-        # Quick bounding box check with center coordinates
-        lat_center = read_nc_variable(fin, config.basic["lat"])
-        lon_center = read_nc_variable(fin, config.basic["lon"])
+        lat_center, lon_center, lat_bnd, lon_bnd =
+            _read_l2_geometry(fin, config, footprint_method)
 
+        # Quick bounding box check with center coordinates.
         in_bounds = ((lat_center .> grid_spec.lat_min) .+
                      (lat_center .< grid_spec.lat_max) .+
                      (lon_center .> grid_spec.lon_min) .+
@@ -155,20 +315,6 @@ function _process_l2_file!(filepath::String, config::DataSourceConfig,
             ProgressMeter.next!(progress; showvalues=[(:File, filepath), (:N_pixels, 0)])
             return
         end
-
-        # Read footprint corner coordinates
-        lat_bnd = read_nc_variable(fin, config.basic["lat_bnd"]; bounds=true)
-        lon_bnd = read_nc_variable(fin, config.basic["lon_bnd"]; bounds=true)
-
-        # Transpose if needed (ensure N×4)
-        if size(lat_bnd, 1) == 4 && ndims(lat_bnd) == 2
-            lat_bnd = lat_bnd'
-            lon_bnd = lon_bnd'
-        end
-
-        # Normalize corner ordering to counter-clockwise
-        # (different satellite products store corners in different orders)
-        sort_corners_ccw!(lat_bnd, lon_bnd)
 
         # Apply filters
         idx = apply_filters(fin, config, lat_bnd, lon_bnd, grid_spec)
@@ -196,15 +342,21 @@ function _process_l2_file!(filepath::String, config::DataSourceConfig,
         vals = mat_in[idx, :]
         lat_c = lat_bnd[idx, :]
         lon_c = lon_bnd[idx, :]
+        lat_center_c = lat_center[idx]
+        lon_center_c = lon_center[idx]
 
         # Filter out soundings with NaN/Inf in data or corners
         finite_mask = vec(all(isfinite, vals, dims=2)) .&
                       vec(all(isfinite, lat_c, dims=2)) .&
-                      vec(all(isfinite, lon_c, dims=2))
+                      vec(all(isfinite, lon_c, dims=2)) .&
+                      isfinite.(lat_center_c) .&
+                      isfinite.(lon_center_c)
         if !all(finite_mask)
             vals = vals[finite_mask, :]
             lat_c = lat_c[finite_mask, :]
             lon_c = lon_c[finite_mask, :]
+            lat_center_c = lat_center_c[finite_mask]
+            lon_center_c = lon_center_c[finite_mask]
         end
 
         if isempty(vals)
@@ -218,6 +370,10 @@ function _process_l2_file!(filepath::String, config::DataSourceConfig,
                 (grid_spec.lat_max - grid_spec.lat_min) * n_lat) .+ 1
         ilon = ((lon_c .- grid_spec.lon_min) /
                 (grid_spec.lon_max - grid_spec.lon_min) * n_lon) .+ 1
+        ilat_center = ((lat_center_c .- grid_spec.lat_min) /
+                       (grid_spec.lat_max - grid_spec.lat_min) * n_lat) .+ 1
+        ilon_center = ((lon_center_c .- grid_spec.lon_min) /
+                       (grid_spec.lon_max - grid_spec.lon_min) * n_lon) .+ 1
 
         # Determine n_oversample
         n = if n_oversample_override !== nothing
@@ -225,24 +381,32 @@ function _process_l2_file!(filepath::String, config::DataSourceConfig,
         else
             # Auto-compute from median footprint extent vs grid cell size
             lat_extents = maximum(ilat, dims=2) .- minimum(ilat, dims=2)
-            med_extent = median(lat_extents)
+            lon_extents = maximum(ilon, dims=2) .- minimum(ilon, dims=2)
+            med_extent = median(max.(lat_extents, lon_extents))
             compute_n_oversample(med_extent, 1.0)
         end
 
-        # Allocate buffers
-        points_buf = zeros(T, n, n, 2)
-        ix_buf = zeros(Int32, n^2)
-        iy_buf = zeros(Int32, n^2)
-        lats0 = zeros(n)
-        lons0 = zeros(n)
-        lats1 = zeros(n)
-        lons1 = zeros(n)
+        if footprint_method isa CircularFootprintGridding
+            accumulate_circular_footprint!(grid_data, grid_std, grid_weights,
+                                           compute_std, ilat_center, ilon_center,
+                                           ilat, ilon, vals,
+                                           size(vals, 1), length(config.grid_vars), n)
+        else
+            # Allocate buffers
+            points_buf = zeros(T, n, n, 2)
+            ix_buf = zeros(Int32, n^2)
+            iy_buf = zeros(Int32, n^2)
+            lats0 = zeros(n)
+            lons0 = zeros(n)
+            lats1 = zeros(n)
+            lons1 = zeros(n)
 
-        accumulate_footprint!(grid_data, grid_std, grid_weights, compute_std,
-                              ilat, ilon, vals,
-                              size(vals, 1), length(config.grid_vars), n,
-                              points_buf, ix_buf, iy_buf,
-                              lats0, lons0, lats1, lons1)
+            accumulate_footprint!(grid_data, grid_std, grid_weights, compute_std,
+                                  ilat, ilon, vals,
+                                  size(vals, 1), length(config.grid_vars), n,
+                                  points_buf, ix_buf, iy_buf,
+                                  lats0, lons0, lats1, lons1)
+        end
     finally
         close(fin)
     end
@@ -256,13 +420,14 @@ function _process_l2_file_ka!(filepath::String, config::DataSourceConfig,
                                grid_spec::GridSpec{T}, backend,
                                grid_sum, grid_weights,
                                n_oversample_override,
+                               footprint_method::AbstractGriddingMethod,
                                nc_vars, fill_attrib, progress) where {T}
     fin = Dataset(filepath)
     try
-        # Quick bounding box check
-        lat_center = read_nc_variable(fin, config.basic["lat"])
-        lon_center = read_nc_variable(fin, config.basic["lon"])
+        lat_center, lon_center, lat_bnd, lon_bnd =
+            _read_l2_geometry(fin, config, footprint_method)
 
+        # Quick bounding box check with center coordinates.
         in_bounds = ((lat_center .> grid_spec.lat_min) .+
                      (lat_center .< grid_spec.lat_max) .+
                      (lon_center .> grid_spec.lon_min) .+
@@ -273,16 +438,7 @@ function _process_l2_file_ka!(filepath::String, config::DataSourceConfig,
             return
         end
 
-        # Read footprint corner coordinates
-        lat_bnd = read_nc_variable(fin, config.basic["lat_bnd"]; bounds=true)
-        lon_bnd = read_nc_variable(fin, config.basic["lon_bnd"]; bounds=true)
-
-        if size(lat_bnd, 1) == 4 && ndims(lat_bnd) == 2
-            lat_bnd = lat_bnd'
-            lon_bnd = lon_bnd'
-        end
-
-        # Apply filters (sorting is done inside accumulate_batch!)
+        # Apply filters
         idx = apply_filters(fin, config, lat_bnd, lon_bnd, grid_spec)
         ProgressMeter.next!(progress; showvalues=[(:File, filepath), (:N_pixels, length(idx))])
 
@@ -307,15 +463,21 @@ function _process_l2_file_ka!(filepath::String, config::DataSourceConfig,
         vals = mat_in[idx, :]
         lat_c = lat_bnd[idx, :]
         lon_c = lon_bnd[idx, :]
+        lat_center_c = lat_center[idx]
+        lon_center_c = lon_center[idx]
 
         # Filter out soundings with NaN/Inf in data or corners
         finite_mask = vec(all(isfinite, vals, dims=2)) .&
                       vec(all(isfinite, lat_c, dims=2)) .&
-                      vec(all(isfinite, lon_c, dims=2))
+                      vec(all(isfinite, lon_c, dims=2)) .&
+                      isfinite.(lat_center_c) .&
+                      isfinite.(lon_center_c)
         if !all(finite_mask)
             vals = vals[finite_mask, :]
             lat_c = lat_c[finite_mask, :]
             lon_c = lon_c[finite_mask, :]
+            lat_center_c = lat_center_c[finite_mask]
+            lon_center_c = lon_center_c[finite_mask]
         end
 
         if isempty(vals)
@@ -329,18 +491,29 @@ function _process_l2_file_ka!(filepath::String, config::DataSourceConfig,
                    (grid_spec.lat_max - grid_spec.lat_min) .* T(n_lat)) .+ one(T)
         ilon = T.((lon_c .- grid_spec.lon_min) /
                    (grid_spec.lon_max - grid_spec.lon_min) .* T(n_lon)) .+ one(T)
+        ilat_center = T.((lat_center_c .- grid_spec.lat_min) /
+                          (grid_spec.lat_max - grid_spec.lat_min) .* T(n_lat)) .+ one(T)
+        ilon_center = T.((lon_center_c .- grid_spec.lon_min) /
+                          (grid_spec.lon_max - grid_spec.lon_min) .* T(n_lon)) .+ one(T)
 
         # Determine n_oversample
         n = if n_oversample_override !== nothing
             n_oversample_override
         else
             lat_extents = maximum(ilat, dims=2) .- minimum(ilat, dims=2)
-            med_extent = median(lat_extents)
+            lon_extents = maximum(ilon, dims=2) .- minimum(ilon, dims=2)
+            med_extent = median(max.(lat_extents, lon_extents))
             compute_n_oversample(med_extent, 1.0)
         end
 
-        accumulate_batch!(backend, grid_sum, grid_weights,
-                          ilat, ilon, vals, n, length(config.grid_vars))
+        if footprint_method isa CircularFootprintGridding
+            accumulate_circular_batch!(backend, grid_sum, grid_weights,
+                                       ilat_center, ilon_center, ilat, ilon,
+                                       vals, n, length(config.grid_vars))
+        else
+            accumulate_batch!(backend, grid_sum, grid_weights,
+                              ilat, ilon, vals, n, length(config.grid_vars))
+        end
     finally
         close(fin)
     end

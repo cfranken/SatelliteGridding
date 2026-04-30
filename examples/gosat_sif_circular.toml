@@ -1,0 +1,23 @@
+# Example GOSAT SIF configuration for circular-footprint gridding.
+# Check the variable names in your files with `ncdump -h`; some legacy
+# products used slightly different spellings.
+
+filePattern = "YYYY/MM/GOSAT-SIF-L2-??MMDD-B9200-fv1.nc"
+folder = "/path/to/GOSAT_LITE/"
+
+[basic]
+# Center coordinates are optional for circular gridding. If omitted, centers are
+# derived from the four footprint coordinates.
+lat = "Latitude"
+lon = "Longitude"
+lat_bnd = "Latitude_corners"
+lon_bnd = "Longitude_corners"
+
+[grid]
+sif = "Daily_Averaged_SIF"
+sif_757P = "SIF_P_757nm"
+sif_771P = "SIF_P_771nm"
+dcCorr = "daily_correction_factor"
+
+[filter]
+SZA = "< 80"

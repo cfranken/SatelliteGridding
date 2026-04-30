@@ -36,8 +36,9 @@ julia --project=. bin/grid.jl l2 [options]
 | `--monthly` | Flag | false | Use months instead of days for time step |
 | `--oversample_temporal` | Float32 | 1.0 | Temporal oversampling factor |
 | `--nOversample` | Int | 0 (auto) | Sub-pixel factor (0 = auto-compute) |
+| `--footprint` | String | `quad` | Footprint geometry: `quad` or `circle` |
 | `--compSTD` | Flag | false | Compute standard deviation |
-| `--backend` | String | `sequential` | Compute backend: `sequential`, `cpu`, or `cuda` |
+| `--backend` | String | `sequential` | Compute backend: `sequential`, `cpu`, `cuda`, or `metal` |
 | `--keepGoing` | Flag | false | Continue after per-file processing errors |
 
 #### Examples
@@ -74,6 +75,21 @@ julia --project=. bin/grid.jl l2 \
     --compSTD \
     -o tropomi_no2_2019_monthly.nc
 ```
+
+GOSAT SIF with circular footprints:
+```bash
+julia --project=. bin/grid.jl l2 \
+    --config examples/gosat_sif_center_radius.toml \
+    --footprint circle --nOversample 80 \
+    --backend cpu \
+    --dLat 1.0 --dLon 1.0 \
+    --startDate 2010-01-01 --stopDate 2010-12-31 \
+    -o gosat_sif_2010_radius.nc
+```
+
+`--footprint circle` works with `--backend sequential`, `cpu`, `cuda`, and
+`metal`. CUDA and Metal require the corresponding optional Julia GPU package and
+hardware support.
 
 ### `center` — Grid Center-Coordinate Data
 
@@ -133,8 +149,9 @@ julia --project=. bin/generate_modis_geolocation.jl \
 |:--------|:-----|:------------|
 | Sequential | `--backend sequential` | Default. Uses Welford's online algorithm for mean/std. Single-threaded. Supports `--compSTD`. |
 | KA CPU | `--backend cpu` | KernelAbstractions CPU backend. Parallel sort + subpixel computation. Sum-based accumulation. |
-| KA CUDA | `--backend cuda` | KernelAbstractions GPU backend. Requires CUDA.jl. All computation on GPU with atomic scatter. |
+| KA CUDA | `--backend cuda` | KernelAbstractions CUDA backend. Requires CUDA.jl. All computation on GPU with atomic scatter. |
+| KA Metal | `--backend metal` | KernelAbstractions Metal backend. Requires Metal.jl on macOS/Apple GPU. |
 
-The `cpu` and `cuda` backends use sum-based accumulation (mean = sum/weight) instead of
+The KernelAbstractions backends use sum-based accumulation (mean = sum/weight) instead of
 Welford's incremental mean. This is fully parallelizable but does not support `--compSTD`
 in a single pass. Standard deviation with KA backends requires a two-pass approach.

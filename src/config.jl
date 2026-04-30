@@ -4,11 +4,12 @@
 Load a configuration file (TOML or JSON) and return a `DataSourceConfig`.
 
 The file must contain a `[grid]` section plus `filePattern` and `folder`.
-Footprint-aware L2 gridding also requires `[basic]` entries for `lat`, `lon`,
-`lat_bnd`, and `lon_bnd`. Center-coordinate gridding can use `[basic]` `lat`
-and `lon`, a geolocation lookup table, or generated MODIS sinusoidal geolocation.
-Filters are defined in an optional `[filter]` section using intuitive string
-expressions:
+Footprint-aware L2 gridding usually uses `[basic]` entries for `lat_bnd` and
+`lon_bnd`. Circular footprints can alternatively use center `lat`/`lon` plus a
+`radius` variable or scalar `[circle] radius`. Center-coordinate gridding can use
+`[basic]` `lat` and `lon`, a geolocation lookup table, or generated MODIS
+sinusoidal geolocation. Filters are defined in an optional `[filter]` section
+using intuitive string expressions:
 
 # Example TOML
 ```toml
@@ -84,7 +85,7 @@ function load_config(config_path::String)::DataSourceConfig
     !isempty(folder) || error("Config missing required 'folder': $config_path")
 
     options = Dict{String,Any}()
-    for section in ("options", "center", "modis")
+    for section in ("options", "center", "modis", "circle")
         if haskey(d, section)
             for (k, v) in d[section]
                 options[string(k)] = v
@@ -101,6 +102,7 @@ function _warn_unknown_options(options::Dict{String,Any})
         "scale_factor", "add_offset", "fill_value", "valid_min", "valid_max",
         "transpose_data", "min_count", "min_nir_reflectance", "modis_pixels",
         "vegetation_red", "vegetation_nir", "vegetation_blue", "vegetation_swir",
+        "radius", "radius_unit",
     ])
     for key in keys(options)
         if !(key in known)

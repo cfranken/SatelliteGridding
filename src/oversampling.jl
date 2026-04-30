@@ -313,6 +313,128 @@ end
 end
 
 """
+    compute_circular_footprint_indices_ka!(backend, ix_out, iy_out, inside_count,
+                                           skip_flag, center_lat, center_lon,
+                                           lat_corners, lon_corners, n)
+
+KA kernel that computes sampled grid-cell indices for circular or near-circular
+footprints. The four coordinates define the footprint bounding box or edge
+points around the center coordinate. Points outside the inferred circle/ellipse
+are marked with `-1`; `inside_count[fp]` stores the number of valid samples used
+for normalizing the scatter weight.
+"""
+function compute_circular_footprint_indices_ka!(backend,
+                                                ix_out::AbstractMatrix{Int32},
+                                                iy_out::AbstractMatrix{Int32},
+                                                inside_count::AbstractVector{Int32},
+                                                skip_flag::AbstractVector{Int32},
+                                                center_lat::AbstractVector,
+                                                center_lon::AbstractVector,
+                                                lat_corners::AbstractMatrix,
+                                                lon_corners::AbstractMatrix,
+                                                n::Int)
+    n_fp = size(lat_corners, 1)
+    kernel! = _compute_circular_indices_kernel!(backend)
+    kernel!(ix_out, iy_out, inside_count, skip_flag, center_lat, center_lon,
+            lat_corners, lon_corners, Int32(n), ndrange=n_fp)
+    KernelAbstractions.synchronize(backend)
+    nothing
+end
+
+@kernel function _compute_circular_indices_kernel!(ix_out, iy_out, inside_count,
+                                                   skip_flag, center_lat, center_lon,
+                                                   lat_corners, lon_corners,
+                                                   n::Int32)
+    fp = @index(Global)
+
+    @inbounds begin
+        oneT = one(eltype(lat_corners))
+        twoT = oneT + oneT
+        halfT = oneT / twoT
+        zeroT = zero(eltype(lat_corners))
+
+        clat = center_lat[fp]
+        clon = center_lon[fp]
+        radius_lat = zeroT
+        radius_lon = zeroT
+
+        for c in Int32(1):Int32(4)
+            radius_lat = max(radius_lat, abs(lat_corners[fp, c] - clat))
+            radius_lon = max(radius_lon, abs(lon_corners[fp, c] - clon))
+        end
+
+        nsq = n * n
+        center_col = floor(Int32, clon)
+        center_row = floor(Int32, clat)
+
+        if (radius_lat <= zeroT) | (radius_lon <= zeroT)
+            skip_flag[fp] = Int32(1)
+            inside_count[fp] = Int32(1)
+            ix_out[fp, 1] = center_col
+            iy_out[fp, 1] = center_row
+            for k in Int32(2):nsq
+                ix_out[fp, k] = Int32(-1)
+                iy_out[fp, k] = Int32(-1)
+            end
+        else
+            min_lat = floor(Int32, clat - radius_lat)
+            max_lat = floor(Int32, clat + radius_lat)
+            min_lon = floor(Int32, clon - radius_lon)
+            max_lon = floor(Int32, clon + radius_lon)
+
+            if (max_lat - min_lat == Int32(0)) & (max_lon - min_lon == Int32(0))
+                skip_flag[fp] = Int32(1)
+                inside_count[fp] = Int32(1)
+                ix_out[fp, 1] = center_col
+                iy_out[fp, 1] = center_row
+                for k in Int32(2):nsq
+                    ix_out[fp, k] = Int32(-1)
+                    iy_out[fp, k] = Int32(-1)
+                end
+            else
+                skip_flag[fp] = Int32(0)
+                count = Int32(0)
+
+                for iy in Int32(1):n
+                    lat = clat - radius_lat +
+                          (convert(eltype(lat_corners), iy) - halfT) *
+                          (twoT * radius_lat / convert(eltype(lat_corners), n))
+                    lat_norm = (lat - clat) / radius_lat
+                    for ix in Int32(1):n
+                        lon = clon - radius_lon +
+                              (convert(eltype(lat_corners), ix) - halfT) *
+                              (twoT * radius_lon / convert(eltype(lat_corners), n))
+                        lon_norm = (lon - clon) / radius_lon
+                        k = (iy - Int32(1)) * n + ix
+                        if lat_norm * lat_norm + lon_norm * lon_norm <= oneT
+                            count += Int32(1)
+                            ix_out[fp, k] = floor(Int32, lon)
+                            iy_out[fp, k] = floor(Int32, lat)
+                        else
+                            ix_out[fp, k] = Int32(-1)
+                            iy_out[fp, k] = Int32(-1)
+                        end
+                    end
+                end
+
+                if count == Int32(0)
+                    skip_flag[fp] = Int32(1)
+                    inside_count[fp] = Int32(1)
+                    ix_out[fp, 1] = center_col
+                    iy_out[fp, 1] = center_row
+                    for k in Int32(2):nsq
+                        ix_out[fp, k] = Int32(-1)
+                        iy_out[fp, k] = Int32(-1)
+                    end
+                else
+                    inside_count[fp] = count
+                end
+            end
+        end
+    end
+end
+
+"""
     scatter_accumulate!(grid_sum, grid_weights, ix, iy, skip_flag, values, n, n_vars)
 
 Sequential scatter-accumulate of weighted values into grid cells.
@@ -372,6 +494,54 @@ function scatter_accumulate!(grid_sum::AbstractArray{T,3},
 end
 
 """
+    scatter_accumulate_circular!(grid_sum, grid_weights, ix, iy, inside_count,
+                                 skip_flag, values, n, n_vars)
+
+Sequential scatter-accumulate for circular footprints. Oversampled footprints
+use per-footprint weights `1 / inside_count[fp]` because samples outside the
+circle/ellipse are masked out.
+"""
+function scatter_accumulate_circular!(grid_sum::AbstractArray{T,3},
+                                      grid_weights::AbstractMatrix{T},
+                                      ix::AbstractMatrix{<:Integer},
+                                      iy::AbstractMatrix{<:Integer},
+                                      inside_count::AbstractVector{<:Integer},
+                                      skip_flag::AbstractVector{<:Integer},
+                                      values::AbstractMatrix,
+                                      n::Int, n_vars::Int) where {T}
+    n_fp = size(ix, 1)
+    nsq = n * n
+
+    @inbounds for fp in 1:n_fp
+        flag = skip_flag[fp]
+
+        if flag == 1
+            col = Int(ix[fp, 1])
+            row = Int(iy[fp, 1])
+            grid_weights[col, row] += one(T)
+            for z in 1:n_vars
+                grid_sum[col, row, z] += values[fp, z]
+            end
+        elseif flag == 0
+            count = inside_count[fp]
+            count <= 0 && continue
+            fac = T(1 / count)
+            for k in 1:nsq
+                col = Int(ix[fp, k])
+                row = Int(iy[fp, k])
+                if col > 0 && row > 0
+                    grid_weights[col, row] += fac
+                    for z in 1:n_vars
+                        grid_sum[col, row, z] += fac * values[fp, z]
+                    end
+                end
+            end
+        end
+    end
+    nothing
+end
+
+"""
     scatter_accumulate_ka!(backend, grid_sum, grid_weights,
                            ix, iy, skip_flag, values, n, n_vars)
 
@@ -425,5 +595,65 @@ end
             end
         end
         # flag == 2: skip (footprint too wide)
+    end
+end
+
+"""
+    scatter_accumulate_circular_ka!(backend, grid_sum, grid_weights,
+                                    ix, iy, inside_count, skip_flag,
+                                    values, n, n_vars)
+
+KA kernel version of circular-footprint scatter-accumulate using atomics for
+GPU backends.
+"""
+function scatter_accumulate_circular_ka!(backend,
+                                         grid_sum::AbstractArray{T,3},
+                                         grid_weights::AbstractMatrix{T},
+                                         ix::AbstractMatrix{Int32},
+                                         iy::AbstractMatrix{Int32},
+                                         inside_count::AbstractVector{Int32},
+                                         skip_flag::AbstractVector{Int32},
+                                         values::AbstractMatrix,
+                                         n::Int, n_vars::Int) where {T}
+    n_fp = size(ix, 1)
+    kernel! = _scatter_circular_kernel!(backend)
+    kernel!(grid_sum, grid_weights, ix, iy, inside_count, skip_flag, values,
+            Int32(n), Int32(n_vars), ndrange=n_fp)
+    KernelAbstractions.synchronize(backend)
+    nothing
+end
+
+@kernel function _scatter_circular_kernel!(grid_sum, grid_weights, ix, iy,
+                                           inside_count, skip_flag, values,
+                                           n::Int32, n_vars::Int32)
+    fp = @index(Global)
+
+    @inbounds begin
+        flag = skip_flag[fp]
+
+        if flag == Int32(1)
+            col = ix[fp, 1]
+            row = iy[fp, 1]
+            @atomic grid_weights[col, row] += one(eltype(grid_weights))
+            for z in Int32(1):n_vars
+                @atomic grid_sum[col, row, z] += values[fp, z]
+            end
+        elseif flag == Int32(0)
+            count = inside_count[fp]
+            if count > Int32(0)
+                fac = one(eltype(grid_weights)) / count
+                nsq = n * n
+                for k in Int32(1):nsq
+                    col = ix[fp, k]
+                    row = iy[fp, k]
+                    if (col > Int32(0)) & (row > Int32(0))
+                        @atomic grid_weights[col, row] += fac
+                        for z in Int32(1):n_vars
+                            @atomic grid_sum[col, row, z] += fac * values[fp, z]
+                        end
+                    end
+                end
+            end
+        end
     end
 end

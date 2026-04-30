@@ -126,6 +126,34 @@
         rm(tmpfile)
     end
 
+    @testset "load_config — circular radius options" begin
+        toml_content = """
+        filePattern = "*.nc"
+        folder = "/data/"
+
+        [basic]
+        lat = "Latitude"
+        lon = "Longitude"
+
+        [circle]
+        radius = 5.25
+        radius_unit = "km"
+
+        [grid]
+        sif = "Daily_Averaged_SIF"
+        """
+        tmpfile = tempname() * ".toml"
+        write(tmpfile, toml_content)
+
+        config = load_config(tmpfile)
+
+        @test config.basic["lat"] == "Latitude"
+        @test config.options["radius"] == 5.25
+        @test config.options["radius_unit"] == "km"
+
+        rm(tmpfile)
+    end
+
     @testset "load_config — missing required section" begin
         toml_content = """
         [basic]

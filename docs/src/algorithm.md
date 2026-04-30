@@ -9,7 +9,9 @@ cells, so simply assigning each observation to its center coordinate would lose
 spatial information.
 
 `SatelliteGridding.jl` uses **sub-pixel oversampling** to properly distribute each
-observation across the grid cells it covers.
+observation across the grid cells it covers. The default path treats footprints as
+quadrilaterals; `CircularFootprintGridding` treats the four coordinates as a
+circular-footprint bounding box or edge points.
 
 ### Step 1: Corner Sorting (CCW)
 
@@ -61,6 +63,44 @@ sub-pixel computation needed).
 
 **Skip path**: If the footprint's longitude extent exceeds `n` grid cells,
 it's too wide for meaningful oversampling and is skipped.
+
+### Circular Footprints
+
+For circular products such as GOSAT, the footprint extent can come from four
+bounding coordinates or from center latitude/longitude plus a radius. If a
+corner-based product does not provide explicit center latitude/longitude
+variables, the center is derived from the four coordinates.
+
+The circular path samples an `n×n` grid over the inferred bounding box and keeps
+only points inside the circle. In fractional grid-index space this can become an
+ellipse when `dLat != dLon`, which is the right representation for a circular
+footprint on a grid whose latitude and longitude cell sizes differ.
+
+For center-plus-radius products, set `[basic] lat` and `[basic] lon`, then either
+provide a per-sounding `[basic] radius` variable or a scalar `[circle] radius`.
+`[circle] radius_unit` can be `degrees`, `km`, or `m`.
+
+Use this method from Julia:
+
+```julia
+grid(config, grid_spec, time_spec,
+     CircularFootprintGridding(n_oversample=80);
+     outfile="gosat_sif.nc")
+```
+
+or from the CLI:
+
+```bash
+julia --project=. bin/grid.jl l2 \
+    --config examples/gosat_sif_center_radius.toml \
+    --footprint circle --nOversample 80 \
+    --backend cpu \
+    -o gosat_sif.nc
+```
+
+This method works with the sequential backend and the KA CPU/CUDA/Metal
+backends. The KA path uses a separate circular index kernel and normalizes each
+footprint by the number of samples inside the inferred circle/ellipse.
 
 ### Choosing `n`
 

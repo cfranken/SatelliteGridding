@@ -127,6 +127,169 @@
         rm(test_dir; recursive=true)
     end
 
+    @testset "Synthetic circular footprint file → grid_l2 pipeline" begin
+        test_dir = mktempdir()
+        input_file = joinpath(test_dir, "GOSAT_2020-01-01.nc")
+
+        ds = Dataset(input_file, "c")
+        defDim(ds, "x", 1)
+        defDim(ds, "nv", 4)
+
+        v_lat_bnd = defVar(ds, "Latitude_corners", Float32, ("x", "nv"))
+        v_lon_bnd = defVar(ds, "Longitude_corners", Float32, ("x", "nv"))
+        v_sif = defVar(ds, "Daily_Averaged_SIF", Float32, ("x",))
+
+        v_lat_bnd[:, :] = Float32[1.0 1.0 3.0 3.0]
+        v_lon_bnd[:, :] = Float32[1.0 3.0 3.0 1.0]
+        v_sif[:] = Float32[10.0]
+        close(ds)
+
+        config_file = joinpath(test_dir, "gosat_config.toml")
+        config_toml = """
+        filePattern = "GOSAT_YYYY-MM-DD.nc"
+        folder = "$(replace(test_dir, "\\" => "/"))/"
+
+        [basic]
+        lat_bnd = "Latitude_corners"
+        lon_bnd = "Longitude_corners"
+
+        [grid]
+        sif = "Daily_Averaged_SIF"
+        """
+        write(config_file, config_toml)
+
+        output_file = joinpath(test_dir, "gosat_output.nc")
+        config = load_config(config_file)
+        grid_spec = GridSpec(lat_min=0.0f0, lat_max=4.0f0,
+                             lon_min=0.0f0, lon_max=4.0f0,
+                             dlat=1.0f0, dlon=1.0f0)
+        time_spec = TimeSpec(DateTime("2020-01-01"), DateTime("2020-01-01"),
+                             Dates.Day(1))
+
+        grid(config, grid_spec, time_spec, CircularFootprintGridding(n_oversample=100);
+             outfile=output_file)
+
+        ds_out = Dataset(output_file)
+        weights = ds_out["n"][1, :, :]
+        sif = ds_out["sif"][1, :, :]
+
+        @test sum(weights) ≈ 1.0f0 rtol=2f-5
+        @test weights[2, 2] ≈ 0.25f0 atol=0.01f0
+        @test weights[3, 2] ≈ 0.25f0 atol=0.01f0
+        @test weights[2, 3] ≈ 0.25f0 atol=0.01f0
+        @test weights[3, 3] ≈ 0.25f0 atol=0.01f0
+
+        for idx in CartesianIndices(weights)
+            if weights[idx] > 0
+                @test sif[idx] ≈ 10.0f0
+            end
+        end
+
+        close(ds_out)
+
+        output_file_ka = joinpath(test_dir, "gosat_output_ka.nc")
+        grid(config, grid_spec, time_spec, CircularFootprintGridding(n_oversample=100);
+             backend=CPU(), outfile=output_file_ka)
+
+        ds_out_ka = Dataset(output_file_ka)
+        weights_ka = ds_out_ka["n"][1, :, :]
+        sif_ka = ds_out_ka["sif"][1, :, :]
+
+        @test weights_ka ≈ weights rtol=2f-5
+        for idx in CartesianIndices(weights_ka)
+            if weights_ka[idx] > 0
+                @test sif_ka[idx] ≈ 10.0f0
+            end
+        end
+
+        close(ds_out_ka)
+        rm(test_dir; recursive=true)
+    end
+
+    @testset "Synthetic center-radius circular file → grid_l2 pipeline" begin
+        test_dir = mktempdir()
+        input_file = joinpath(test_dir, "GOSAT_RADIUS_2020-01-01.nc")
+
+        ds = Dataset(input_file, "c")
+        defDim(ds, "x", 1)
+
+        v_lat = defVar(ds, "Latitude", Float32, ("x",))
+        v_lon = defVar(ds, "Longitude", Float32, ("x",))
+        v_radius = defVar(ds, "FootprintRadius", Float32, ("x",))
+        v_sif = defVar(ds, "Daily_Averaged_SIF", Float32, ("x",))
+
+        v_lat[:] = Float32[0.0]
+        v_lon[:] = Float32[2.0]
+        v_radius[:] = Float32[1.0]
+        v_sif[:] = Float32[10.0]
+        close(ds)
+
+        config_file = joinpath(test_dir, "gosat_radius_config.toml")
+        config_toml = """
+        filePattern = "GOSAT_RADIUS_YYYY-MM-DD.nc"
+        folder = "$(replace(test_dir, "\\" => "/"))/"
+
+        [basic]
+        lat = "Latitude"
+        lon = "Longitude"
+        radius = "FootprintRadius"
+
+        [circle]
+        radius_unit = "degrees"
+
+        [grid]
+        sif = "Daily_Averaged_SIF"
+        """
+        write(config_file, config_toml)
+
+        output_file = joinpath(test_dir, "gosat_radius_output.nc")
+        config = load_config(config_file)
+        grid_spec = GridSpec(lat_min=-2.0f0, lat_max=2.0f0,
+                             lon_min=0.0f0, lon_max=4.0f0,
+                             dlat=1.0f0, dlon=1.0f0)
+        time_spec = TimeSpec(DateTime("2020-01-01"), DateTime("2020-01-01"),
+                             Dates.Day(1))
+
+        grid(config, grid_spec, time_spec, CircularFootprintGridding(n_oversample=100);
+             outfile=output_file)
+
+        ds_out = Dataset(output_file)
+        weights = ds_out["n"][1, :, :]
+        sif = ds_out["sif"][1, :, :]
+
+        @test sum(weights) ≈ 1.0f0 rtol=2f-5
+        @test weights[2, 2] ≈ 0.25f0 atol=0.01f0
+        @test weights[3, 2] ≈ 0.25f0 atol=0.01f0
+        @test weights[2, 3] ≈ 0.25f0 atol=0.01f0
+        @test weights[3, 3] ≈ 0.25f0 atol=0.01f0
+
+        for idx in CartesianIndices(weights)
+            if weights[idx] > 0
+                @test sif[idx] ≈ 10.0f0
+            end
+        end
+
+        close(ds_out)
+
+        output_file_ka = joinpath(test_dir, "gosat_radius_output_ka.nc")
+        grid(config, grid_spec, time_spec, CircularFootprintGridding(n_oversample=100);
+             backend=CPU(), outfile=output_file_ka)
+
+        ds_out_ka = Dataset(output_file_ka)
+        weights_ka = ds_out_ka["n"][1, :, :]
+        sif_ka = ds_out_ka["sif"][1, :, :]
+
+        @test weights_ka ≈ weights rtol=2f-5
+        for idx in CartesianIndices(weights_ka)
+            if weights_ka[idx] > 0
+                @test sif_ka[idx] ≈ 10.0f0
+            end
+        end
+
+        close(ds_out_ka)
+        rm(test_dir; recursive=true)
+    end
+
     @testset "Synthetic center-coordinate file → grid_center pipeline" begin
         test_dir = mktempdir()
         input_file = joinpath(test_dir, "CENTER_2020-01-01.nc")
