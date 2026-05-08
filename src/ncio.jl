@@ -184,7 +184,8 @@ function create_output_dataset(outfile::String, grid_spec::GridSpec,
 
     defDim(ds, "lon", length(grid_spec.lon))
     defDim(ds, "lat", length(grid_spec.lat))
-    defDim(ds, "time", n_times)
+    # Time is unlimited so per-chunk outputs can be concatenated with ncrcat.
+    defDim(ds, "time", Inf)
 
     ds_lat = defVar(ds, "lat", Float32, ("lat",),
                     attrib=["units" => "degrees_north", "long_name" => "Latitude"])
@@ -196,6 +197,9 @@ function create_output_dataset(outfile::String, grid_spec::GridSpec,
 
     ds_lat[:] = grid_spec.lat
     ds_lon[:] = grid_spec.lon
+    # Bump the unlimited time dim to its expected length so dependent variables
+    # are sized correctly; gridder overwrites these placeholder times per slice.
+    ds_time[1:n_times] = zeros(Float32, n_times)
 
     ds.attrib["title"] = "Gridded satellite data"
     ds.attrib["created_with"] = "SatelliteGridding.jl"
@@ -203,16 +207,16 @@ function create_output_dataset(outfile::String, grid_spec::GridSpec,
     # Define output data variables
     nc_vars = Dict{String,Any}()
     for (key, _) in grid_vars
-        nc_vars[key] = defVar(ds, key, Float32, ("time", "lon", "lat"),
+        nc_vars[key] = defVar(ds, key, Float32, ("lon", "lat", "time"),
                               deflatelevel=4, fillvalue=-999.0f0)
         if compute_std
             key_std = key * "_std"
-            nc_vars[key_std] = defVar(ds, key_std, Float32, ("time", "lon", "lat"),
+            nc_vars[key_std] = defVar(ds, key_std, Float32, ("lon", "lat", "time"),
                                       deflatelevel=4, fillvalue=-999.0f0)
         end
     end
 
-    nc_vars["n"] = defVar(ds, "n", Float32, ("time", "lon", "lat"),
+    nc_vars["n"] = defVar(ds, "n", Float32, ("lon", "lat", "time"),
                           deflatelevel=4, fillvalue=-999.0f0,
                           attrib=["units" => "", "long_name" => "Number of pixels in average"])
 

@@ -297,6 +297,71 @@ function center_coordinates(provider::ModisMonolithicLUTGeolocation,
 end
 
 """
+    modis_tile_geographic_bbox(h, v; pixels=MODIS_DEFAULT_PIXELS)
+        -> (lat_min, lat_max, lon_min, lon_max)
+
+Return a conservative geographic bounding box (degrees) for a MODLAND
+sinusoidal tile. Samples each tile edge at multiple points to capture the
+projection's curvature; longitudes that go non-finite near the poles are
+replaced by the full ±180° range so the returned bbox never excludes valid
+pixels.
+"""
+function modis_tile_geographic_bbox(h::Integer, v::Integer;
+                                    pixels::Integer=MODIS_DEFAULT_PIXELS)
+    _validate_modis_tile(h, v)
+    _validate_modis_pixels(pixels)
+    n = 17
+    lat_min = Float32(Inf); lat_max = Float32(-Inf)
+    lon_min = Float32(Inf); lon_max = Float32(-Inf)
+    saw_nonfinite_lon = false
+    @inbounds for k in 0:(n-1)
+        s = round(Int, 1 + k * (pixels - 1) / (n - 1))
+        for (line, sample) in ((1, s), (pixels, s), (s, 1), (s, pixels))
+            lat, lon = modis_sinusoidal_latlon(h, v, line, sample; pixels=pixels)
+            if isfinite(lat)
+                lat < lat_min && (lat_min = lat)
+                lat > lat_max && (lat_max = lat)
+            end
+            if isfinite(lon)
+                lon < lon_min && (lon_min = lon)
+                lon > lon_max && (lon_max = lon)
+            else
+                saw_nonfinite_lon = true
+            end
+        end
+    end
+    isfinite(lat_min) || (lat_min = -90f0)
+    isfinite(lat_max) || (lat_max = 90f0)
+    if saw_nonfinite_lon || !isfinite(lon_min) || !isfinite(lon_max)
+        lon_min, lon_max = -180f0, 180f0
+    end
+    lat_min, lat_max, lon_min, lon_max
+end
+
+"""
+    provider_tile_intersects_grid(provider, filepath, grid_spec) -> Bool
+
+Cheap pre-read rejection: returns `false` if the file's tile is known to lie
+entirely outside the output grid bbox. Default is `true` (process the file).
+The MODIS sinusoidal provider parses `(h, v)` from the filename and tests
+the tile's analytical bbox against `grid_spec`.
+"""
+provider_tile_intersects_grid(::AbstractCenterGeolocation, ::String, ::GridSpec) = true
+
+function provider_tile_intersects_grid(provider::ModisSinusoidalGeolocation,
+                                       filepath::String, grid_spec::GridSpec)
+    h, v = try
+        parse_modis_tile(filepath)
+    catch
+        return true
+    end
+    lat_min, lat_max, lon_min, lon_max = modis_tile_geographic_bbox(h, v;
+                                                                   pixels=provider.pixels)
+    !(lat_max < grid_spec.lat_min || lat_min > grid_spec.lat_max ||
+      lon_max < grid_spec.lon_min || lon_min > grid_spec.lon_max)
+end
+
+"""
     sort_files_for_provider(provider, files) -> Vector{String}
 
 Reorder one window's input files so consecutive granules are likely to share

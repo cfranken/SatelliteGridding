@@ -337,9 +337,32 @@ function accumulate_center!(grid_data::AbstractArray{T,3},
                             values::AbstractMatrix{T},
                             n_pixels::Int, n_vars::Int) where {T}
     @inbounds for i in 1:n_pixels
-        grid_weights[lon_idx[i], lat_idx[i]] += one(T)
+        col = lon_idx[i]
+        row = lat_idx[i]
+        grid_weights[col, row] += one(T)
         for z in 1:n_vars
-            grid_data[lon_idx[i], lat_idx[i], z] += values[i, z]
+            grid_data[col, row, z] += values[i, z]
+        end
+    end
+    nothing
+end
+
+# Mask-aware variant: skip invalid rows in place rather than allocating
+# compacted copies of `lat_idx`/`lon_idx`/`values` upstream.
+function accumulate_center!(grid_data::AbstractArray{T,3},
+                            grid_weights::AbstractMatrix{T},
+                            lat_idx::AbstractVector{<:Integer},
+                            lon_idx::AbstractVector{<:Integer},
+                            values::AbstractMatrix{T},
+                            valid::BitVector,
+                            n_pixels::Int, n_vars::Int) where {T}
+    @inbounds for i in 1:n_pixels
+        valid[i] || continue
+        col = lon_idx[i]
+        row = lat_idx[i]
+        grid_weights[col, row] += one(T)
+        for z in 1:n_vars
+            grid_data[col, row, z] += values[i, z]
         end
     end
     nothing

@@ -1,41 +1,41 @@
 #!/usr/bin/env bash
 #
-# Grid MCD43A4 surface reflectance into a 16-day product. Defaults to global
-# 1°, 2018-2025; override LAT_MIN/LAT_MAX/LON_MIN/LON_MAX env vars for a
-# subregion (the tile-bbox skip in the gridder will drop unrelated tiles
-# before any read).
+# Grid TROPOMI Level-2 data into a 16-day product, defaulting to 1° global.
+# Override LAT_MIN/LAT_MAX/LON_MIN/LON_MAX for a subregion. Footprints come
+# from `lat_bnd`/`lon_bnd` in the L2 file, so this uses the `l2` subcommand
+# of `grid.jl` (subpixel oversampling, not center-coord binning).
 #
-# Outputs Nadir reflectance bands 1-7 plus EVI, NDVI, NIRv, NDWI.
-#
-# Fans out across time chunks as independent Julia processes (the center
-# gridder is single-threaded), then concatenates the per-chunk netCDFs with
-# ncrcat. Chunks are aligned to DDAYS boundaries from START_DATE, so the
-# concatenated output has the exact same cadence as a single-process run.
+# Same overall shape as run_modis_16day_global.sh: fans out across time
+# chunks as independent Julia processes, then `ncrcat`s the per-chunk netCDFs
+# into one output along the time dimension.
 #
 # Run from the SatelliteGridding repo root:
-#   bash bin/run_modis_16day_global.sh
+#   CONFIG=examples/tropomi_sif.toml bash bin/run_tropomi_l2_16day.sh
 #
 # Tunables (env vars):
-#   JOBS=8                       number of concurrent Julia processes
-#   OUTFILE=...                  final concatenated netCDF
-#   CHUNK_DIR=...                directory for per-chunk intermediates
-#   START_DATE=2018-01-01
+#   CONFIG=examples/tropomi_sif.toml    L2 config (must define basic.lat_bnd/lon_bnd)
+#   JOBS=8                              concurrent Julia processes
+#   OUTFILE=...                         final concatenated netCDF
+#   CHUNK_DIR=...                       per-chunk intermediates dir
+#   START_DATE=2018-05-01
 #   STOP_DATE=2025-12-31
 #   DDAYS=16
 #   DLAT=1.0   DLON=1.0
-#   LAT_MIN=-90 LAT_MAX=90 LON_MIN=-180 LON_MAX=180   output bbox
-#   GEO_CACHE=...                pre-populated MODIS sinusoidal cache
-#   KEEP_CHUNKS=1                keep per-chunk files after concat (default: delete)
-#   PROGRESS_INTERVAL=30         seconds between live progress printouts
+#   LAT_MIN=-90 LAT_MAX=90 LON_MIN=-180 LON_MAX=180
+#   N_OVERSAMPLE=0                      0 means auto-compute from footprint/grid ratio
+#   FOOTPRINT=quad                      or "circle" for circular L2 products
+#   KEEP_CHUNKS=1                       keep per-chunk files after concat
+#   PROGRESS_INTERVAL=30                seconds between live progress printouts
 
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-CONFIG="${CONFIG:-examples/modis_reflectance_kiwi.toml}"
-OUTFILE="${OUTFILE:-modis_mcd43a4_16d_1deg_2018_2025.nc}"
-START_DATE="${START_DATE:-2018-01-01}"
+CONFIG="${CONFIG:-examples/tropomi_sif.toml}"
+PRODUCT_TAG="${PRODUCT_TAG:-$(basename "${CONFIG%.toml}")}"
+OUTFILE="${OUTFILE:-${PRODUCT_TAG}_16d_1deg.nc}"
+START_DATE="${START_DATE:-2018-05-01}"
 STOP_DATE="${STOP_DATE:-2025-12-31}"
 DDAYS="${DDAYS:-16}"
 DLAT="${DLAT:-1.0}"
@@ -45,7 +45,8 @@ LAT_MAX="${LAT_MAX:-90}"
 LON_MIN="${LON_MIN:--180}"
 LON_MAX="${LON_MAX:-180}"
 JOBS="${JOBS:-8}"
-GEO_CACHE="${GEO_CACHE:-$HOME/.cache/SatelliteGridding/modis/sinusoidal_2400px_v1}"
+N_OVERSAMPLE="${N_OVERSAMPLE:-0}"
+FOOTPRINT="${FOOTPRINT:-quad}"
 CHUNK_DIR="${CHUNK_DIR:-${OUTFILE%.nc}_chunks}"
 KEEP_CHUNKS="${KEEP_CHUNKS:-0}"
 
@@ -63,9 +64,9 @@ echo "Config:        $CONFIG"
 echo "Output:        $OUTFILE"
 echo "Window:        $START_DATE -> $STOP_DATE every $DDAYS days"
 echo "Resolution:    ${DLAT}deg x ${DLON}deg, lat[$LAT_MIN, $LAT_MAX] lon[$LON_MIN, $LON_MAX]"
+echo "Footprint:     $FOOTPRINT (n_oversample=$N_OVERSAMPLE; 0=auto)"
 echo "Total windows: $total_windows split across $JOBS jobs (~$windows_per_job each)"
 echo "Chunk dir:     $CHUNK_DIR"
-echo "Geo cache:     $GEO_CACHE"
 echo
 
 declare -a CHUNK_FILES=()
@@ -88,16 +89,15 @@ for ((j=0; j<JOBS; j++)); do
 
     echo "Launching ${JOB_LABELS[$j]} -> $chunk_file"
     (
-        julia --project=. bin/grid.jl center \
+        julia --project=. bin/grid.jl l2 \
             --config "$CONFIG" \
             --latMin "$LAT_MIN" --latMax "$LAT_MAX" \
             --lonMin "$LON_MIN" --lonMax "$LON_MAX" \
             --dLat "$DLAT" --dLon "$DLON" \
             --startDate "$job_start" --stopDate "$job_stop" \
             --dDays "$DDAYS" \
-            --geoProvider modis \
-            --geoCache "$GEO_CACHE" \
-            --vegIndices \
+            --nOversample "$N_OVERSAMPLE" \
+            --footprint "$FOOTPRINT" \
             --keepGoing \
             -o "$chunk_file" \
             >"$log_file" 2>&1
@@ -109,7 +109,6 @@ echo
 echo "Waiting for ${#PIDS[@]} jobs..."
 echo "  (live tail: tail -F $CHUNK_DIR/chunk_*.log)"
 
-# Poll-print progress until all PIDs exit, so the parent stdout shows life.
 PROGRESS_INTERVAL="${PROGRESS_INTERVAL:-30}"
 while :; do
     any_running=0
@@ -118,14 +117,11 @@ while :; do
         if kill -0 "${PIDS[$i]}" 2>/dev/null; then
             any_running=1
             log="$CHUNK_DIR/chunk_$(printf "%02d" $i).log"
-            # ProgressMeter prints the bar with ANSI cursor escapes between
-            # the percent and ETA, so strip controls and reduce to one line.
             cleaned=$(tail -c 2000 "$log" 2>/dev/null \
                 | tr -d '\r' | sed 's/\x1b\[[A-Za-z]//g; s/\[[A-Za-z]//g')
             pct=$(echo "$cleaned" | grep -oE "Files: +[0-9]+%" | tail -1)
             eta=$(echo "$cleaned" | grep -oE "ETA: +[0-9:]+" | tail -1)
-            snippet="$pct  $eta"
-            line+="    chunk $(printf "%02d" $i): ${snippet:-starting...}"$'\n'
+            line+="    chunk $(printf "%02d" $i): ${pct:-starting...}  ${eta}"$'\n'
         fi
     done
     [[ "$any_running" -eq 0 ]] && break

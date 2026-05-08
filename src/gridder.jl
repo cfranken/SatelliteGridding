@@ -522,7 +522,7 @@ end
 
 function _write_time_slice!(ds_out, nc_vars, config, grid_data, grid_std,
                             grid_weights, compute_std, ct, d)
-    nc_vars["n"][ct, :, :] = grid_weights
+    nc_vars["n"][:, :, ct] = grid_weights
     ds_out["time"][ct] = d
 
     if maximum(grid_weights) > 0
@@ -531,17 +531,17 @@ function _write_time_slice!(ds_out, nc_vars, config, grid_data, grid_std,
             da = round.(grid_data[:, :, co], sigdigits=8)
             da[grid_weights .< 1e-10] .= -999.0f0
             da[.!isfinite.(da)] .= -999.0f0
-            nc_vars[key][ct, :, :] = da
+            nc_vars[key][:, :, ct] = da
             if compute_std
                 da_std = round.(grid_std[:, :, co], sigdigits=6)
                 da_std[grid_weights .< 1e-10] .= -999.0f0
                 da_std[.!isfinite.(da_std)] .= -999.0f0
-                nc_vars[key * "_std"][ct, :, :] = da_std
+                nc_vars[key * "_std"][:, :, ct] = da_std
             end
             co += 1
         end
     else
-        nc_vars["n"][ct, :, :] .= 0
+        nc_vars["n"][:, :, ct] .= 0
     end
     nothing
 end
@@ -590,13 +590,13 @@ function grid_center(config::DataSourceConfig, grid_spec::GridSpec{T}, time_spec
 
     # Add vegetation index variables if requested
     if veg_indices
-        nc_vars["EVI"] = defVar(ds_out, "EVI", Float32, ("time", "lon", "lat"),
+        nc_vars["EVI"] = defVar(ds_out, "EVI", Float32, ("lon", "lat", "time"),
                                 deflatelevel=4, fillvalue=-999.0f0)
-        nc_vars["NDVI"] = defVar(ds_out, "NDVI", Float32, ("time", "lon", "lat"),
+        nc_vars["NDVI"] = defVar(ds_out, "NDVI", Float32, ("lon", "lat", "time"),
                                  deflatelevel=4, fillvalue=-999.0f0)
-        nc_vars["NIRv"] = defVar(ds_out, "NIRv", Float32, ("time", "lon", "lat"),
+        nc_vars["NIRv"] = defVar(ds_out, "NIRv", Float32, ("lon", "lat", "time"),
                                  deflatelevel=4, fillvalue=-999.0f0)
-        nc_vars["NDWI"] = defVar(ds_out, "NDWI", Float32, ("time", "lon", "lat"),
+        nc_vars["NDWI"] = defVar(ds_out, "NDWI", Float32, ("lon", "lat", "time"),
                                  deflatelevel=4, fillvalue=-999.0f0)
     end
 
@@ -616,6 +616,19 @@ function grid_center(config::DataSourceConfig, grid_spec::GridSpec{T}, time_spec
         open_geolocation!(provider)
         p_time = Progress(n_times, desc="Time steps: ")
 
+        # Per-tile cache: when consecutive files share a tile (file sort puts
+        # same-tile granules adjacent), `lat_in`/`lon_in` come back as the
+        # exact same arrays from the geolocation provider's single-slot cache.
+        # We can then skip recomputing `idx`, `lat_idx`, `lon_idx`, which is
+        # the same ~150 ms of bbox filter and grid-index math for every tile
+        # repeat. Identity (===) check works because only sinusoidal-MODIS
+        # caches; basic providers always return fresh arrays.
+        cached_lat = nothing
+        cached_lon = nothing
+        cached_idx = nothing
+        cached_lat_idx = Int32[]
+        cached_lon_idx = Int32[]
+
         for (ct, d) in enumerate(dates)
             ProgressMeter.next!(p_time; showvalues=[(:Time, d)])
 
@@ -628,27 +641,46 @@ function grid_center(config::DataSourceConfig, grid_spec::GridSpec{T}, time_spec
 
             for filepath in files
                 try
-                    lat_in, lon_in = center_coordinates(provider, filepath, config)
-                    idx = apply_center_filters(lat_in, lon_in, grid_spec)
-                    if isempty(idx)
+                    # Cheap rejection of tiles that can't intersect the grid
+                    # bbox. For MODIS sinusoidal we know each tile's geographic
+                    # extent analytically — skipping here avoids reading the
+                    # per-tile cache file and the granule's HDF entirely.
+                    if !provider_tile_intersects_grid(provider, filepath, grid_spec)
                         ProgressMeter.next!(p_files; showvalues=[(:File, filepath), (:N_pixels, 0)])
                         successful_files += 1
                         continue
                     end
 
-                    lat_idx, lon_idx = _center_grid_indices(idx, lat_in, lon_in, grid_spec)
-                    values, valid = _center_values(filepath, config, idx, veg_indices, T)
-
-                    if !all(valid)
-                        lat_idx = lat_idx[valid]
-                        lon_idx = lon_idx[valid]
-                        values = values[valid, :]
+                    lat_in, lon_in = center_coordinates(provider, filepath, config)
+                    if lat_in === cached_lat && lon_in === cached_lon
+                        idx = cached_idx
+                        lat_idx = cached_lat_idx
+                        lon_idx = cached_lon_idx
+                    else
+                        idx = apply_center_filters(lat_in, lon_in, grid_spec)
+                        if isempty(idx)
+                            cached_lat = lat_in
+                            cached_lon = lon_in
+                            cached_idx = idx
+                            cached_lat_idx = Int32[]
+                            cached_lon_idx = Int32[]
+                            ProgressMeter.next!(p_files; showvalues=[(:File, filepath), (:N_pixels, 0)])
+                            successful_files += 1
+                            continue
+                        end
+                        lat_idx, lon_idx = _center_grid_indices(idx, lat_in, lon_in, grid_spec)
+                        cached_lat = lat_in
+                        cached_lon = lon_in
+                        cached_idx = idx
+                        cached_lat_idx = lat_idx
+                        cached_lon_idx = lon_idx
                     end
 
-                    n_valid = length(lat_idx)
+                    values, valid = _center_values(filepath, config, idx, veg_indices, T)
+                    n_valid = count(valid)
                     if n_valid > 0
                         accumulate_center!(grid_data, grid_weights, lat_idx, lon_idx,
-                                           values, n_valid, n_total)
+                                           values, valid, length(lat_idx), n_total)
                     end
                     successful_files += 1
                     ProgressMeter.next!(p_files; showvalues=[(:File, filepath),
@@ -703,15 +735,15 @@ function _center_values(filepath::String, config::DataSourceConfig,
     n_pixels = length(idx)
     n_vars = length(config.grid_vars)
     n_veg = veg_indices ? 4 : 0
-    values = zeros(T, n_pixels, n_vars + n_veg)
+    values = Matrix{T}(undef, n_pixels, n_vars + n_veg)
     valid = trues(n_pixels)
 
-    scale = T(get(config.options, "scale_factor", 1.0))
-    offset = T(get(config.options, "add_offset", 0.0))
+    scale::T = T(get(config.options, "scale_factor", 1.0))
+    offset::T = T(get(config.options, "add_offset", 0.0))
     fill_value = get(config.options, "fill_value", nothing)
     valid_min = get(config.options, "valid_min", nothing)
     valid_max = get(config.options, "valid_max", nothing)
-    transpose_data = Bool(get(config.options, "transpose_data", false))
+    transpose_data::Bool = Bool(get(config.options, "transpose_data", false))
 
     varpaths = [varpath for (_, varpath) in config.grid_vars]
     arrays = read_arrays_from_file(filepath, varpaths)
@@ -727,7 +759,7 @@ function _center_values(filepath::String, config::DataSourceConfig,
                                      require_default=false)
     min_nir = get(config.options, "min_nir_reflectance", nothing)
     if min_nir !== nothing && n_vars >= 2
-        min_nir_t = T(min_nir)
+        min_nir_t::T = T(min_nir)
         @inbounds for i in 1:n_pixels
             if values[i, nir_index] <= min_nir_t
                 valid[i] = false
@@ -750,7 +782,7 @@ function _center_values(filepath::String, config::DataSourceConfig,
             values[i, n_vars + 3] = compute_nirv(red, nir)
             values[i, n_vars + 4] = compute_ndwi(nir, swir)
         end
-        valid .&= vec(all(isfinite, values, dims=2))
+        _mark_finite_center_rows!(valid, values, n_pixels, n_vars + n_veg)
     end
 
     values, valid
@@ -783,9 +815,8 @@ end
     data[ci]
 end
 
-# Narrow Any-typed config bounds to the data element type so comparisons in the
-# hot loop don't dispatch dynamically. Returns `nothing` if no bound is set or
-# the value can't be represented in `D`.
+# Narrow Any-typed config bounds to the data element type where possible, while
+# preserving the original value if conversion would overflow or change type.
 @inline _typed_bound(::Type{D}, ::Nothing) where {D} = nothing
 @inline function _typed_bound(::Type{D}, x) where {D}
     try
@@ -816,6 +847,21 @@ function _fill_center_column!(values::AbstractMatrix{T}, valid::BitVector,
     nothing
 end
 
+function _mark_finite_center_rows!(valid::BitVector, values::AbstractMatrix,
+                                   n_pixels::Int, n_cols::Int)
+    @inbounds for i in 1:n_pixels
+        row_ok = true
+        for co in 1:n_cols
+            if !isfinite(values[i, co])
+                row_ok = false
+                break
+            end
+        end
+        valid[i] &= row_ok
+    end
+    nothing
+end
+
 @inline function _invalid_center_value(raw, fill_value, valid_min, valid_max)
     ismissing(raw) && return true
     fill_value !== nothing && raw == fill_value && return true
@@ -828,7 +874,7 @@ function _write_center_time_slice!(ds_out, nc_vars, config, grid_data,
                                    grid_weights, veg_indices::Bool,
                                    ct::Int, d::DateTime, min_count)
     ds_out["time"][ct] = d
-    nc_vars["n"][ct, :, :] = grid_weights
+    nc_vars["n"][:, :, ct] = grid_weights
 
     co = 1
     for (key, _) in config.grid_vars
@@ -851,6 +897,6 @@ function _write_center_var!(nc_var, data, weights, ct::Int, min_count)
     da = round.(data ./ max.(weights, eps(eltype(data))), sigdigits=5)
     da[weights .< min_count] .= eltype(data)(-999)
     da[.!isfinite.(da)] .= eltype(data)(-999)
-    nc_var[ct, :, :] = da
+    nc_var[:, :, ct] = da
     nothing
 end

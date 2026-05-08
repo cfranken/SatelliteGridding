@@ -91,8 +91,8 @@
         @test size(ds_out["lon"]) == (5,)
         @test size(ds_out["time"]) == (1,)
 
-        weights = ds_out["n"][1, :, :]
-        sif_grid = ds_out["sif"][1, :, :]
+        weights = ds_out["n"][:, :, 1]
+        sif_grid = ds_out["sif"][:, :, 1]
 
         # At least some cells should have data
         @test maximum(weights) > 0
@@ -114,7 +114,7 @@
         end
 
         # Check that std was computed (should exist and be non-negative where data exists)
-        sif_std = ds_out["sif_std"][1, :, :]
+        sif_std = ds_out["sif_std"][:, :, 1]
         for i in eachindex(sif_std)
             if weights[i] > 0 && sif_std[i] > -999
                 @test sif_std[i] >= 0
@@ -170,8 +170,8 @@
              outfile=output_file)
 
         ds_out = Dataset(output_file)
-        weights = ds_out["n"][1, :, :]
-        sif = ds_out["sif"][1, :, :]
+        weights = ds_out["n"][:, :, 1]
+        sif = ds_out["sif"][:, :, 1]
 
         @test sum(weights) ≈ 1.0f0 rtol=2f-5
         @test weights[2, 2] ≈ 0.25f0 atol=0.01f0
@@ -192,8 +192,8 @@
              backend=CPU(), outfile=output_file_ka)
 
         ds_out_ka = Dataset(output_file_ka)
-        weights_ka = ds_out_ka["n"][1, :, :]
-        sif_ka = ds_out_ka["sif"][1, :, :]
+        weights_ka = ds_out_ka["n"][:, :, 1]
+        sif_ka = ds_out_ka["sif"][:, :, 1]
 
         @test weights_ka ≈ weights rtol=2f-5
         for idx in CartesianIndices(weights_ka)
@@ -254,8 +254,8 @@
              outfile=output_file)
 
         ds_out = Dataset(output_file)
-        weights = ds_out["n"][1, :, :]
-        sif = ds_out["sif"][1, :, :]
+        weights = ds_out["n"][:, :, 1]
+        sif = ds_out["sif"][:, :, 1]
 
         @test sum(weights) ≈ 1.0f0 rtol=2f-5
         @test weights[2, 2] ≈ 0.25f0 atol=0.01f0
@@ -276,8 +276,8 @@
              backend=CPU(), outfile=output_file_ka)
 
         ds_out_ka = Dataset(output_file_ka)
-        weights_ka = ds_out_ka["n"][1, :, :]
-        sif_ka = ds_out_ka["sif"][1, :, :]
+        weights_ka = ds_out_ka["n"][:, :, 1]
+        sif_ka = ds_out_ka["sif"][:, :, 1]
 
         @test weights_ka ≈ weights rtol=2f-5
         for idx in CartesianIndices(weights_ka)
@@ -334,8 +334,8 @@
         grid(config, grid_spec, time_spec, CenterPointGridding(); outfile=output_file)
 
         ds_out = Dataset(output_file)
-        weights = ds_out["n"][1, :, :]
-        band = ds_out["band"][1, :, :]
+        weights = ds_out["n"][:, :, 1]
+        band = ds_out["band"][:, :, 1]
 
         @test weights ≈ Float32[1 1; 1 1]
         @test band[1, 1] ≈ 10.0f0
@@ -393,8 +393,8 @@
         @test isfile(modis_tile_cache_path(geo_cache, 18, 9; pixels=2))
 
         ds_out = Dataset(output_file)
-        weights = ds_out["n"][1, :, :]
-        band = ds_out["band"][1, :, :]
+        weights = ds_out["n"][:, :, 1]
+        band = ds_out["band"][:, :, 1]
 
         @test weights ≈ Float32[1 1; 1 1]
         @test band[1, 1] ≈ 30.0f0

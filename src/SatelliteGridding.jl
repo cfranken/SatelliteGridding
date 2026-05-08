@@ -70,7 +70,8 @@ export read_nc_variable, read_nc_attribute, read_variable_from_file, read_array_
 export read_system_netcdf_variable, read_system_netcdf_variables
 export AbstractCenterGeolocation, BasicVariableGeolocation,
        ModisMonolithicLUTGeolocation, ModisSinusoidalGeolocation,
-       sort_files_for_provider
+       sort_files_for_provider, provider_tile_intersects_grid,
+       modis_tile_geographic_bbox
 export default_cache_dir, default_modis_cache_dir, parse_modis_tile,
        modis_sinusoidal_latlon, generate_modis_tile_geolocation,
        modis_tile_cache_path, write_modis_tile_geolocation,
