@@ -14,10 +14,19 @@ end
 
 ModisMonolithicLUTGeolocation(path::String) = ModisMonolithicLUTGeolocation(path, nothing)
 
-struct ModisSinusoidalGeolocation <: AbstractCenterGeolocation
+mutable struct ModisSinusoidalGeolocation <: AbstractCenterGeolocation
     cache_dir::String
     pixels::Int
+    last_h::Int
+    last_v::Int
+    last_lat::Matrix{Float32}
+    last_lon::Matrix{Float32}
 end
+
+ModisSinusoidalGeolocation(cache_dir::AbstractString, pixels::Integer) =
+    ModisSinusoidalGeolocation(String(cache_dir), Int(pixels), -1, -1,
+                               Matrix{Float32}(undef, 0, 0),
+                               Matrix{Float32}(undef, 0, 0))
 
 """
     default_cache_dir() -> String
@@ -162,7 +171,7 @@ function write_modis_tile_geolocation(path::AbstractString, h::Integer, v::Integ
     !isempty(outdir) && mkpath(outdir)
     lat, lon = generate_modis_tile_geolocation(h, v; pixels=pixels)
 
-    tmp = outpath * ".tmp-$(getpid())"
+    tmp = outpath * ".tmp-$(getpid())-$(rand(UInt32))"
     ds = Dataset(tmp, "c")
     try
         defDim(ds, "y", pixels)
@@ -186,7 +195,14 @@ function write_modis_tile_geolocation(path::AbstractString, h::Integer, v::Integ
         close(ds)
     end
 
-    mv(tmp, outpath; force=overwrite)
+    # Atomic replace; tile content is a deterministic function of (h, v, pixels),
+    # so concurrent writers from parallel jobs converge on identical bytes.
+    try
+        mv(tmp, outpath; force=true)
+    catch e
+        isfile(tmp) && rm(tmp; force=true)
+        rethrow(e)
+    end
     outpath
 end
 
@@ -280,6 +296,31 @@ function center_coordinates(provider::ModisMonolithicLUTGeolocation,
     provider.dataset["longitude"][h + 1, v + 1, :, :]
 end
 
+"""
+    sort_files_for_provider(provider, files) -> Vector{String}
+
+Reorder one window's input files so consecutive granules are likely to share
+the same per-tile geolocation. Default is a no-op; the MODIS sinusoidal
+provider sorts by (h, v) so the in-memory tile cache effectively only needs
+one entry.
+"""
+sort_files_for_provider(::AbstractCenterGeolocation, files::Vector{String}) = files
+
+function sort_files_for_provider(::ModisSinusoidalGeolocation,
+                                 files::Vector{String})
+    sort(files; by=_modis_tile_sort_key)
+end
+
+function _modis_tile_sort_key(path::String)
+    name = basename(path)
+    try
+        h, v = parse_modis_tile(path)
+        return (0, h, v, name)
+    catch
+        return (1, 0, 0, name)
+    end
+end
+
 function center_coordinates(provider::ModisSinusoidalGeolocation,
                             filepath::String, config::DataSourceConfig)
     h, v = try
@@ -287,7 +328,15 @@ function center_coordinates(provider::ModisSinusoidalGeolocation,
     catch e
         error("center gridding requires basic.lat/basic.lon, geo_table, or a MODIS-style filename containing hXXvYY for generated sinusoidal geolocation: $e")
     end
-    load_or_generate_modis_tile_geolocation(h, v;
-                                            cache_dir=provider.cache_dir,
-                                            pixels=provider.pixels)
+    if h == provider.last_h && v == provider.last_v
+        return provider.last_lat, provider.last_lon
+    end
+    lat, lon = load_or_generate_modis_tile_geolocation(h, v;
+                                                       cache_dir=provider.cache_dir,
+                                                       pixels=provider.pixels)
+    provider.last_h = h
+    provider.last_v = v
+    provider.last_lat = lat
+    provider.last_lon = lon
+    return lat, lon
 end

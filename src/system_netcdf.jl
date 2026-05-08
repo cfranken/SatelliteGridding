@@ -52,72 +52,96 @@ Read a flat variable through the system `libnetcdf`. This is primarily a fallbac
 for HDF4/HDF-EOS2 files when the Julia NetCDF_jll build lacks HDF4 support.
 """
 function read_system_netcdf_variable(path::String, varname::String)
-    occursin("/", varname) && error("System NetCDF fallback only supports flat variable names: $varname")
-
     lib = _system_netcdf_lib()
     lib === nothing && error("No system libnetcdf found for HDF4 fallback")
+    _system_netcdf_with_open(lib, path) do ncid
+        _read_system_netcdf_var(lib, ncid, varname)
+    end
+end
 
+"""
+    read_system_netcdf_variables(path, varnames)
+
+Read multiple flat variables through the system `libnetcdf` with a single
+`nc_open`/`nc_close`. Returns a vector of arrays in the same order as `varnames`.
+"""
+function read_system_netcdf_variables(path::String,
+                                      varnames::AbstractVector{<:AbstractString})
+    lib = _system_netcdf_lib()
+    lib === nothing && error("No system libnetcdf found for HDF4 fallback")
+    _system_netcdf_with_open(lib, path) do ncid
+        Any[_read_system_netcdf_var(lib, ncid, String(v)) for v in varnames]
+    end
+end
+
+function _system_netcdf_with_open(f, lib::String, path::String)
     ncid = Ref{Cint}()
     f_open = _nc_sym(:nc_open)
     _nc_check(lib, ccall(f_open, Cint,
                          (Cstring, Cint, Ref{Cint}), path, _NC_NOWRITE, ncid))
     try
-        varid = Ref{Cint}()
-        f_inq_varid = _nc_sym(:nc_inq_varid)
-        _nc_check(lib, ccall(f_inq_varid, Cint,
-                             (Cint, Cstring, Ref{Cint}), ncid[], varname, varid))
-
-        xtype = Ref{Cint}()
-        ndims = Ref{Cint}()
-        f_inq_var = _nc_sym(:nc_inq_var)
-        _nc_check(lib, ccall(f_inq_var, Cint,
-                             (Cint, Cint, Ptr{UInt8}, Ref{Cint}, Ref{Cint},
-                              Ptr{Cint}, Ptr{Cint}),
-                             ncid[], varid[], C_NULL, xtype, ndims, C_NULL, C_NULL))
-
-        dimids = Vector{Cint}(undef, ndims[])
-        f_inq_vardimid = _nc_sym(:nc_inq_vardimid)
-        _nc_check(lib, ccall(f_inq_vardimid, Cint,
-                             (Cint, Cint, Ptr{Cint}), ncid[], varid[], dimids))
-
-        dims = Vector{Int}(undef, ndims[])
-        f_inq_dimlen = _nc_sym(:nc_inq_dimlen)
-        for i in eachindex(dimids)
-            len = Ref{Csize_t}()
-            _nc_check(lib, ccall(f_inq_dimlen, Cint,
-                                 (Cint, Cint, Ref{Csize_t}), ncid[], dimids[i], len))
-            dims[i] = Int(len[])
-        end
-
-        T, getter = if xtype[] == _NC_BYTE
-            Int8, :nc_get_var_schar
-        elseif xtype[] == _NC_UBYTE
-            UInt8, :nc_get_var_uchar
-        elseif xtype[] == _NC_SHORT
-            Int16, :nc_get_var_short
-        elseif xtype[] == _NC_USHORT
-            UInt16, :nc_get_var_ushort
-        elseif xtype[] == _NC_INT
-            Int32, :nc_get_var_int
-        elseif xtype[] == _NC_UINT
-            UInt32, :nc_get_var_uint
-        elseif xtype[] == _NC_FLOAT
-            Float32, :nc_get_var_float
-        elseif xtype[] == _NC_DOUBLE
-            Float64, :nc_get_var_double
-        else
-            error("Unsupported NetCDF variable type $(xtype[]) for $varname")
-        end
-
-        data = Vector{T}(undef, prod(dims))
-        f_getter = _nc_sym(getter)
-        _nc_check(lib, ccall(f_getter, Cint,
-                             (Cint, Cint, Ptr{Cvoid}), ncid[], varid[], pointer(data)))
-        return _reshape_c_order(data, dims)
+        return f(ncid[])
     finally
         f_close = _nc_sym(:nc_close)
         ccall(f_close, Cint, (Cint,), ncid[])
     end
+end
+
+function _read_system_netcdf_var(lib::String, ncid::Cint, varname::String)
+    occursin("/", varname) && error("System NetCDF fallback only supports flat variable names: $varname")
+
+    varid = Ref{Cint}()
+    f_inq_varid = _nc_sym(:nc_inq_varid)
+    _nc_check(lib, ccall(f_inq_varid, Cint,
+                         (Cint, Cstring, Ref{Cint}), ncid, varname, varid))
+
+    xtype = Ref{Cint}()
+    ndims = Ref{Cint}()
+    f_inq_var = _nc_sym(:nc_inq_var)
+    _nc_check(lib, ccall(f_inq_var, Cint,
+                         (Cint, Cint, Ptr{UInt8}, Ref{Cint}, Ref{Cint},
+                          Ptr{Cint}, Ptr{Cint}),
+                         ncid, varid[], C_NULL, xtype, ndims, C_NULL, C_NULL))
+
+    dimids = Vector{Cint}(undef, ndims[])
+    f_inq_vardimid = _nc_sym(:nc_inq_vardimid)
+    _nc_check(lib, ccall(f_inq_vardimid, Cint,
+                         (Cint, Cint, Ptr{Cint}), ncid, varid[], dimids))
+
+    dims = Vector{Int}(undef, ndims[])
+    f_inq_dimlen = _nc_sym(:nc_inq_dimlen)
+    for i in eachindex(dimids)
+        len = Ref{Csize_t}()
+        _nc_check(lib, ccall(f_inq_dimlen, Cint,
+                             (Cint, Cint, Ref{Csize_t}), ncid, dimids[i], len))
+        dims[i] = Int(len[])
+    end
+
+    T, getter = if xtype[] == _NC_BYTE
+        Int8, :nc_get_var_schar
+    elseif xtype[] == _NC_UBYTE
+        UInt8, :nc_get_var_uchar
+    elseif xtype[] == _NC_SHORT
+        Int16, :nc_get_var_short
+    elseif xtype[] == _NC_USHORT
+        UInt16, :nc_get_var_ushort
+    elseif xtype[] == _NC_INT
+        Int32, :nc_get_var_int
+    elseif xtype[] == _NC_UINT
+        UInt32, :nc_get_var_uint
+    elseif xtype[] == _NC_FLOAT
+        Float32, :nc_get_var_float
+    elseif xtype[] == _NC_DOUBLE
+        Float64, :nc_get_var_double
+    else
+        error("Unsupported NetCDF variable type $(xtype[]) for $varname")
+    end
+
+    data = Vector{T}(undef, prod(dims))
+    f_getter = _nc_sym(getter)
+    _nc_check(lib, ccall(f_getter, Cint,
+                         (Cint, Cint, Ptr{Cvoid}), ncid, varid[], pointer(data)))
+    return _reshape_c_order(data, dims)
 end
 
 function _reshape_c_order(data::AbstractVector, dims::Vector{Int})

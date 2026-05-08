@@ -1,5 +1,5 @@
 filePattern = "MCD43A4.AYYYYDOY.*.hdf"
-folder = "/path/to/MODIS/MCD43A4/raw/YYYY/DOY/"
+folder = "/kiwi-data/Data/satellite/MODIS/MCD43A4/raw/YYYY/DOY/"
 
 [center]
 scale_factor = 0.0001

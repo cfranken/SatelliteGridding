@@ -621,6 +621,7 @@ function grid_center(config::DataSourceConfig, grid_spec::GridSpec{T}, time_spec
 
             end_date = d + time_spec.time_step - Dates.Day(1)
             files = find_files_range(config.file_pattern, config.folder, d, end_date)
+            files = sort_files_for_provider(provider, files)
             total_files += length(files)
 
             p_files = Progress(length(files), desc="  Files: ")
@@ -712,17 +713,14 @@ function _center_values(filepath::String, config::DataSourceConfig,
     valid_max = get(config.options, "valid_max", nothing)
     transpose_data = Bool(get(config.options, "transpose_data", false))
 
-    for (co, (_, varpath)) in enumerate(config.grid_vars)
-        data = read_array_from_file(filepath, varpath)
-        @inbounds for (i, ci) in enumerate(idx)
-            raw = _center_data_value(data, ci, transpose_data)
-            if _invalid_center_value(raw, fill_value, valid_min, valid_max)
-                valid[i] = false
-                values[i, co] = T(NaN)
-            else
-                values[i, co] = T(raw) * scale + offset
-            end
-        end
+    varpaths = [varpath for (_, varpath) in config.grid_vars]
+    arrays = read_arrays_from_file(filepath, varpaths)
+    for co in 1:n_vars
+        # Function-barrier on `data` so the per-pixel inner loop specializes on
+        # the array element type instead of dispatching dynamically per call.
+        _fill_center_column!(values, valid, idx, arrays[co], co,
+                             scale, offset, fill_value, valid_min, valid_max,
+                             transpose_data)
     end
 
     nir_index = _center_var_position(config, "vegetation_nir", 2;
@@ -783,6 +781,39 @@ end
         return data[ci[2], ci[1]]
     end
     data[ci]
+end
+
+# Narrow Any-typed config bounds to the data element type so comparisons in the
+# hot loop don't dispatch dynamically. Returns `nothing` if no bound is set or
+# the value can't be represented in `D`.
+@inline _typed_bound(::Type{D}, ::Nothing) where {D} = nothing
+@inline function _typed_bound(::Type{D}, x) where {D}
+    try
+        return convert(D, x)
+    catch
+        return x
+    end
+end
+
+function _fill_center_column!(values::AbstractMatrix{T}, valid::BitVector,
+                              idx, data::AbstractArray, co::Integer,
+                              scale::T, offset::T,
+                              fill_value, valid_min, valid_max,
+                              transpose_data::Bool) where {T}
+    D = eltype(data)
+    fv = _typed_bound(D, fill_value)
+    lo = _typed_bound(D, valid_min)
+    hi = _typed_bound(D, valid_max)
+    @inbounds for (i, ci) in enumerate(idx)
+        raw = _center_data_value(data, ci, transpose_data)
+        if _invalid_center_value(raw, fv, lo, hi)
+            valid[i] = false
+            values[i, co] = T(NaN)
+        else
+            values[i, co] = T(raw) * scale + offset
+        end
+    end
+    nothing
 end
 
 @inline function _invalid_center_value(raw, fill_value, valid_min, valid_max)

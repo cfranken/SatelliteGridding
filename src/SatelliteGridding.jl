@@ -66,10 +66,11 @@ export supported_backend_names, backend_help_lines, resolve_backend,
        cuda_backend, metal_backend
 export load_config, find_files
 export read_nc_variable, read_nc_attribute, read_variable_from_file, read_array_from_file,
-       create_output_dataset
-export read_system_netcdf_variable
+       read_arrays_from_file, create_output_dataset
+export read_system_netcdf_variable, read_system_netcdf_variables
 export AbstractCenterGeolocation, BasicVariableGeolocation,
-       ModisMonolithicLUTGeolocation, ModisSinusoidalGeolocation
+       ModisMonolithicLUTGeolocation, ModisSinusoidalGeolocation,
+       sort_files_for_provider
 export default_cache_dir, default_modis_cache_dir, parse_modis_tile,
        modis_sinusoidal_latlon, generate_modis_tile_geolocation,
        modis_tile_cache_path, write_modis_tile_geolocation,

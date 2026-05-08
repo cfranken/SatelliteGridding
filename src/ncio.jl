@@ -53,6 +53,9 @@ Read a variable from a NetCDF-like file. Falls back to the system `libnetcdf`
 for flat HDF4/HDF-EOS variables when the Julia NetCDF build cannot open them.
 """
 function read_variable_from_file(path::String, variable::String; bounds::Bool=false)
+    if _looks_like_hdf4(path) && !bounds
+        return read_system_netcdf_variable(path, variable)
+    end
     try
         ds = Dataset(path)
         try
@@ -72,12 +75,21 @@ function read_variable_from_file(path::String, variable::String; bounds::Bool=fa
     end
 end
 
+# HDF4 (.hdf) files are not supported by the bundled NetCDF_jll on most
+# platforms, so an `NCDatasets.Dataset(path)` attempt fails after a 150–500 ms
+# NFS round-trip. Skip that try and go straight to the system libnetcdf path,
+# which links against an HDF4-capable build.
+_looks_like_hdf4(path::AbstractString) = endswith(lowercase(path), ".hdf")
+
 """
     read_array_from_file(path, variable)
 
 Read a variable while preserving its native dimensionality.
 """
 function read_array_from_file(path::String, variable::String)
+    if _looks_like_hdf4(path)
+        return read_system_netcdf_variable(path, variable)
+    end
     try
         ds = Dataset(path)
         try
@@ -90,6 +102,34 @@ function read_array_from_file(path::String, variable::String)
             return read_system_netcdf_variable(path, variable)
         catch fallback_error
             error("Could not read variable '$variable' from '$path' with NCDatasets ($(sprint(showerror, e))) or system libnetcdf fallback ($(sprint(showerror, fallback_error)))")
+        end
+    end
+end
+
+"""
+    read_arrays_from_file(path, variables) -> Vector
+
+Read multiple variables from a single file open. Each variable is read in full
+(same semantics as `read_array_from_file`). Falls back to per-variable reads
+through the system libnetcdf path if NCDatasets cannot open the file.
+"""
+function read_arrays_from_file(path::String,
+                               variables::AbstractVector{<:AbstractString})
+    if _looks_like_hdf4(path)
+        return read_system_netcdf_variables(path, variables)
+    end
+    try
+        ds = Dataset(path)
+        try
+            return Any[_read_nc_array(ds, String(v)) for v in variables]
+        finally
+            close(ds)
+        end
+    catch e
+        try
+            return read_system_netcdf_variables(path, variables)
+        catch fallback_error
+            error("Could not read variables from '$path' with NCDatasets ($(sprint(showerror, e))) or system libnetcdf fallback ($(sprint(showerror, fallback_error)))")
         end
     end
 end
