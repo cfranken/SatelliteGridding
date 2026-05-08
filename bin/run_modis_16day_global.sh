@@ -110,7 +110,12 @@ echo "Waiting for ${#PIDS[@]} jobs..."
 echo "  (live tail: tail -F $CHUNK_DIR/chunk_*.log)"
 
 # Poll-print progress until all PIDs exit, so the parent stdout shows life.
+# Disable strict mode in this block: greps that find nothing and tails of
+# not-yet-existent log files are normal during warmup, and pipefail/errexit
+# would kill the launcher (silently) on the first such benign failure.
 PROGRESS_INTERVAL="${PROGRESS_INTERVAL:-30}"
+set +e
+set +o pipefail
 while :; do
     any_running=0
     line=""
@@ -132,6 +137,8 @@ while :; do
     printf "\n[%s]\n%s" "$(date '+%H:%M:%S')" "$line"
     sleep "$PROGRESS_INTERVAL"
 done
+set -e
+set -o pipefail
 
 fail=0
 for ((i=0; i<${#PIDS[@]}; i++)); do

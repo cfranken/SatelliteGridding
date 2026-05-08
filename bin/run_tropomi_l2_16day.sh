@@ -109,7 +109,12 @@ echo
 echo "Waiting for ${#PIDS[@]} jobs..."
 echo "  (live tail: tail -F $CHUNK_DIR/chunk_*.log)"
 
+# Disable strict mode in this block: empty greps and tails of not-yet-
+# existent log files during warmup are benign, but pipefail/errexit would
+# silently kill the launcher.
 PROGRESS_INTERVAL="${PROGRESS_INTERVAL:-30}"
+set +e
+set +o pipefail
 while :; do
     any_running=0
     line=""
@@ -128,6 +133,8 @@ while :; do
     printf "\n[%s]\n%s" "$(date '+%H:%M:%S')" "$line"
     sleep "$PROGRESS_INTERVAL"
 done
+set -e
+set -o pipefail
 
 fail=0
 for ((i=0; i<${#PIDS[@]}; i++)); do
