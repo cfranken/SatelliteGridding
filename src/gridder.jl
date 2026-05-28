@@ -305,13 +305,16 @@ function _process_l2_file!(filepath::String, config::DataSourceConfig,
         lat_center, lon_center, lat_bnd, lon_bnd =
             _read_l2_geometry(fin, config, footprint_method)
 
-        # Quick bounding box check with center coordinates.
-        in_bounds = ((lat_center .> grid_spec.lat_min) .+
-                     (lat_center .< grid_spec.lat_max) .+
-                     (lon_center .> grid_spec.lon_min) .+
-                     (lon_center .< grid_spec.lon_max))
+        # Quick bounding box check with center coordinates. Local name kept
+        # distinct from the exported `in_bounds` method on `AbstractGridSpec`
+        # so PR #2 can replace this block with `in_bounds.(grid_spec, ...)`
+        # without a parser collision.
+        in_bbox = ((lat_center .> grid_spec.lat_min) .+
+                   (lat_center .< grid_spec.lat_max) .+
+                   (lon_center .> grid_spec.lon_min) .+
+                   (lon_center .< grid_spec.lon_max))
 
-        if !any(in_bounds .== 4)
+        if !any(in_bbox .== 4)
             ProgressMeter.next!(progress; showvalues=[(:File, filepath), (:N_pixels, 0)])
             return
         end
@@ -427,13 +430,16 @@ function _process_l2_file_ka!(filepath::String, config::DataSourceConfig,
         lat_center, lon_center, lat_bnd, lon_bnd =
             _read_l2_geometry(fin, config, footprint_method)
 
-        # Quick bounding box check with center coordinates.
-        in_bounds = ((lat_center .> grid_spec.lat_min) .+
-                     (lat_center .< grid_spec.lat_max) .+
-                     (lon_center .> grid_spec.lon_min) .+
-                     (lon_center .< grid_spec.lon_max))
+        # Quick bounding box check with center coordinates. Local name kept
+        # distinct from the exported `in_bounds` method on `AbstractGridSpec`
+        # so PR #2 can replace this block with `in_bounds.(grid_spec, ...)`
+        # without a parser collision.
+        in_bbox = ((lat_center .> grid_spec.lat_min) .+
+                   (lat_center .< grid_spec.lat_max) .+
+                   (lon_center .> grid_spec.lon_min) .+
+                   (lon_center .< grid_spec.lon_max))
 
-        if !any(in_bounds .== 4)
+        if !any(in_bbox .== 4)
             ProgressMeter.next!(progress; showvalues=[(:File, filepath), (:N_pixels, 0)])
             return
         end

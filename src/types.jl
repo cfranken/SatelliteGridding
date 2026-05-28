@@ -54,41 +54,11 @@ DataSourceConfig(basic::Dict{String,String}, grid_vars::OrderedDict{String,Strin
                  filters::Vector{FilterRule}, file_pattern::String, folder::String) =
     DataSourceConfig(basic, grid_vars, filters, file_pattern, folder, Dict{String,Any}())
 
-"""
-    GridSpec{T<:AbstractFloat}
-
-Specification of the output grid geometry.
-
-# Fields
-- `lat_min`, `lat_max`: Latitude bounds (degrees)
-- `lon_min`, `lon_max`: Longitude bounds (degrees)
-- `dlat`, `dlon`: Grid cell size (degrees)
-- `lat`, `lon`: Vectors of cell center coordinates
-"""
-struct GridSpec{T<:AbstractFloat}
-    lat_min::T
-    lat_max::T
-    lon_min::T
-    lon_max::T
-    dlat::T
-    dlon::T
-    lat::Vector{T}
-    lon::Vector{T}
-end
-
-"""
-    GridSpec(; lat_min=-90f0, lat_max=90f0, lon_min=-180f0, lon_max=180f0, dlat=1f0, dlon=1f0)
-
-Construct a `GridSpec` with cell centers computed from bounds and resolution.
-"""
-function GridSpec(; lat_min::T=-90.0f0, lat_max::T=90.0f0,
-                   lon_min::T=-180.0f0, lon_max::T=180.0f0,
-                   dlat::T=1.0f0, dlon::T=1.0f0) where {T<:AbstractFloat}
-    eps = dlat / 100
-    lat = collect(lat_min + dlat / 2:dlat:lat_max - dlat / 2 + eps)
-    lon = collect(lon_min + dlon / 2:dlon:lon_max - dlon / 2 + eps)
-    GridSpec{T}(lat_min, lat_max, lon_min, lon_max, dlat, dlon, lat, lon)
-end
+# The output-grid geometry types (`AbstractGridSpec`, `RectangularGridSpec`,
+# `GridSpec` alias) and their dispatch interface live in `grid_spec.jl`. The
+# top-level `SatelliteGridding.jl` includes that file immediately after this
+# one so the configuration / metadata records above stay independent of the
+# grid-extensibility surface.
 
 """
     TimeSpec

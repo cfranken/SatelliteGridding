@@ -44,6 +44,7 @@ using Atomix: @atomic
 using Libdl
 
 include("types.jl")
+include("grid_spec.jl")
 include("backends.jl")
 include("config.jl")
 include("filepatterns.jl")
@@ -59,7 +60,8 @@ include("gridder.jl")
 include("methods.jl")
 include("cli.jl")
 
-export GridSpec, DataSourceConfig, TimeSpec, FilterRule
+export AbstractGridSpec, RectangularGridSpec, GridSpec,
+       DataSourceConfig, TimeSpec, FilterRule
 export AbstractGriddingMethod, SubpixelGridding, CircularFootprintGridding,
        CenterPointGridding, ExactIntersectionGridding
 export supported_backend_names, backend_help_lines, resolve_backend,
