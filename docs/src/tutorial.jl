@@ -159,3 +159,45 @@ time_spec = TimeSpec(
 #             veg_indices=true,
 #             outfile="modis_2019.nc")
 # ```
+
+# ## Cubed-Sphere (GEOS/GCHP) Output Grid
+#
+# To compare TROPOMI directly against GEOS-Chem (GCHP) output on its native grid,
+# swap the rectangular `GridSpec` for a [`CubedSphereGridSpec`](@ref) — everything
+# else (the config, the `grid` call) is identical. The default geometry is the
+# GEOS/GCHP convention (equal-distance gnomonic, GEOS-native panels, -10° shift),
+# so `Nc = 360` gives a GCHP-style C360 grid. Here we build a small C24 grid:
+
+cs_spec = CubedSphereGridSpec(; Nc = 24)   # GMAOCubedSphereDefinition() by default
+
+# The cube has `Nc` cells per panel edge across 6 panels. Internally it is folded
+# into a 2D `(Nc, 6·Nc)` accumulator and un-folded to `(Xdim, Ydim, nf)` on write:
+println("C$(cs_spec.Nc): grid_shape = $(grid_shape(cs_spec)), centers = $(size(cs_spec.centers_lon))")
+
+# Grid exactly as before — only the grid spec changed (sequential CPU path):
+#
+# ```julia
+# grid(config, cs_spec, time_spec, SubpixelGridding();
+#      outfile = "tropomi_sif_c24.nc")
+# ```
+#
+# Or from the CLI:
+#
+# ```bash
+# julia --project=. bin/grid.jl l2 --config examples/tropomi_sif.toml \
+#     --gridType cs --Nc 360 --startDate 2020-07-01 --stopDate 2020-07-16 \
+#     --dDays 16 -o tropomi_sif_c360.nc
+# ```
+#
+# The output matches native GCHP NetCDF (dims `nf`/`Ydim`/`Xdim`, 2D `lons`/`lats`
+# and `corner_lons`/`corner_lats`, `coordinates = "lons lats"`), so it opens
+# directly in Panoply and xarray. Plot one panel on its 2D coordinates:
+#
+# ```python
+# import xarray as xr
+# ds = xr.open_dataset("tropomi_sif_c360.nc")
+# ds["sif_743"].isel(time=0, nf=2).plot(x="lons", y="lats")
+# ```
+#
+# See the [Cubed-Sphere Grids](../cubed_sphere.md) page for the full convention,
+# output layout, and the `bin/run_tropomi_c360.sh` fan-out runner.
