@@ -25,7 +25,7 @@ circular products such as GOSAT. Circular footprints can be read from
 - `keep_going::Bool=false`: Continue after per-file errors. By default, the
   first file error stops the run.
 """
-function grid_l2(config::DataSourceConfig, grid_spec::GridSpec{T}, time_spec::TimeSpec;
+function grid_l2(config::DataSourceConfig, grid_spec::AbstractGridSpec{T}, time_spec::TimeSpec;
                  n_oversample::Union{Nothing,Int}=nothing,
                  footprint_method::AbstractGriddingMethod=SubpixelGridding(n_oversample),
                  compute_std::Bool=false,
@@ -38,6 +38,13 @@ function grid_l2(config::DataSourceConfig, grid_spec::GridSpec{T}, time_spec::Ti
         error("grid_l2 supports SubpixelGridding and CircularFootprintGridding; use grid_center for center-coordinate gridding")
     _validate_l2_geometry_config(config, footprint_method)
 
+    if backend !== nothing && grid_spec isa CubedSphereGridSpec
+        error("Cubed-sphere gridding currently supports only the sequential CPU path; omit `backend` or use --backend sequential.")
+    end
+    if grid_spec isa CubedSphereGridSpec && footprint_method isa CircularFootprintGridding
+        error("CircularFootprintGridding is not supported on a cubed-sphere grid yet; use SubpixelGridding (quad footprints).")
+    end
+
     effective_n_oversample = if footprint_method isa Union{SubpixelGridding,CircularFootprintGridding} &&
                                 footprint_method.n_oversample !== nothing
         footprint_method.n_oversample
@@ -47,13 +54,12 @@ function grid_l2(config::DataSourceConfig, grid_spec::GridSpec{T}, time_spec::Ti
 
     dates = collect(time_spec.start_date:time_spec.time_step:time_spec.stop_date)
     n_times = length(dates)
-    n_lon = length(grid_spec.lon)
-    n_lat = length(grid_spec.lat)
+    acc1, acc2 = accumulator_shape(grid_spec)
     n_vars = length(config.grid_vars)
 
     use_ka = backend !== nothing
 
-    println("Output file dimension (time/lon/lat): $n_times/$n_lon/$n_lat")
+    println("Output accumulator dimension (time/axis1/axis2): $n_times/$acc1/$acc2")
     use_ka && println("Using KA backend: $backend")
 
     # Create output file
@@ -62,13 +68,13 @@ function grid_l2(config::DataSourceConfig, grid_spec::GridSpec{T}, time_spec::Ti
 
     # Allocate work arrays (on backend for GPU, regular Array for CPU)
     if use_ka
-        grid_sum = KernelAbstractions.zeros(backend, T, n_lon, n_lat, n_vars)
-        grid_weights = KernelAbstractions.zeros(backend, T, n_lon, n_lat)
+        grid_sum = KernelAbstractions.zeros(backend, T, acc1, acc2, n_vars)
+        grid_weights = KernelAbstractions.zeros(backend, T, acc1, acc2)
     else
         # Welford running mean for sequential path
-        grid_data = zeros(T, n_lon, n_lat, n_vars)
-        grid_std_arr = zeros(T, n_lon, n_lat, n_vars)
-        grid_weights = zeros(T, n_lon, n_lat)
+        grid_data = zeros(T, acc1, acc2, n_vars)
+        grid_std_arr = zeros(T, acc1, acc2, n_vars)
+        grid_weights = zeros(T, acc1, acc2)
     end
 
     total_files = 0
@@ -124,15 +130,15 @@ function grid_l2(config::DataSourceConfig, grid_spec::GridSpec{T}, time_spec::Ti
                 grid_data_final = Array(grid_sum)
                 grid_w_cpu = Array(grid_weights)
                 finalize_mean!(grid_data_final, grid_w_cpu)
-                _write_time_slice!(ds_out, nc_vars, config, grid_data_final,
-                                   zeros(T, n_lon, n_lat, n_vars),
+                _write_time_slice!(ds_out, nc_vars, config, grid_spec, grid_data_final,
+                                   zeros(T, acc1, acc2, n_vars),
                                    grid_w_cpu, false, ct, d)
                 fill!(grid_sum, zero(T))
             else
                 if compute_std
                     finalize_std!(grid_std_arr, grid_weights)
                 end
-                _write_time_slice!(ds_out, nc_vars, config, grid_data, grid_std_arr,
+                _write_time_slice!(ds_out, nc_vars, config, grid_spec, grid_data, grid_std_arr,
                                    grid_weights, compute_std, ct, d)
                 fill!(grid_data, zero(T))
                 fill!(grid_std_arr, zero(T))
@@ -416,6 +422,75 @@ function _process_l2_file!(filepath::String, config::DataSourceConfig,
     nothing
 end
 
+# Cubed-sphere L2 file processor (sequential CPU). Reuses the rectangular
+# geometry read / NaN-mask / variable-read path, skips the bbox + affine-index
+# math (the whole sphere is in bounds and the projection is nonlinear), and
+# scatters via `accumulate_footprint_cs!` which subdivides in lon/lat space.
+function _process_l2_file!(filepath::String, config::DataSourceConfig,
+                           grid_spec::CubedSphereGridSpec{T}, grid_data, grid_std,
+                           grid_weights, compute_std, n_oversample_override,
+                           footprint_method::AbstractGriddingMethod,
+                           nc_vars, fill_attrib, progress) where {T}
+    fin = Dataset(filepath)
+    try
+        lat_center, lon_center, lat_bnd, lon_bnd =
+            _read_l2_geometry(fin, config, footprint_method)
+
+        # Quality filters only — no spatial bbox on a whole-sphere grid.
+        idx = apply_filters(fin, config, lat_bnd, lon_bnd, grid_spec)
+        ProgressMeter.next!(progress; showvalues=[(:File, filepath), (:N_pixels, length(idx))])
+        isempty(idx) && return
+
+        if fill_attrib
+            copy_variable_attributes!(nc_vars, fin, config.grid_vars)
+        end
+
+        n_soundings = size(lat_bnd, 1)
+        mat_in = zeros(T, n_soundings, length(config.grid_vars))
+        co = 1
+        for (_, value) in config.grid_vars
+            mat_in[:, co] = read_nc_variable(fin, value)
+            co += 1
+        end
+
+        vals = mat_in[idx, :]
+        lat_c = lat_bnd[idx, :]
+        lon_c = lon_bnd[idx, :]
+        lat_center_c = lat_center[idx]
+        lon_center_c = lon_center[idx]
+
+        finite_mask = vec(all(isfinite, vals, dims=2)) .&
+                      vec(all(isfinite, lat_c, dims=2)) .&
+                      vec(all(isfinite, lon_c, dims=2)) .&
+                      isfinite.(lat_center_c) .&
+                      isfinite.(lon_center_c)
+        if !all(finite_mask)
+            vals = vals[finite_mask, :]
+            lat_c = lat_c[finite_mask, :]
+            lon_c = lon_c[finite_mask, :]
+        end
+        isempty(vals) && return
+
+        # The fractional-index extent heuristic is meaningless on the cube; use a
+        # small fixed oversampling factor unless the caller overrides it.
+        n = n_oversample_override !== nothing ? n_oversample_override : 4
+
+        points_buf = zeros(T, n, n, 2)
+        lats0 = zeros(n)
+        lons0 = zeros(n)
+        lats1 = zeros(n)
+        lons1 = zeros(n)
+
+        accumulate_footprint_cs!(grid_data, grid_std, grid_weights, compute_std,
+                                 grid_spec, lat_c, lon_c, vals,
+                                 size(vals, 1), length(config.grid_vars), n,
+                                 points_buf, lats0, lons0, lats1, lons1)
+    finally
+        close(fin)
+    end
+    nothing
+end
+
 """
 Process a single L2 file using the KA kernel pipeline (sum-based accumulation).
 """
@@ -526,8 +601,8 @@ function _process_l2_file_ka!(filepath::String, config::DataSourceConfig,
     nothing
 end
 
-function _write_time_slice!(ds_out, nc_vars, config, grid_data, grid_std,
-                            grid_weights, compute_std, ct, d)
+function _write_time_slice!(ds_out, nc_vars, config, ::RectangularGridSpec,
+                            grid_data, grid_std, grid_weights, compute_std, ct, d)
     nc_vars["n"][:, :, ct] = grid_weights
     ds_out["time"][ct] = d
 
@@ -548,6 +623,39 @@ function _write_time_slice!(ds_out, nc_vars, config, grid_data, grid_std,
         end
     else
         nc_vars["n"][:, :, ct] .= 0
+    end
+    nothing
+end
+
+# Cubed-sphere writer: un-fold the `(Nc, 6·Nc)` accumulator slices back to the
+# `(Xdim, Ydim, nf) = (Nc, Nc, 6)` cube before writing into the 4D NetCDF vars.
+# `reshape` is exact: folded `row = (panel-1)·Nc + j` is column-major-contiguous
+# with the `(Nc, Nc, 6)` `(i, j, panel)` layout.
+function _write_time_slice!(ds_out, nc_vars, config, spec::CubedSphereGridSpec,
+                            grid_data, grid_std, grid_weights, compute_std, ct, d)
+    Nc = spec.Nc
+    unfold(slice2d) = reshape(slice2d, Nc, Nc, 6)
+    w_mask = grid_weights .< 1e-10
+    w_cube = unfold(grid_weights)
+
+    nc_vars["n"][:, :, :, ct] = w_cube
+    ds_out["time"][ct] = d
+
+    if maximum(grid_weights) > 0
+        co = 1
+        for (key, _) in config.grid_vars
+            da = round.(grid_data[:, :, co], sigdigits=8)
+            da[w_mask] .= -999.0f0
+            da[.!isfinite.(da)] .= -999.0f0
+            nc_vars[key][:, :, :, ct] = unfold(da)
+            if compute_std
+                da_std = round.(grid_std[:, :, co], sigdigits=6)
+                da_std[w_mask] .= -999.0f0
+                da_std[.!isfinite.(da_std)] .= -999.0f0
+                nc_vars[key * "_std"][:, :, :, ct] = unfold(da_std)
+            end
+            co += 1
+        end
     end
     nothing
 end

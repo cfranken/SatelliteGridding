@@ -45,6 +45,7 @@ using Libdl
 
 include("types.jl")
 include("grid_spec.jl")
+include("cubed_sphere.jl")
 include("backends.jl")
 include("config.jl")
 include("filepatterns.jl")
@@ -62,6 +63,12 @@ include("cli.jl")
 
 export AbstractGridSpec, RectangularGridSpec, GridSpec,
        DataSourceConfig, TimeSpec, FilterRule
+export CubedSphereGridSpec, CubedSphereDefinition,
+       GMAOCubedSphereDefinition, EquiangularCubedSphereDefinition,
+       GnomonicPanelConvention, GEOSNativePanelConvention,
+       EquiangularGnomonic, GMAOEqualDistanceGnomonic,
+       AngularMidpointCenter, FourCornerNormalizedCenter,
+       lonlat_to_panel_xy, grid_shape, accumulator_shape
 export AbstractGriddingMethod, SubpixelGridding, CircularFootprintGridding,
        CenterPointGridding, ExactIntersectionGridding
 export supported_backend_names, backend_help_lines, resolve_backend,
@@ -86,8 +93,8 @@ export sort_corners_ccw, sort_corners_ccw!, sort_corners_ccw_ka!
 export compute_footprint_indices_ka!, compute_circular_footprint_indices_ka!,
        scatter_accumulate!, scatter_accumulate_ka!,
        scatter_accumulate_circular!, scatter_accumulate_circular_ka!
-export accumulate_footprint!, accumulate_circular_footprint!, accumulate_batch!,
-       accumulate_circular_batch!, accumulate_center!
+export accumulate_footprint!, accumulate_footprint_cs!, accumulate_circular_footprint!,
+       accumulate_batch!, accumulate_circular_batch!, accumulate_center!
 export finalize_mean!
 export grid, grid_l2, grid_center
 export compute_evi, compute_ndvi, compute_nirv, compute_ndwi

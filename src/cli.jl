@@ -46,6 +46,18 @@ function parse_l2_args(args=ARGS)
             help = "Longitude resolution (degrees)"
             arg_type = Float32
             default = 1.0f0
+        "--gridType"
+            help = "Output grid geometry: rect (regular lat/lon) or cs (cubed sphere, GEOS/GCHP)"
+            arg_type = String
+            default = "rect"
+        "--Nc"
+            help = "Cubed-sphere cells per panel edge (e.g. 360 for C360); required when --gridType cs"
+            arg_type = Int64
+            default = 0
+        "--csConvention"
+            help = "Cubed-sphere convention: gmao (GEOS/GCHP, -10° offset) or equiangular"
+            arg_type = String
+            default = "gmao"
         "--startDate"
             help = "Start date (YYYY-MM-DD)"
             arg_type = String
@@ -160,14 +172,33 @@ function parse_center_args(args=ARGS)
 end
 
 """
-    args_to_grid_spec(args::Dict) -> GridSpec{Float32}
+    args_to_grid_spec(args::Dict) -> AbstractGridSpec
 
-Convert parsed CLI arguments to a `GridSpec`.
+Convert parsed CLI arguments to a grid spec. Returns a `RectangularGridSpec` for
+`--gridType rect` (default) or a `CubedSphereGridSpec` for `--gridType cs`
+(GEOS/GCHP cubed sphere; requires `--Nc`).
 """
-function args_to_grid_spec(args::Dict)::GridSpec{Float32}
-    GridSpec(lat_min=args["latMin"], lat_max=args["latMax"],
-             lon_min=args["lonMin"], lon_max=args["lonMax"],
-             dlat=args["dLat"], dlon=args["dLon"])
+function args_to_grid_spec(args::Dict)::AbstractGridSpec
+    gtype = lowercase(strip(get(args, "gridType", "rect")))
+    if gtype in ("rect", "rectangular", "latlon", "lonlat")
+        return GridSpec(lat_min=args["latMin"], lat_max=args["latMax"],
+                        lon_min=args["lonMin"], lon_max=args["lonMax"],
+                        dlat=args["dLat"], dlon=args["dLon"])
+    elseif gtype in ("cs", "cube", "cubed", "cubedsphere", "cubed_sphere")
+        Nc = get(args, "Nc", 0)
+        Nc > 0 || error("--gridType cs requires --Nc > 0 (e.g. --Nc 360 for C360)")
+        conv = lowercase(strip(get(args, "csConvention", "gmao")))
+        definition = if conv in ("gmao", "geos", "gchp")
+            GMAOCubedSphereDefinition()
+        elseif conv in ("equiangular", "equiangular_gnomonic", "synthetic")
+            EquiangularCubedSphereDefinition()
+        else
+            error("Unknown --csConvention '$conv'. Use gmao or equiangular.")
+        end
+        return CubedSphereGridSpec(; Nc=Nc, definition=definition, T=Float32)
+    else
+        error("Unknown --gridType '$gtype'. Use rect or cs.")
+    end
 end
 
 """

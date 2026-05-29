@@ -95,6 +95,22 @@ grid. Returned in the same order as [`grid_shape`](@ref).
 function payload_dims end
 
 """
+    accumulator_shape(spec::AbstractGridSpec) -> NTuple{M, Int}
+
+Spatial dimensions of the in-memory accumulator array that the gridder
+allocates, in the same axis order as the indices returned by
+[`to_fractional_index`](@ref). This is the layout the Welford / scatter
+machinery indexes with `(col, row)`.
+
+For grids whose accumulator matches the NetCDF spatial layout this is just
+[`grid_shape`](@ref) (the default). A cubed-sphere grid folds its
+`(Nc, Nc, 6)` cube into a 2D `(Nc, 6·Nc)` accumulator and un-folds only at
+write time, so its `accumulator_shape` equals its (already-folded)
+`grid_shape`.
+"""
+accumulator_shape(spec::AbstractGridSpec) = grid_shape(spec)
+
+"""
     write_coordinates!(ds, spec::AbstractGridSpec) -> Nothing
 
 Define the spatial dimensions and write the coordinate axis variables

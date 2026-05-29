@@ -28,6 +28,8 @@ metal_backend
 ## Types
 
 ```@docs
+AbstractGridSpec
+RectangularGridSpec
 GridSpec
 TimeSpec
 DataSourceConfig
@@ -37,6 +39,18 @@ SubpixelGridding
 CircularFootprintGridding
 CenterPointGridding
 ExactIntersectionGridding
+```
+
+## Cubed-Sphere Grids
+
+```@docs
+CubedSphereGridSpec
+CubedSphereDefinition
+GMAOCubedSphereDefinition
+EquiangularCubedSphereDefinition
+lonlat_to_panel_xy
+grid_shape
+accumulator_shape
 ```
 
 ## Oversampling
@@ -65,6 +79,7 @@ footprint_weights
 
 ```@docs
 accumulate_footprint!
+accumulate_footprint_cs!
 accumulate_circular_footprint!
 accumulate_batch!
 accumulate_circular_batch!

@@ -28,8 +28,11 @@ julia --project=. bin/grid.jl l2 [options]
 | `--latMax` | Float32 | 90 | Upper latitude bound |
 | `--lonMin` | Float32 | -180 | Lower longitude bound |
 | `--lonMax` | Float32 | 180 | Upper longitude bound |
-| `--dLat` | Float32 | 1.0 | Latitude resolution (degrees) |
-| `--dLon` | Float32 | 1.0 | Longitude resolution (degrees) |
+| `--dLat` | Float32 | 1.0 | Latitude resolution (degrees, regular grid) |
+| `--dLon` | Float32 | 1.0 | Longitude resolution (degrees, regular grid) |
+| `--gridType` | String | `rect` | Output grid: `rect` (lat/lon) or `cs` (cubed sphere) |
+| `--Nc` | Int | 0 | Cubed-sphere cells per panel edge (e.g. 360 for C360); required with `--gridType cs` |
+| `--csConvention` | String | `gmao` | Cubed-sphere convention: `gmao` (GEOS/GCHP) or `equiangular` |
 | `--startDate` | String | `2018-03-07` | Start date (YYYY-MM-DD) |
 | `--stopDate` | String | `2018-10-31` | Stop date (YYYY-MM-DD) |
 | `--dDays` | Int | 8 | Time step in days (or months with `--monthly`) |
@@ -90,6 +93,19 @@ julia --project=. bin/grid.jl l2 \
 `--footprint circle` works with `--backend sequential`, `cpu`, `cuda`, and
 `metal`. CUDA and Metal require the corresponding optional Julia GPU package and
 hardware support.
+
+TROPOMI SIF onto a GEOS/GCHP C360 cubed sphere (sequential CPU only):
+
+```bash
+julia --project=. bin/grid.jl l2 \
+    --config examples/tropomi_sif.toml \
+    --gridType cs --Nc 360 \
+    --startDate 2020-07-01 --stopDate 2020-07-16 --dDays 16 \
+    -o tropomi_sif_c360.nc
+```
+
+See [Cubed-Sphere Grids](cubed_sphere.md) for the convention, output layout, and
+the `bin/run_tropomi_c360.sh` fan-out runner.
 
 ### `center` — Grid Center-Coordinate Data
 

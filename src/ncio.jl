@@ -177,7 +177,7 @@ end
 Create the output NetCDF4 file with dimensions, coordinate variables, and data variable
 definitions. Returns the dataset and a Dict mapping variable names to NCDatasets variables.
 """
-function create_output_dataset(outfile::String, grid_spec::GridSpec,
+function create_output_dataset(outfile::String, grid_spec::RectangularGridSpec,
                                n_times::Int, grid_vars::OrderedDict{String,String},
                                compute_std::Bool)
     ds = Dataset(outfile, "c")
@@ -219,6 +219,54 @@ function create_output_dataset(outfile::String, grid_spec::GridSpec,
     nc_vars["n"] = defVar(ds, "n", Float32, ("lon", "lat", "time"),
                           deflatelevel=4, fillvalue=-999.0f0,
                           attrib=["units" => "", "long_name" => "Number of pixels in average"])
+
+    return ds, nc_vars
+end
+
+"""
+    create_output_dataset(outfile, grid_spec::CubedSphereGridSpec, n_times,
+                          grid_vars, compute_std) -> Dataset, Dict
+
+Cubed-sphere output file: GCHP-style dims `Xdim`/`Ydim`/`nf` (=Nc, Nc, 6) plus an
+unlimited `time`. Spatial coordinates (`lons`/`lats` and `corner_lons`/
+`corner_lats` aux arrays, index coords, global attrs) are written by
+[`write_coordinates!`](@ref). Payload variables are 4D `(Xdim, Ydim, nf, time)`.
+"""
+function create_output_dataset(outfile::String, grid_spec::CubedSphereGridSpec,
+                               n_times::Int, grid_vars::OrderedDict{String,String},
+                               compute_std::Bool)
+    ds = Dataset(outfile, "c")
+
+    write_coordinates!(ds, grid_spec)
+
+    # Time is unlimited so per-chunk outputs can be concatenated with ncrcat.
+    defDim(ds, "time", Inf)
+    ds_time = defVar(ds, "time", Float32, ("time",),
+                     attrib=["units" => "days since 1970-01-01",
+                              "long_name" => "Time (UTC), start of interval"])
+    ds_time[1:n_times] = zeros(Float32, n_times)
+
+    ds.attrib["title"] = "Gridded satellite data (cubed sphere)"
+    ds.attrib["created_with"] = "SatelliteGridding.jl"
+
+    dims = (payload_dims(grid_spec)..., "time")
+    # `coordinates`/`grid_mapping` make Panoply, xarray, and GCHP tooling plot the
+    # data on the 2D lons/lats aux coordinates rather than the fake 1D axes.
+    cs_attrib = ["coordinates" => "lons lats", "grid_mapping" => "cubed_sphere"]
+    nc_vars = Dict{String,Any}()
+    for (key, _) in grid_vars
+        nc_vars[key] = defVar(ds, key, Float32, dims, deflatelevel=4, fillvalue=-999.0f0,
+                              attrib=cs_attrib)
+        if compute_std
+            key_std = key * "_std"
+            nc_vars[key_std] = defVar(ds, key_std, Float32, dims,
+                                      deflatelevel=4, fillvalue=-999.0f0, attrib=cs_attrib)
+        end
+    end
+
+    nc_vars["n"] = defVar(ds, "n", Float32, dims, deflatelevel=4, fillvalue=-999.0f0,
+                          attrib=["units" => "", "long_name" => "Number of pixels in average",
+                                  "coordinates" => "lons lats", "grid_mapping" => "cubed_sphere"])
 
     return ds, nc_vars
 end

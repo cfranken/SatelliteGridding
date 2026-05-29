@@ -16,5 +16,6 @@ using KernelAbstractions
     include("test_ncio.jl")
     include("test_vegetation.jl")
     include("test_synthetic_geometry.jl")
+    include("test_cubed_sphere.jl")
     include("test_integration.jl")
 end

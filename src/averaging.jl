@@ -77,6 +77,89 @@ function accumulate_footprint!(grid_data::AbstractArray{T,3},
 end
 
 """
+    accumulate_footprint_cs!(grid_data, grid_std, grid_weights, compute_std, spec,
+                             lat_c, lon_c, values, n_pixels, n_vars, n_oversample,
+                             points_buf, lats0_buf, lons0_buf, lats1_buf, lons1_buf)
+
+Footprint-aware accumulation onto a [`CubedSphereGridSpec`](@ref) folded into the
+`(Nc, 6·Nc)` accumulator. Unlike the rectangular [`accumulate_footprint!`], the
+subdivision happens in **lon/lat space** (not fractional-index space) because the
+cubed-sphere map is nonlinear and discontinuous across panel boundaries; each
+sub-point is then projected independently via [`to_fractional_index`], so a
+footprint straddling a cube edge correctly deposits weight on both panels.
+
+For each pixel:
+- **Fast path**: all 4 corners project to the same `(col, row)` cell → full value, weight 1.
+- **Oversample path**: subdivide the corner quadrilateral into `n × n` sub-points
+  (longitudes unwrapped to a common ±180° branch first, so the linear interpolation
+  is sane for near-pole footprints that span the dateline), project each, and add
+  weight `1/n²` to the cell it lands in.
+
+`lat_c`/`lon_c` are `(n_pixels, 4)` corner coordinates in degrees (CCW-sorted);
+`lat_center`/`lon_center` are `(n_pixels,)` center coordinates. Buffers match
+[`compute_subpixels!`].
+"""
+function accumulate_footprint_cs!(grid_data::AbstractArray{T,3},
+                                  grid_std::AbstractArray{T,3},
+                                  grid_weights::AbstractMatrix{T},
+                                  compute_std::Bool,
+                                  spec::CubedSphereGridSpec{T},
+                                  lat_c::AbstractMatrix, lon_c::AbstractMatrix,
+                                  values::AbstractMatrix,
+                                  n_pixels::Int, n_vars::Int, n_oversample::Int,
+                                  points_buf::AbstractArray{T,3},
+                                  lats0_buf::AbstractVector, lons0_buf::AbstractVector,
+                                  lats1_buf::AbstractVector, lons1_buf::AbstractVector) where {T}
+    fac = T(1 / n_oversample^2)
+    lonv = Vector{Float64}(undef, 4)
+    latv = Vector{Float64}(undef, 4)
+
+    @inbounds for i in 1:n_pixels
+        # Project the 4 corners; fast-path when they all share one cell.
+        c1, r1 = _cs_cell(spec, lat_c[i, 1], lon_c[i, 1])
+        c2, r2 = _cs_cell(spec, lat_c[i, 2], lon_c[i, 2])
+        c3, r3 = _cs_cell(spec, lat_c[i, 3], lon_c[i, 3])
+        c4, r4 = _cs_cell(spec, lat_c[i, 4], lon_c[i, 4])
+
+        if (c1 == c2 == c3 == c4) & (r1 == r2 == r3 == r4)
+            _welford_update!(grid_data, grid_std, grid_weights, compute_std,
+                             c1, r1, values, i, n_vars, T(1))
+            continue
+        end
+
+        # Unwrap corner longitudes to a common branch relative to corner 1 so the
+        # bilinear subdivision does not interpolate across the ±180° seam.
+        lon1 = Float64(lon_c[i, 1])
+        for k in 1:4
+            latv[k] = Float64(lat_c[i, k])
+            lk = Float64(lon_c[i, k])
+            lonv[k] = lk - 360 * round((lk - lon1) / 360)
+        end
+
+        compute_subpixels!(points_buf, latv, lonv, n_oversample,
+                           lats0_buf, lons0_buf, lats1_buf, lons1_buf)
+
+        for jj in 1:n_oversample, ii in 1:n_oversample
+            sub_lat = points_buf[ii, jj, 1]
+            sub_lon = points_buf[ii, jj, 2]
+            col, row = _cs_cell(spec, sub_lat, sub_lon)
+            _welford_update!(grid_data, grid_std, grid_weights, compute_std,
+                             col, row, values, i, n_vars, fac)
+        end
+    end
+    nothing
+end
+
+# Project (lat, lon) to integer folded cell indices on a cubed-sphere grid,
+# clamped defensively to the accumulator bounds.
+@inline function _cs_cell(spec::CubedSphereGridSpec{T}, lat::Real, lon::Real) where {T}
+    col_f, row_f = to_fractional_index(spec, T(lat), T(lon))
+    col = clamp(floor(Int, col_f), 1, spec.Nc)
+    row = clamp(floor(Int, row_f), 1, 6 * spec.Nc)
+    return col, row
+end
+
+"""
     accumulate_circular_footprint!(grid_data, grid_std, grid_weights, compute_std,
                                    center_lat_idx, center_lon_idx,
                                    lat_idx, lon_idx, values,

@@ -8,6 +8,8 @@ Manifest.toml
 *.nc
 *.nc4
 *.log
+*.pid
+*.runlog
 nohup.out
 docs/build/
 docs/src/generated/
@@ -24,3 +26,6 @@ docs/src/generated/
 *.kmz
 *.pdf
 *.shp
+
+# Local plots (untracked)
+plots/

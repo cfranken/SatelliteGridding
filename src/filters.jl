@@ -43,6 +43,39 @@ function apply_filters(dataset, config::DataSourceConfig,
 end
 
 """
+    apply_filters(dataset, config, lat_bounds, lon_bounds,
+                  grid_spec::CubedSphereGridSpec) -> Vector{Int}
+
+Cubed-sphere variant: a cubed-sphere grid covers the whole sphere, so there is
+no spatial bounding box and no dateline span check (a valid high-latitude or
+near-pole footprint can legitimately span a large longitude range). Only the
+quality filters from `config.filters` are applied.
+"""
+function apply_filters(dataset, config::DataSourceConfig,
+                       lat_bounds::AbstractMatrix, lon_bounds::AbstractMatrix,
+                       grid_spec::CubedSphereGridSpec)::Vector{Int}
+    n = size(lat_bounds, 1)
+    bool_add = zeros(Int, n)
+    n_criteria = 0
+
+    for rule in config.filters
+        data = read_nc_variable(dataset, rule.variable)
+        if rule.op === :lt
+            bool_add .+= (data .< rule.lo)
+        elseif rule.op === :gt
+            bool_add .+= (data .> rule.lo)
+        elseif rule.op === :eq
+            bool_add .+= (data .== rule.lo)
+        elseif rule.op === :between
+            bool_add .+= ((data .> rule.lo) .& (data .< rule.hi))
+        end
+        n_criteria += 1
+    end
+
+    n_criteria == 0 ? collect(1:n) : findall(bool_add .== n_criteria)
+end
+
+"""
     apply_center_filters(lat, lon, grid_spec::GridSpec) -> Vector{CartesianIndex}
 
 Apply spatial bounding box filter for center-coordinate gridding (no footprint bounds).
