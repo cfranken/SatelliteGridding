@@ -18,4 +18,5 @@ using KernelAbstractions
     include("test_synthetic_geometry.jl")
     include("test_cubed_sphere.jl")
     include("test_integration.jl")
+    include("test_rolling.jl")
 end

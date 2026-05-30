@@ -65,28 +65,61 @@ DataSourceConfig(basic::Dict{String,String}, grid_vars::OrderedDict{String,Strin
 
 Specification of the temporal gridding parameters.
 
+Two temporal modes are supported:
+
+- **Tiled (default):** snapshots are spaced by `time_step`; each snapshot averages a
+  forward window `[d, d + time_step·oversample_temporal − 1 day]`. With
+  `oversample_temporal == 1` the windows tile with no overlap.
+- **Rolling mean:** set `sample_step` and `window_halfwidth_days`. Snapshots are spaced
+  by `sample_step` and each averages a *centered* window `[c − N, c + N]` (N =
+  `window_halfwidth_days`). When `2N+1 > sample_step` the windows overlap, smoothing the
+  temporal evolution. Each calendar day is gridded only once and reused across
+  overlapping windows (in-memory day cache). `time_step`/`oversample_temporal` are
+  ignored in this mode.
+
 # Fields
-- `start_date`, `stop_date`: Date range for processing
-- `time_step`: Temporal bin size (`Dates.Day` or `Dates.Month`)
-- `oversample_temporal`: Multiplier for the actual averaging window (>1 gives moving-average-like behavior)
+- `start_date`, `stop_date`: Date range of snapshot centers
+- `time_step`: Tiled-mode bin size (`Dates.Day` or `Dates.Month`)
+- `oversample_temporal`: Tiled-mode window multiplier (>1 gives moving-average-like behavior)
+- `sample_step`: Rolling-mode snapshot spacing (`Dates.Day`), or `nothing` for tiled mode
+- `window_halfwidth_days`: Rolling-mode half-width N (days), or `nothing` for tiled mode
 """
 struct TimeSpec
     start_date::DateTime
     stop_date::DateTime
     time_step::Union{Dates.Day,Dates.Month}
     oversample_temporal::Float32
+    sample_step::Union{Nothing,Dates.Day}
+    window_halfwidth_days::Union{Nothing,Int}
 end
 
 """
-    TimeSpec(start_date, stop_date, time_step; oversample_temporal=1.0f0)
+    TimeSpec(start_date, stop_date, time_step; oversample_temporal=1.0f0,
+             sample_step=nothing, window_halfwidth_days=nothing)
 
-Construct a `TimeSpec`.
+Construct a `TimeSpec`. Pass both `sample_step` and `window_halfwidth_days` to enable
+rolling-mean mode; pass neither for the default tiled mode.
 """
 function TimeSpec(start_date::DateTime, stop_date::DateTime,
                   time_step::Union{Dates.Day,Dates.Month};
-                  oversample_temporal::Float32=1.0f0)
-    TimeSpec(start_date, stop_date, time_step, oversample_temporal)
+                  oversample_temporal::Float32=1.0f0,
+                  sample_step::Union{Nothing,Dates.Day}=nothing,
+                  window_halfwidth_days::Union{Nothing,Int}=nothing)
+    (sample_step === nothing) == (window_halfwidth_days === nothing) ||
+        error("Rolling mean requires both sample_step and window_halfwidth_days, or neither.")
+    if window_halfwidth_days !== nothing && window_halfwidth_days < 0
+        error("window_halfwidth_days must be ≥ 0; got $window_halfwidth_days.")
+    end
+    TimeSpec(start_date, stop_date, time_step, oversample_temporal,
+             sample_step, window_halfwidth_days)
 end
+
+"""
+    is_rolling(ts::TimeSpec) -> Bool
+
+True when `ts` is configured for centered rolling-mean gridding.
+"""
+is_rolling(ts::TimeSpec) = ts.sample_step !== nothing
 
 """
     AbstractGriddingMethod

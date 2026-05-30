@@ -38,6 +38,8 @@ julia --project=. bin/grid.jl l2 [options]
 | `--dDays` | Int | 8 | Time step in days (or months with `--monthly`) |
 | `--monthly` | Flag | false | Use months instead of days for time step |
 | `--oversample_temporal` | Float32 | 1.0 | Temporal oversampling factor |
+| `--sample_step` | Int | 0 | Rolling mean: snapshot spacing in days (>0 enables rolling mode) |
+| `--window_days` | Int | 0 | Rolling mean: averaging half-width N in days (window = center ± N) |
 | `--nOversample` | Int | 0 (auto) | Sub-pixel factor (0 = auto-compute) |
 | `--footprint` | String | `quad` | Footprint geometry: `quad` or `circle` |
 | `--compSTD` | Flag | false | Compute standard deviation |
@@ -93,6 +95,28 @@ julia --project=. bin/grid.jl l2 \
 `--footprint circle` works with `--backend sequential`, `cpu`, `cuda`, and
 `metal`. CUDA and Metal require the corresponding optional Julia GPU package and
 hardware support.
+
+Daily-sampled rolling mean over a centered ±7-day window (smooth time series):
+```bash
+julia --project=. bin/grid.jl l2 \
+    --config examples/tropomi_sif.toml \
+    --dLat 0.5 --dLon 0.5 \
+    --startDate 2019-01-01 --stopDate 2019-12-31 \
+    --sample_step 1 --window_days 7 \
+    -o tropomi_sif_2019_rolling15d.nc
+```
+
+With `--sample_step > 0` the run switches to rolling mode: it emits one snapshot
+every `--sample_step` days, each averaging the centered window
+`[center − window_days, center + window_days]` (here a 15-day window stepped
+daily). Consecutive windows overlap, so the time series is smooth; `--dDays` and
+`--oversample_temporal` are ignored. Each calendar day is gridded only once and
+reused across overlapping windows (in-memory day cache), so finer sampling does
+not re-grid the same data. The `time` coordinate holds the window center, and
+every output also carries `window_start`/`window_end` recording the exact
+averaging interval (these clip naturally at the data edges). Rolling mode runs on
+`--backend sequential`, on `--gridType cs`, and on `--backend cpu`/`cuda`/`metal`
+for the mean; `--compSTD` requires the sequential CPU path.
 
 TROPOMI SIF onto a GEOS/GCHP C360 cubed sphere (sequential CPU only):
 

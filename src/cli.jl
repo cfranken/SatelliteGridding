@@ -74,6 +74,14 @@ function parse_l2_args(args=ARGS)
             help = "Temporal oversampling factor (averaging window = oversample_temporal × dDays)"
             arg_type = Float32
             default = 1.0f0
+        "--sample_step"
+            help = "Rolling mean: snapshot spacing in days. >0 enables centered rolling-mean mode and overrides dDays/oversample_temporal for scheduling."
+            arg_type = Int64
+            default = 0
+        "--window_days"
+            help = "Rolling mean: averaging half-width N in days; each snapshot averages the centered window [center-N, center+N]. Used only when --sample_step > 0."
+            arg_type = Int64
+            default = 0
         "--nOversample"
             help = "Sub-pixel factor for footprint oversampling (default: auto-compute)"
             arg_type = Int64
@@ -211,5 +219,12 @@ function args_to_time_spec(args::Dict)::TimeSpec
     stop_date = DateTime(args["stopDate"])
     time_step = get(args, "monthly", false) ? Dates.Month(args["dDays"]) : Dates.Day(args["dDays"])
     oversample = get(args, "oversample_temporal", 1.0f0)
+    sample_step = get(args, "sample_step", 0)
+    if sample_step > 0
+        return TimeSpec(start_date, stop_date, time_step;
+                        oversample_temporal=oversample,
+                        sample_step=Dates.Day(sample_step),
+                        window_halfwidth_days=get(args, "window_days", 0))
+    end
     TimeSpec(start_date, stop_date, time_step; oversample_temporal=oversample)
 end

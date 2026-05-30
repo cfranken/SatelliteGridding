@@ -468,3 +468,65 @@ function finalize_std!(grid_std::AbstractArray{T,3}, grid_weights::AbstractMatri
     end
     nothing
 end
+
+# --- Rolling-mean support: additive raw moments -----------------------------
+#
+# To average a day across several overlapping windows without re-gridding it, each
+# day is stored as raw moments that are *additive* over days:
+#   S0 = Σw       (weights)
+#   S1 = Σw·x     (per variable)
+#   S2 = Σw·x²    (per variable, only when std is requested)
+# A window is then the elementwise sum of its days' moments, finalized once at the end.
+
+"""
+    welford_to_moments!(S1, S2, mean, M2, weights, compute_std)
+
+Convert a day's Welford accumulators (`mean`, Welford `M2`, `weights`) into additive raw
+moments: `S1 = Σw·x = w·mean` and, when `compute_std`, `S2 = Σw·x² = M2 + w·mean²`.
+`S0` is just the `weights` array itself (no copy needed). `S2` may be `nothing` when
+`compute_std` is false.
+"""
+function welford_to_moments!(S1::AbstractArray{T,3}, S2,
+                             mean::AbstractArray{T,3}, M2::AbstractArray{T,3},
+                             weights::AbstractMatrix{T}, compute_std::Bool) where {T}
+    nlon, nlat, nvars = size(mean)
+    @inbounds for j in 1:nlat, i in 1:nlon
+        w = weights[i, j]
+        for z in 1:nvars
+            m = mean[i, j, z]
+            S1[i, j, z] = w * m
+            if compute_std
+                S2[i, j, z] = M2[i, j, z] + w * m * m
+            end
+        end
+    end
+    nothing
+end
+
+"""
+    finalize_moments!(S1, S2, S0, compute_std)
+
+Finalize summed window moments in place. `S1` (`Σw·x`) becomes the weighted mean
+`Σw·x / Σw`; when `compute_std`, `S2` (`Σw·x²`) becomes the population standard
+deviation `sqrt(M2/Σw)` with `M2 = Σw·x² − (Σw·x)²/Σw` (matching [`finalize_std!`](@ref)).
+Cells with near-zero weight are left untouched. The combined `M2` must be computed from
+the summed `S1` *before* `S1` is overwritten with the mean, so this is done in one pass.
+"""
+function finalize_moments!(S1::AbstractArray{T,3}, S2, S0::AbstractMatrix{T},
+                           compute_std::Bool) where {T}
+    nlon, nlat, nvars = size(S1)
+    @inbounds for j in 1:nlat, i in 1:nlon
+        w = S0[i, j]
+        if w > eps(T)
+            for z in 1:nvars
+                s1 = S1[i, j, z]
+                if compute_std
+                    M2 = S2[i, j, z] - s1 * s1 / w
+                    S2[i, j, z] = sqrt(max(M2, zero(T)) / w)
+                end
+                S1[i, j, z] = s1 / w
+            end
+        end
+    end
+    nothing
+end

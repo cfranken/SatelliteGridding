@@ -177,9 +177,27 @@ end
 Create the output NetCDF4 file with dimensions, coordinate variables, and data variable
 definitions. Returns the dataset and a Dict mapping variable names to NCDatasets variables.
 """
+# Define the per-snapshot averaging-window bounds along the unlimited `time` dim.
+# `time` itself holds the snapshot reference (start of interval, or window center for a
+# rolling mean); `window_start`/`window_end` make the actual averaging interval explicit
+# and self-documenting. Both are `(time,)` so they concatenate with ncrcat like `time`.
+function _define_window_bounds!(ds, n_times::Int)
+    ws = defVar(ds, "window_start", Float32, ("time",),
+                attrib=["units" => "days since 1970-01-01",
+                         "long_name" => "Averaging window start (inclusive)"])
+    we = defVar(ds, "window_end", Float32, ("time",),
+                attrib=["units" => "days since 1970-01-01",
+                         "long_name" => "Averaging window end (inclusive)"])
+    ws[1:n_times] = zeros(Float32, n_times)
+    we[1:n_times] = zeros(Float32, n_times)
+    nothing
+end
+
 function create_output_dataset(outfile::String, grid_spec::RectangularGridSpec,
                                n_times::Int, grid_vars::OrderedDict{String,String},
-                               compute_std::Bool)
+                               compute_std::Bool;
+                               window_bounds::Bool=false,
+                               time_long_name::AbstractString="Time (UTC), start of interval")
     ds = Dataset(outfile, "c")
 
     defDim(ds, "lon", length(grid_spec.lon))
@@ -193,13 +211,14 @@ function create_output_dataset(outfile::String, grid_spec::RectangularGridSpec,
                     attrib=["units" => "degrees_east", "long_name" => "Longitude"])
     ds_time = defVar(ds, "time", Float32, ("time",),
                      attrib=["units" => "days since 1970-01-01",
-                              "long_name" => "Time (UTC), start of interval"])
+                              "long_name" => time_long_name])
 
     ds_lat[:] = grid_spec.lat
     ds_lon[:] = grid_spec.lon
     # Bump the unlimited time dim to its expected length so dependent variables
     # are sized correctly; gridder overwrites these placeholder times per slice.
     ds_time[1:n_times] = zeros(Float32, n_times)
+    window_bounds && _define_window_bounds!(ds, n_times)
 
     ds.attrib["title"] = "Gridded satellite data"
     ds.attrib["created_with"] = "SatelliteGridding.jl"
@@ -234,7 +253,9 @@ unlimited `time`. Spatial coordinates (`lons`/`lats` and `corner_lons`/
 """
 function create_output_dataset(outfile::String, grid_spec::CubedSphereGridSpec,
                                n_times::Int, grid_vars::OrderedDict{String,String},
-                               compute_std::Bool)
+                               compute_std::Bool;
+                               window_bounds::Bool=false,
+                               time_long_name::AbstractString="Time (UTC), start of interval")
     ds = Dataset(outfile, "c")
 
     write_coordinates!(ds, grid_spec)
@@ -243,8 +264,9 @@ function create_output_dataset(outfile::String, grid_spec::CubedSphereGridSpec,
     defDim(ds, "time", Inf)
     ds_time = defVar(ds, "time", Float32, ("time",),
                      attrib=["units" => "days since 1970-01-01",
-                              "long_name" => "Time (UTC), start of interval"])
+                              "long_name" => time_long_name])
     ds_time[1:n_times] = zeros(Float32, n_times)
+    window_bounds && _define_window_bounds!(ds, n_times)
 
     ds.attrib["title"] = "Gridded satellite data (cubed sphere)"
     ds.attrib["created_with"] = "SatelliteGridding.jl"
