@@ -5,6 +5,7 @@ using Statistics
 using NCDatasets
 using OrderedCollections
 using KernelAbstractions
+using Zarr   # loads the SatelliteGriddingZarrExt extension for the Zarr daily-emit tests
 
 @testset "SatelliteGridding.jl" begin
     include("test_oversampling.jl")
@@ -19,4 +20,5 @@ using KernelAbstractions
     include("test_cubed_sphere.jl")
     include("test_integration.jl")
     include("test_rolling.jl")
+    include("test_zarr_ordering.jl")
 end

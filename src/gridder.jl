@@ -30,6 +30,9 @@ function grid_l2(config::DataSourceConfig, grid_spec::AbstractGridSpec{T}, time_
                  footprint_method::AbstractGriddingMethod=SubpixelGridding(n_oversample),
                  compute_std::Bool=false,
                  outfile::String="gridded_output.nc",
+                 zarr_out::Union{Nothing,String}=nothing,
+                 zarr_meta::Union{Nothing,String}=nothing,
+                 zarr_epoch::Date=ZARR_EPOCH,
                  backend=nothing,
                  keep_going::Bool=false) where {T}
 
@@ -79,6 +82,15 @@ function grid_l2(config::DataSourceConfig, grid_spec::AbstractGridSpec{T}, time_
                                             window_bounds=true,
                                             time_long_name=time_long_name)
 
+    # Optional additive Zarr v2 daily store (one chunk per variable per day).
+    zg = nothing
+    if zarr_out !== nothing
+        grid_spec isa RectangularGridSpec ||
+            error("Zarr daily emit currently supports only rectangular lat/lon grids (--gridType rect); got $(typeof(grid_spec)).")
+        zg = init_zarr_store(zarr_out, grid_spec, config.grid_vars;
+                             epoch=zarr_epoch, compute_std=compute_std)
+    end
+
     total_files = 0
     successful_files = 0
     failed_files = 0
@@ -88,7 +100,8 @@ function grid_l2(config::DataSourceConfig, grid_spec::AbstractGridSpec{T}, time_
             total_files, successful_files, failed_files = _grid_l2_rolling!(
                 ds_out, nc_vars, config, grid_spec, time_spec, snapshots,
                 acc1, acc2, n_vars, use_ka, backend, compute_std,
-                effective_n_oversample, footprint_method, keep_going)
+                effective_n_oversample, footprint_method, keep_going;
+                zg=zg, zarr_epoch=zarr_epoch)
         else
             # Allocate work arrays (on backend for GPU, regular Array for CPU)
             if use_ka
@@ -148,11 +161,13 @@ function grid_l2(config::DataSourceConfig, grid_spec::AbstractGridSpec{T}, time_
                     # Copy to CPU for finalization and NetCDF write (no-op for CPU backend)
                     grid_data_final = Array(grid_sum)
                     grid_w_cpu = Array(grid_weights)
+                    ka_std = zeros(T, acc1, acc2, n_vars)   # KA path computes no std
                     finalize_mean!(grid_data_final, grid_w_cpu)
                     _write_time_slice!(ds_out, nc_vars, config, grid_spec, grid_data_final,
-                                       zeros(T, acc1, acc2, n_vars),
-                                       grid_w_cpu, false, ct, d;
+                                       ka_std, grid_w_cpu, false, ct, d;
                                        window_start=d, window_end=end_date)
+                    zg === nothing || write_zarr_day!(zg, d, grid_data_final, ka_std, grid_w_cpu,
+                                                      config.grid_vars, false; epoch=zarr_epoch)
                     fill!(grid_sum, zero(T))
                 else
                     if compute_std
@@ -161,6 +176,8 @@ function grid_l2(config::DataSourceConfig, grid_spec::AbstractGridSpec{T}, time_
                     _write_time_slice!(ds_out, nc_vars, config, grid_spec, grid_data, grid_std_arr,
                                        grid_weights, compute_std, ct, d;
                                        window_start=d, window_end=end_date)
+                    zg === nothing || write_zarr_day!(zg, d, grid_data, grid_std_arr, grid_weights,
+                                                      config.grid_vars, compute_std; epoch=zarr_epoch)
                     fill!(grid_data, zero(T))
                     fill!(grid_std_arr, zero(T))
                 end
@@ -174,6 +191,13 @@ function grid_l2(config::DataSourceConfig, grid_spec::AbstractGridSpec{T}, time_
         successful_files > 0 || error("No input files were successfully processed; failed files: $failed_files")
     finally
         close(ds_out)
+    end
+
+    if zarr_out !== nothing
+        consolidate_zarr!(zarr_out)
+        zarr_meta === nothing ||
+            write_zarr_meta_json(zarr_meta, grid_spec, config.grid_vars; epoch=zarr_epoch)
+        println("Zarr store updated: $zarr_out")
     end
 
     println("Output written to: $outfile")
@@ -195,7 +219,8 @@ so each calendar day is gridded exactly once regardless of window overlap.
 function _grid_l2_rolling!(ds_out, nc_vars, config, grid_spec::AbstractGridSpec{T},
                            time_spec::TimeSpec, snapshots,
                            acc1, acc2, n_vars, use_ka, backend, compute_std,
-                           effective_n_oversample, footprint_method, keep_going) where {T}
+                           effective_n_oversample, footprint_method, keep_going;
+                           zg=nothing, zarr_epoch::Date=ZARR_EPOCH) where {T}
     N = Dates.Day(time_spec.window_halfwidth_days)
 
     # day (calendar Date) => (S0, S1, S2) raw moments, or `nothing` when the day had no
@@ -249,6 +274,8 @@ function _grid_l2_rolling!(ds_out, nc_vars, config, grid_spec::AbstractGridSpec{
         _write_time_slice!(ds_out, nc_vars, config, grid_spec, win_S1, std_out,
                            win_S0, compute_std, ct, c;
                            window_start=ws, window_end=we)
+        zg === nothing || write_zarr_day!(zg, c, win_S1, std_out, win_S0,
+                                          config.grid_vars, compute_std; epoch=zarr_epoch)
 
         # Evict days the next (later) snapshot will no longer touch.
         if ct < length(snapshots)

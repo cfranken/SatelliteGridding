@@ -1,0 +1,11 @@
+{
+  "name": "zarr-ordering-probe",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Browser-path (zarrita) ordering check for the SatelliteGridding Zarr emit.",
+  "dependencies": {
+    "numcodecs": "^0.3.2",
+    "zarrita": "^0.7.3"
+  }
+}

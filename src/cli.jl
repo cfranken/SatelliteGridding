@@ -97,6 +97,18 @@ function parse_l2_args(args=ARGS)
         "--keepGoing"
             help = "Continue after per-file processing errors and report failures at the end"
             action = :store_true
+        "--zarrOut"
+            help = "Also write a per-day Zarr v2 store at this path (additive; one chunk per variable per day, alongside the NetCDF). Requires Zarr.jl. Rectangular grids only."
+            arg_type = String
+            default = ""
+        "--zarrMeta"
+            help = "Directory to write the dashboard meta.json (grid definition + variable registry). Used only with --zarrOut."
+            arg_type = String
+            default = ""
+        "--zarrEpoch"
+            help = "Zarr time-axis epoch (YYYY-MM-DD). Must be identical across all runs that share one store."
+            arg_type = String
+            default = "2021-01-01"
     end
     parse_args(args, s)
 end

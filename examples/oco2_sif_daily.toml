@@ -1,0 +1,20 @@
+# OCO-2 Lite SIF (B11.2r) — daily Zarr dashboard variables.
+# Data: /kiwi-data/Data/satellite/OCO2/L2_Lite_SIF/11.2r/raw/<year>/oco2_LtSIF_YYMMDD_*.nc4
+# Grid-var keys are the dashboard / Zarr array names (see examples/oco2_xco2_daily.toml
+# for the XCO2 half of the same combined store).
+filePattern = "oco2_LtSIF_YYMMDD_*.nc4"
+folder = "/kiwi-data/Data/satellite/OCO2/L2_Lite_SIF/11.2r/raw/YYYY/"
+
+[basic]
+lat = "Latitude"
+lon = "Longitude"
+lat_bnd = "Latitude_Corners"
+lon_bnd = "Longitude_Corners"
+
+[grid]
+sifdaily = "Daily_SIF_757nm"
+sif757 = "Science/SIF_757nm"
+sif771 = "Science/SIF_771nm"
+
+[filter]
+Quality_Flag = "== 0"
