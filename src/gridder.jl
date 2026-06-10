@@ -73,14 +73,20 @@ function grid_l2(config::DataSourceConfig, grid_spec::AbstractGridSpec{T}, time_
     rolling && println("Rolling mean: step $(time_spec.sample_step), window ±$(time_spec.window_halfwidth_days) day(s)")
     use_ka && println("Using KA backend: $backend")
 
+    # NetCDF output is optional: an empty `outfile` means Zarr-only, which skips the
+    # HDF5 write path entirely (no NetCDF byproduct, and no HDF5 failure surface).
+    write_nc = !isempty(outfile)
+    write_nc || zarr_out !== nothing ||
+        error("Nothing to write: pass a non-empty `outfile`, `zarr_out`, or both.")
+
     # Create output file. `time` is the window center for a rolling mean, and the
     # explicit window_start/window_end bounds record the actual averaging interval.
     time_long_name = rolling ? "Time (UTC), center of averaging window" :
                                "Time (UTC), start of interval"
-    ds_out, nc_vars = create_output_dataset(outfile, grid_spec, n_times,
-                                            config.grid_vars, compute_std;
-                                            window_bounds=true,
-                                            time_long_name=time_long_name)
+    ds_out, nc_vars = write_nc ?
+        create_output_dataset(outfile, grid_spec, n_times, config.grid_vars, compute_std;
+                              window_bounds=true, time_long_name=time_long_name) :
+        (nothing, nothing)
 
     # Optional additive Zarr v2 daily store (one chunk per variable per day).
     zg = nothing
@@ -163,7 +169,7 @@ function grid_l2(config::DataSourceConfig, grid_spec::AbstractGridSpec{T}, time_
                     grid_w_cpu = Array(grid_weights)
                     ka_std = zeros(T, acc1, acc2, n_vars)   # KA path computes no std
                     finalize_mean!(grid_data_final, grid_w_cpu)
-                    _write_time_slice!(ds_out, nc_vars, config, grid_spec, grid_data_final,
+                    ds_out === nothing || _write_time_slice!(ds_out, nc_vars, config, grid_spec, grid_data_final,
                                        ka_std, grid_w_cpu, false, ct, d;
                                        window_start=d, window_end=end_date)
                     zg === nothing || write_zarr_day!(zg, d, grid_data_final, ka_std, grid_w_cpu,
@@ -173,7 +179,7 @@ function grid_l2(config::DataSourceConfig, grid_spec::AbstractGridSpec{T}, time_
                     if compute_std
                         finalize_std!(grid_std_arr, grid_weights)
                     end
-                    _write_time_slice!(ds_out, nc_vars, config, grid_spec, grid_data, grid_std_arr,
+                    ds_out === nothing || _write_time_slice!(ds_out, nc_vars, config, grid_spec, grid_data, grid_std_arr,
                                        grid_weights, compute_std, ct, d;
                                        window_start=d, window_end=end_date)
                     zg === nothing || write_zarr_day!(zg, d, grid_data, grid_std_arr, grid_weights,
@@ -190,7 +196,7 @@ function grid_l2(config::DataSourceConfig, grid_spec::AbstractGridSpec{T}, time_
         total_files > 0 || error("No input files matched pattern '$(config.file_pattern)' in folder '$(config.folder)'")
         successful_files > 0 || error("No input files were successfully processed; failed files: $failed_files")
     finally
-        close(ds_out)
+        ds_out === nothing || close(ds_out)
     end
 
     if zarr_out !== nothing
@@ -200,7 +206,7 @@ function grid_l2(config::DataSourceConfig, grid_spec::AbstractGridSpec{T}, time_
         println("Zarr store updated: $zarr_out")
     end
 
-    println("Output written to: $outfile")
+    write_nc && println("Output written to: $outfile")
     nothing
 end
 
@@ -271,7 +277,7 @@ function _grid_l2_rolling!(ds_out, nc_vars, config, grid_spec::AbstractGridSpec{
 
         finalize_moments!(win_S1, win_S2, win_S0, compute_std)
         std_out = compute_std ? win_S2 : zeros(T, acc1, acc2, n_vars)
-        _write_time_slice!(ds_out, nc_vars, config, grid_spec, win_S1, std_out,
+        ds_out === nothing || _write_time_slice!(ds_out, nc_vars, config, grid_spec, win_S1, std_out,
                            win_S0, compute_std, ct, c;
                            window_start=ws, window_end=we)
         zg === nothing || write_zarr_day!(zg, c, win_S1, std_out, win_S0,
@@ -532,7 +538,7 @@ function _process_l2_file!(filepath::String, config::DataSourceConfig,
 
         # Copy attributes from first file
         if fill_attrib
-            copy_variable_attributes!(nc_vars, fin, config.grid_vars)
+            nc_vars === nothing || copy_variable_attributes!(nc_vars, fin, config.grid_vars)
         end
 
         # Read all grid variables
@@ -639,7 +645,7 @@ function _process_l2_file!(filepath::String, config::DataSourceConfig,
         isempty(idx) && return
 
         if fill_attrib
-            copy_variable_attributes!(nc_vars, fin, config.grid_vars)
+            nc_vars === nothing || copy_variable_attributes!(nc_vars, fin, config.grid_vars)
         end
 
         n_soundings = size(lat_bnd, 1)
@@ -725,7 +731,7 @@ function _process_l2_file_ka!(filepath::String, config::DataSourceConfig,
         end
 
         if fill_attrib
-            copy_variable_attributes!(nc_vars, fin, config.grid_vars)
+            nc_vars === nothing || copy_variable_attributes!(nc_vars, fin, config.grid_vars)
         end
 
         # Read all grid variables

@@ -13,7 +13,7 @@ function parse_l2_args(args=ARGS)
             arg_type = String
             required = true
         "--outFile", "-o"
-            help = "Output NetCDF filename"
+            help = "Output NetCDF filename; empty string disables NetCDF (Zarr-only, needs --zarrOut)"
             arg_type = String
             default = "gridded_output.nc"
         "--monthly"
