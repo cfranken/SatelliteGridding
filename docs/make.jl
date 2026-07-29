@@ -30,11 +30,12 @@ makedocs(
     format = Documenter.HTML(
         prettyurls = get(ENV, "CI", nothing) == "true",
         canonical  = "https://cfranken.github.io/SatelliteGridding/",
+        edit_link  = "main",
     ),
     checkdocs = :exports,
     warnonly  = get(ENV, "DOCUMENTER_STRICT", "false") != "true",
 )
 
 if get(ENV, "CI", nothing) == "true"
-    deploydocs(repo = "github.com/cfranken/SatelliteGridding.git", devbranch = "master")
+    deploydocs(repo = "github.com/cfranken/SatelliteGridding.git", devbranch = "main")
 end

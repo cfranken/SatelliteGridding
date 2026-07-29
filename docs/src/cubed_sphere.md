@@ -27,7 +27,7 @@ cube has `6·Nc²` cells total. For example, `Nc = 360` is **C360** (~25 km).
     The closed-form gnomonic projection and its inverse (`lonlat_to_panel_xy`)
     are ported verbatim from the AtmosTransportModel package
     (`src/Grids/CubedSphereMesh.jl`, commit `6522d85`). See
-    [`src/cubed_sphere.jl`](https://github.com/cfranken/SatelliteGridding/blob/master/src/cubed_sphere.jl)
+    [`src/cubed_sphere.jl`](https://github.com/cfranken/SatelliteGridding/blob/main/src/cubed_sphere.jl)
     for the full attribution.
 
 ## Library usage

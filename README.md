@@ -327,7 +327,7 @@ Tests use synthetic data only — no real satellite files needed. Currently 320 
 
 Full documentation is available at **[cfranken.github.io/SatelliteGridding](https://cfranken.github.io/SatelliteGridding/dev/)**.
 
-Docs are built automatically via GitHub Actions on every push to `master`. To build locally:
+Docs are built automatically via GitHub Actions on every push to `main`. To build locally:
 
 ```bash
 julia --project=docs -e 'using Pkg; Pkg.develop(PackageSpec(path=pwd())); Pkg.instantiate()'
