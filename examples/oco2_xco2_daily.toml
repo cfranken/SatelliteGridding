@@ -1,0 +1,19 @@
+# OCO-2 Lite FP / XCO2 (B11.3r) — daily Zarr dashboard variables.
+# Data: /kiwi-data/Data/satellite/OCO2/L2_Lite_FP/11.3r/raw/<year>/oco2_LtCO2_YYMMDD_*.nc4
+# Writes the xco2 / xco2_unc arrays into the SAME combined store as the SIF run
+# (examples/oco2_sif_daily.toml). Grid-var keys are the dashboard / Zarr array names.
+filePattern = "oco2_LtCO2_YYMMDD_*.nc4"
+folder = "/kiwi-data/Data/satellite/OCO2/L2_Lite_FP/11.3r/raw/YYYY/"
+
+[basic]
+lat = "latitude"
+lon = "longitude"
+lat_bnd = "vertex_latitude"
+lon_bnd = "vertex_longitude"
+
+[grid]
+xco2 = "xco2"
+xco2_unc = "xco2_uncertainty"
+
+[filter]
+xco2_quality_flag = "== 0"

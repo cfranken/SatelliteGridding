@@ -14,6 +14,7 @@
 using Pkg
 Pkg.activate(joinpath(@__DIR__, ".."))
 
+using Dates
 using SatelliteGridding
 
 function main()
@@ -55,9 +56,18 @@ function main()
             error("Unknown footprint geometry: $(args["footprint"]). Use quad or circle.")
         end
 
+        zarr_out = isempty(args["zarrOut"]) ? nothing : args["zarrOut"]
+        zarr_meta = isempty(args["zarrMeta"]) ? nothing : args["zarrMeta"]
+        # Loading Zarr triggers the SatelliteGriddingZarrExt extension that backs
+        # init_zarr_store / write_zarr_day!. Only load it when a Zarr store is requested.
+        zarr_out === nothing || @eval using Zarr
+
         grid(config, grid_spec, time_spec, method;
              compute_std=args["compSTD"],
              outfile=args["outFile"],
+             zarr_out=zarr_out,
+             zarr_meta=zarr_meta,
+             zarr_epoch=Date(args["zarrEpoch"]),
              backend=backend,
              keep_going=args["keepGoing"])
 
