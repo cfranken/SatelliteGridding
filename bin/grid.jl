@@ -37,6 +37,7 @@ function main()
     end
 
     t_start = time()
+    command_line = join(["julia", PROGRAM_FILE, copy(ARGS)...], " ")
     command = popfirst!(ARGS)
 
     if command == "l2"
@@ -59,7 +60,8 @@ function main()
              compute_std=args["compSTD"],
              outfile=args["outFile"],
              backend=backend,
-             keep_going=args["keepGoing"])
+             keep_going=args["keepGoing"],
+             command=command_line)
 
     elseif command == "center"
         args = parse_center_args(ARGS)
@@ -75,7 +77,8 @@ function main()
              geo_provider=args["geoProvider"],
              veg_indices=args["vegIndices"],
              outfile=args["outFile"],
-             keep_going=args["keepGoing"])
+             keep_going=args["keepGoing"],
+             command=command_line)
     else
         error("Unknown command: $command. Use 'l2' or 'center'.")
     end

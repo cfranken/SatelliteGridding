@@ -31,7 +31,8 @@ function grid_l2(config::DataSourceConfig, grid_spec::AbstractGridSpec{T}, time_
                  compute_std::Bool=false,
                  outfile::String="gridded_output.nc",
                  backend=nothing,
-                 keep_going::Bool=false) where {T}
+                 keep_going::Bool=false,
+                 command::Union{Nothing,String}=nothing) where {T}
 
     footprint_method isa SubpixelGridding ||
         footprint_method isa CircularFootprintGridding ||
@@ -77,7 +78,9 @@ function grid_l2(config::DataSourceConfig, grid_spec::AbstractGridSpec{T}, time_
     ds_out, nc_vars = create_output_dataset(outfile, grid_spec, n_times,
                                             config.grid_vars, compute_std;
                                             window_bounds=true,
-                                            time_long_name=time_long_name)
+                                            time_long_name=time_long_name,
+                                            command=command,
+                                            filters=config.filters)
 
     total_files = 0
     successful_files = 0
@@ -859,7 +862,8 @@ function grid_center(config::DataSourceConfig, grid_spec::GridSpec{T}, time_spec
                      veg_indices::Bool=false,
                      compute_std::Bool=false,
                      outfile::String="gridded_output.nc",
-                     keep_going::Bool=false) where {T}
+                     keep_going::Bool=false,
+                     command::Union{Nothing,String}=nothing) where {T}
 
     dates = collect(time_spec.start_date:time_spec.time_step:time_spec.stop_date)
     n_times = length(dates)
@@ -877,7 +881,9 @@ function grid_center(config::DataSourceConfig, grid_spec::GridSpec{T}, time_spec
     println("Output file dimension (time/lon/lat): $n_times/$n_lon/$n_lat")
 
     ds_out, nc_vars = create_output_dataset(outfile, grid_spec, n_times,
-                                            config.grid_vars, compute_std)
+                                            config.grid_vars, compute_std;
+                                            command=command,
+                                            filters=config.filters)
 
     # Add vegetation index variables if requested
     if veg_indices

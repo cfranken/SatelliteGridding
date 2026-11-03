@@ -176,6 +176,8 @@ end
 
 Create the output NetCDF4 file with dimensions, coordinate variables, and data variable
 definitions. Returns the dataset and a Dict mapping variable names to NCDatasets variables.
+The global `command` and `filters` attributes record the invocation and configured
+quality-filter rules when provided.
 """
 # Define the per-snapshot averaging-window bounds along the unlimited `time` dim.
 # `time` itself holds the snapshot reference (start of interval, or window center for a
@@ -197,7 +199,9 @@ function create_output_dataset(outfile::String, grid_spec::RectangularGridSpec,
                                n_times::Int, grid_vars::OrderedDict{String,String},
                                compute_std::Bool;
                                window_bounds::Bool=false,
-                               time_long_name::AbstractString="Time (UTC), start of interval")
+                               time_long_name::AbstractString="Time (UTC), start of interval",
+                               command::Union{Nothing,String}=nothing,
+                               filters::Vector{FilterRule}=FilterRule[])
     ds = Dataset(outfile, "c")
 
     defDim(ds, "lon", length(grid_spec.lon))
@@ -222,6 +226,7 @@ function create_output_dataset(outfile::String, grid_spec::RectangularGridSpec,
 
     ds.attrib["title"] = "Gridded satellite data"
     ds.attrib["created_with"] = "SatelliteGridding.jl"
+    _set_provenance_attributes!(ds, command, filters)
 
     # Define output data variables
     nc_vars = Dict{String,Any}()
@@ -255,7 +260,9 @@ function create_output_dataset(outfile::String, grid_spec::CubedSphereGridSpec,
                                n_times::Int, grid_vars::OrderedDict{String,String},
                                compute_std::Bool;
                                window_bounds::Bool=false,
-                               time_long_name::AbstractString="Time (UTC), start of interval")
+                               time_long_name::AbstractString="Time (UTC), start of interval",
+                               command::Union{Nothing,String}=nothing,
+                               filters::Vector{FilterRule}=FilterRule[])
     ds = Dataset(outfile, "c")
 
     write_coordinates!(ds, grid_spec)
@@ -270,6 +277,7 @@ function create_output_dataset(outfile::String, grid_spec::CubedSphereGridSpec,
 
     ds.attrib["title"] = "Gridded satellite data (cubed sphere)"
     ds.attrib["created_with"] = "SatelliteGridding.jl"
+    _set_provenance_attributes!(ds, command, filters)
 
     dims = (payload_dims(grid_spec)..., "time")
     # `coordinates`/`grid_mapping` make Panoply, xarray, and GCHP tooling plot the
@@ -291,6 +299,23 @@ function create_output_dataset(outfile::String, grid_spec::CubedSphereGridSpec,
                                   "coordinates" => "lons lats", "grid_mapping" => "cubed_sphere"])
 
     return ds, nc_vars
+end
+
+function _set_provenance_attributes!(ds, command::Union{Nothing,String},
+                                     filters::Vector{FilterRule})
+    command === nothing || (ds.attrib["command"] = command)
+    ds.attrib["filters"] = isempty(filters) ? "none" :
+        join((_format_filter_rule(rule) for rule in filters), "; ")
+    nothing
+end
+
+function _format_filter_rule(rule::FilterRule)
+    if rule.op === :between
+        "$(rule.variable): $(rule.lo) < x < $(rule.hi)"
+    else
+        operator = rule.op === :lt ? "<" : rule.op === :gt ? ">" : "=="
+        "$(rule.variable): x $operator $(rule.lo)"
+    end
 end
 
 """

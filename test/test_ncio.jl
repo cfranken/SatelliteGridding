@@ -88,7 +88,11 @@
                       dlat=5.0f0, dlon=5.0f0)
         grid_vars = OrderedDict("sif" => "SIF_757nm", "cloud" => "cloud_fraction")
 
-        ds, nc_vars = create_output_dataset(tmpfile, gs, 3, grid_vars, true)
+        filters = [FilterRule("qa_value", :gt, 0.5),
+                   FilterRule("methane", :between, 1600.0, 2200.0)]
+        ds, nc_vars = create_output_dataset(tmpfile, gs, 3, grid_vars, true;
+                                            command="julia bin/grid.jl l2 --config data.toml",
+                                            filters=filters)
 
         @test haskey(nc_vars, "sif")
         @test haskey(nc_vars, "sif_std")
@@ -98,6 +102,9 @@
         @test size(ds["lat"]) == (2,)
         @test size(ds["lon"]) == (4,)
         @test size(ds["time"]) == (3,)
+        @test ds.attrib["command"] == "julia bin/grid.jl l2 --config data.toml"
+        @test ds.attrib["filters"] ==
+              "qa_value: x > 0.5; methane: 1600.0 < x < 2200.0"
 
         close(ds)
         rm(tmpfile)
