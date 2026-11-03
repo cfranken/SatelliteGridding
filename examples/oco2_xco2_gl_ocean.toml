@@ -1,0 +1,15 @@
+# OCO-2 XCO2 — Glint over ocean (operation_mode==1, land_water_indicator==1).
+filePattern = "oco2_LtCO2_YYMMDD_*.nc4"
+folder = "/kiwi-data/Data/satellite/OCO2/L2_Lite_FP/11.3r/raw/YYYY/"
+[basic]
+lat = "latitude"
+lon = "longitude"
+lat_bnd = "vertex_latitude"
+lon_bnd = "vertex_longitude"
+[grid]
+xco2_gl_ocean = "xco2"
+xco2_unc_gl_ocean = "xco2_uncertainty"
+[filter]
+xco2_quality_flag = "== 0"
+"Sounding/operation_mode" = "== 1"
+"Sounding/land_water_indicator" = "== 1"

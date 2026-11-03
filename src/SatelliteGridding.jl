@@ -51,6 +51,7 @@ include("config.jl")
 include("filepatterns.jl")
 include("system_netcdf.jl")
 include("ncio.jl")
+include("zarrio.jl")
 include("geolocation.jl")
 include("filters.jl")
 include("oversampling.jl")
@@ -77,6 +78,8 @@ export load_config, find_files
 export read_nc_variable, read_nc_attribute, read_variable_from_file, read_array_from_file,
        read_arrays_from_file, create_output_dataset
 export read_system_netcdf_variable, read_system_netcdf_variables
+export init_zarr_store, write_zarr_day!, consolidate_zarr!, write_zarr_meta_json,
+       to_zarr_slice, zarr_time_index
 export AbstractCenterGeolocation, BasicVariableGeolocation,
        ModisMonolithicLUTGeolocation, ModisSinusoidalGeolocation,
        sort_files_for_provider, provider_tile_intersects_grid,

@@ -1,0 +1,24 @@
+filePattern = "MCD43A4.AYYYYDOY.*.hdf"
+folder = "/temp2/MCD43A4/YYYY/DOY/"
+
+[center]
+scale_factor = 0.0001
+fill_value = 32767
+valid_min = 0
+valid_max = 32766
+min_count = 5
+min_nir_reflectance = 0.03
+modis_pixels = 2400
+vegetation_red = "refl_band1"
+vegetation_nir = "refl_band2"
+vegetation_blue = "refl_band3"
+vegetation_swir = "refl_band5"
+
+[grid]
+refl_band1 = "Nadir_Reflectance_Band1"
+refl_band2 = "Nadir_Reflectance_Band2"
+refl_band3 = "Nadir_Reflectance_Band3"
+refl_band4 = "Nadir_Reflectance_Band4"
+refl_band5 = "Nadir_Reflectance_Band5"
+refl_band6 = "Nadir_Reflectance_Band6"
+refl_band7 = "Nadir_Reflectance_Band7"
