@@ -48,6 +48,8 @@ function grid_l2(config::DataSourceConfig, grid_spec::AbstractGridSpec{T}, time_
     if grid_spec isa CubedSphereGridSpec && footprint_method isa CircularFootprintGridding
         error("CircularFootprintGridding is not supported on a cubed-sphere grid yet; use SubpixelGridding (quad footprints).")
     end
+    metadata = InputMetadata(config)
+    output_options = _output_options(config.options)
     rolling = is_rolling(time_spec)
     if rolling && backend !== nothing && compute_std
         error("Rolling-mean standard deviation is not supported on the KA/GPU backend yet; use --backend sequential, or drop --compSTD for a mean-only KA rolling mean.")
@@ -86,7 +88,8 @@ function grid_l2(config::DataSourceConfig, grid_spec::AbstractGridSpec{T}, time_
                                "Time (UTC), start of interval"
     ds_out, nc_vars = write_nc ?
         create_output_dataset(outfile, grid_spec, n_times, config.grid_vars, compute_std;
-                              window_bounds=true, time_long_name=time_long_name, command=command, filters=config.filters) :
+                              window_bounds=true, time_long_name=time_long_name, command=command, filters=config.filters,
+                              output_options=output_options) :
         (nothing, nothing)
 
     # Optional additive Zarr v2 daily store (one chunk per variable per day).
@@ -108,7 +111,7 @@ function grid_l2(config::DataSourceConfig, grid_spec::AbstractGridSpec{T}, time_
                 ds_out, nc_vars, config, grid_spec, time_spec, snapshots,
                 acc1, acc2, n_vars, use_ka, backend, compute_std,
                 effective_n_oversample, footprint_method, keep_going;
-                zg=zg, zarr_epoch=zarr_epoch)
+                zg=zg, zarr_epoch=zarr_epoch, metadata=metadata)
         else
             # Allocate work arrays (on backend for GPU, regular Array for CPU)
             if use_ka
@@ -141,13 +144,13 @@ function grid_l2(config::DataSourceConfig, grid_spec::AbstractGridSpec{T}, time_
                                                  grid_sum, grid_weights,
                                                  effective_n_oversample,
                                                  footprint_method,
-                                                 nc_vars, fill_attrib, p_files)
+                                                 nc_vars, fill_attrib, p_files; metadata=metadata)
                         else
                             _process_l2_file!(filepath, config, grid_spec, grid_data, grid_std_arr,
                                               grid_weights, compute_std,
                                               effective_n_oversample,
                                               footprint_method,
-                                              nc_vars, fill_attrib, p_files)
+                                              nc_vars, fill_attrib, p_files; metadata=metadata)
                         end
                         successful_files += 1
                         if fill_attrib
@@ -197,10 +200,17 @@ function grid_l2(config::DataSourceConfig, grid_spec::AbstractGridSpec{T}, time_
         total_files > 0 || error("No input files matched pattern '$(config.file_pattern)' in folder '$(config.folder)'")
         successful_files > 0 || error("No input files were successfully processed; failed files: $failed_files")
     finally
-        ds_out === nothing || close(ds_out)
+        if ds_out !== nothing
+            try
+                _write_input_metadata!(ds_out, metadata)
+            finally
+                close(ds_out)
+            end
+        end
     end
 
     if zarr_out !== nothing
+        _write_zarr_provenance!(zarr_out, config, metadata, command)
         consolidate_zarr!(zarr_out)
         zarr_meta === nothing ||
             write_zarr_meta_json(zarr_meta, grid_spec, config.grid_vars; epoch=zarr_epoch)
@@ -227,7 +237,7 @@ function _grid_l2_rolling!(ds_out, nc_vars, config, grid_spec::AbstractGridSpec{
                            time_spec::TimeSpec, snapshots,
                            acc1, acc2, n_vars, use_ka, backend, compute_std,
                            effective_n_oversample, footprint_method, keep_going;
-                           zg=nothing, zarr_epoch::Date=ZARR_EPOCH) where {T}
+                           zg=nothing, zarr_epoch::Date=ZARR_EPOCH, metadata=nothing) where {T}
     N = Dates.Day(time_spec.window_halfwidth_days)
 
     # day (calendar Date) => (S0, S1, S2) raw moments, or `nothing` when the day had no
@@ -252,7 +262,7 @@ function _grid_l2_rolling!(ds_out, nc_vars, config, grid_spec::AbstractGridSpec{
                 g, tf, sf, ff = _grid_one_day(dd, config, grid_spec, acc1, acc2, n_vars,
                                               use_ka, backend, compute_std,
                                               effective_n_oversample, footprint_method,
-                                              nc_vars, fill_attrib, keep_going)
+                                              nc_vars, fill_attrib, keep_going; metadata=metadata)
                 total_files += tf
                 successful_files += sf
                 failed_files += ff
@@ -299,7 +309,7 @@ end
 """
     _grid_one_day(d, config, grid_spec, acc1, acc2, n_vars, use_ka, backend,
                   compute_std, effective_n_oversample, footprint_method,
-                  nc_vars, fill_attrib, keep_going)
+                  nc_vars, fill_attrib, keep_going; metadata=nothing)
         -> ((S0, S1, S2) | nothing, total_files, successful_files, failed_files)
 
 Grid all input files for the single calendar day `d` into additive raw moments. Returns
@@ -310,7 +320,7 @@ are already weighted sums (`S0 = Σw`, `S1 = Σw·x`).
 function _grid_one_day(d::DateTime, config, grid_spec::AbstractGridSpec{T},
                        acc1, acc2, n_vars, use_ka, backend, compute_std,
                        effective_n_oversample, footprint_method,
-                       nc_vars, fill_attrib::Ref{Bool}, keep_going) where {T}
+                       nc_vars, fill_attrib::Ref{Bool}, keep_going; metadata=nothing) where {T}
     files = find_files_range(config.file_pattern, config.folder, d, d)
     isempty(files) && return (nothing, 0, 0, 0)
 
@@ -333,11 +343,11 @@ function _grid_one_day(d::DateTime, config, grid_spec::AbstractGridSpec{T},
             if use_ka
                 _process_l2_file_ka!(filepath, config, grid_spec, backend,
                                      day_sum, day_w, effective_n_oversample,
-                                     footprint_method, nc_vars, fill_attrib[], p_files)
+                                     footprint_method, nc_vars, fill_attrib[], p_files; metadata=metadata)
             else
                 _process_l2_file!(filepath, config, grid_spec, day_mean, day_M2,
                                   day_w, compute_std, effective_n_oversample,
-                                  footprint_method, nc_vars, fill_attrib[], p_files)
+                                  footprint_method, nc_vars, fill_attrib[], p_files; metadata=metadata)
             end
             successful += 1
             fill_attrib[] = false
@@ -509,9 +519,15 @@ function _process_l2_file!(filepath::String, config::DataSourceConfig,
                            grid_spec::GridSpec{T}, grid_data, grid_std,
                            grid_weights, compute_std, n_oversample_override,
                            footprint_method::AbstractGriddingMethod,
-                           nc_vars, fill_attrib, progress) where {T}
+                           nc_vars, fill_attrib, progress; metadata=nothing) where {T}
     fin = Dataset(filepath)
     try
+        _capture_input_metadata!(metadata, fin)
+        if fill_attrib
+            nc_vars === nothing || copy_variable_attributes!(nc_vars, fin, config.grid_vars;
+                attributes=get(get(config.options, "metadata", Dict()),
+                               "variable_attributes", DEFAULT_VARIABLE_ATTRIBUTES))
+        end
         lat_center, lon_center, lat_bnd, lon_bnd =
             _read_l2_geometry(fin, config, footprint_method)
 
@@ -537,17 +553,12 @@ function _process_l2_file!(filepath::String, config::DataSourceConfig,
             return
         end
 
-        # Copy attributes from first file
-        if fill_attrib
-            nc_vars === nothing || copy_variable_attributes!(nc_vars, fin, config.grid_vars)
-        end
-
         # Read all grid variables
         n_soundings = size(lat_bnd, 1)
         mat_in = zeros(T, n_soundings, length(config.grid_vars))
         co = 1
         for (_, value) in config.grid_vars
-            mat_in[:, co] = read_nc_variable(fin, value)
+            mat_in[:, co] = _read_l2_values(fin, value, T)
             co += 1
         end
 
@@ -634,9 +645,15 @@ function _process_l2_file!(filepath::String, config::DataSourceConfig,
                            grid_spec::CubedSphereGridSpec{T}, grid_data, grid_std,
                            grid_weights, compute_std, n_oversample_override,
                            footprint_method::AbstractGriddingMethod,
-                           nc_vars, fill_attrib, progress) where {T}
+                           nc_vars, fill_attrib, progress; metadata=nothing) where {T}
     fin = Dataset(filepath)
     try
+        _capture_input_metadata!(metadata, fin)
+        if fill_attrib
+            nc_vars === nothing || copy_variable_attributes!(nc_vars, fin, config.grid_vars;
+                attributes=get(get(config.options, "metadata", Dict()),
+                               "variable_attributes", DEFAULT_VARIABLE_ATTRIBUTES))
+        end
         lat_center, lon_center, lat_bnd, lon_bnd =
             _read_l2_geometry(fin, config, footprint_method)
 
@@ -645,15 +662,11 @@ function _process_l2_file!(filepath::String, config::DataSourceConfig,
         ProgressMeter.next!(progress; showvalues=[(:File, filepath), (:N_pixels, length(idx))])
         isempty(idx) && return
 
-        if fill_attrib
-            nc_vars === nothing || copy_variable_attributes!(nc_vars, fin, config.grid_vars)
-        end
-
         n_soundings = size(lat_bnd, 1)
         mat_in = zeros(T, n_soundings, length(config.grid_vars))
         co = 1
         for (_, value) in config.grid_vars
-            mat_in[:, co] = read_nc_variable(fin, value)
+            mat_in[:, co] = _read_l2_values(fin, value, T)
             co += 1
         end
 
@@ -703,9 +716,15 @@ function _process_l2_file_ka!(filepath::String, config::DataSourceConfig,
                                grid_sum, grid_weights,
                                n_oversample_override,
                                footprint_method::AbstractGriddingMethod,
-                               nc_vars, fill_attrib, progress) where {T}
+                               nc_vars, fill_attrib, progress; metadata=nothing) where {T}
     fin = Dataset(filepath)
     try
+        _capture_input_metadata!(metadata, fin)
+        if fill_attrib
+            nc_vars === nothing || copy_variable_attributes!(nc_vars, fin, config.grid_vars;
+                attributes=get(get(config.options, "metadata", Dict()),
+                               "variable_attributes", DEFAULT_VARIABLE_ATTRIBUTES))
+        end
         lat_center, lon_center, lat_bnd, lon_bnd =
             _read_l2_geometry(fin, config, footprint_method)
 
@@ -731,16 +750,12 @@ function _process_l2_file_ka!(filepath::String, config::DataSourceConfig,
             return
         end
 
-        if fill_attrib
-            nc_vars === nothing || copy_variable_attributes!(nc_vars, fin, config.grid_vars)
-        end
-
         # Read all grid variables
         n_soundings = size(lat_bnd, 1)
         mat_in = zeros(T, n_soundings, length(config.grid_vars))
         co = 1
         for (_, value) in config.grid_vars
-            mat_in[:, co] = read_nc_variable(fin, value)
+            mat_in[:, co] = _read_l2_values(fin, value, T)
             co += 1
         end
 
@@ -817,13 +832,13 @@ function _write_time_slice!(ds_out, nc_vars, config, ::RectangularGridSpec,
         co = 1
         for (key, _) in config.grid_vars
             da = round.(grid_data[:, :, co], sigdigits=8)
-            da[grid_weights .< 1e-10] .= -999.0f0
-            da[.!isfinite.(da)] .= -999.0f0
+            da[grid_weights .< 1e-10] .= _output_fill(nc_vars[key])
+            da[.!isfinite.(da)] .= _output_fill(nc_vars[key])
             nc_vars[key][:, :, ct] = da
             if compute_std
                 da_std = round.(grid_std[:, :, co], sigdigits=6)
-                da_std[grid_weights .< 1e-10] .= -999.0f0
-                da_std[.!isfinite.(da_std)] .= -999.0f0
+                da_std[grid_weights .< 1e-10] .= _output_fill(nc_vars[key * "_std"])
+                da_std[.!isfinite.(da_std)] .= _output_fill(nc_vars[key * "_std"])
                 nc_vars[key * "_std"][:, :, ct] = da_std
             end
             co += 1
@@ -855,13 +870,13 @@ function _write_time_slice!(ds_out, nc_vars, config, spec::CubedSphereGridSpec,
         co = 1
         for (key, _) in config.grid_vars
             da = round.(grid_data[:, :, co], sigdigits=8)
-            da[w_mask] .= -999.0f0
-            da[.!isfinite.(da)] .= -999.0f0
+            da[w_mask] .= _output_fill(nc_vars[key])
+            da[.!isfinite.(da)] .= _output_fill(nc_vars[key])
             nc_vars[key][:, :, :, ct] = unfold(da)
             if compute_std
                 da_std = round.(grid_std[:, :, co], sigdigits=6)
-                da_std[w_mask] .= -999.0f0
-                da_std[.!isfinite.(da_std)] .= -999.0f0
+                da_std[w_mask] .= _output_fill(nc_vars[key * "_std"])
+                da_std[.!isfinite.(da_std)] .= _output_fill(nc_vars[key * "_std"])
                 nc_vars[key * "_std"][:, :, :, ct] = unfold(da_std)
             end
             co += 1
@@ -896,6 +911,8 @@ function grid_center(config::DataSourceConfig, grid_spec::GridSpec{T}, time_spec
                      keep_going::Bool=false,
                      command::Union{Nothing,String}=nothing) where {T}
 
+    output_options = _output_options(config.options)
+    metadata = InputMetadata(config)
     dates = collect(time_spec.start_date:time_spec.time_step:time_spec.stop_date)
     n_times = length(dates)
     n_lon = length(grid_spec.lon)
@@ -914,18 +931,19 @@ function grid_center(config::DataSourceConfig, grid_spec::GridSpec{T}, time_spec
     ds_out, nc_vars = create_output_dataset(outfile, grid_spec, n_times,
                                             config.grid_vars, compute_std;
                                             command=command,
-                                            filters=config.filters)
+                                            filters=config.filters,
+                                            output_options=output_options)
 
     # Add vegetation index variables if requested
     if veg_indices
-        nc_vars["EVI"] = defVar(ds_out, "EVI", Float32, ("lon", "lat", "time"),
-                                deflatelevel=4, fillvalue=-999.0f0)
-        nc_vars["NDVI"] = defVar(ds_out, "NDVI", Float32, ("lon", "lat", "time"),
-                                 deflatelevel=4, fillvalue=-999.0f0)
-        nc_vars["NIRv"] = defVar(ds_out, "NIRv", Float32, ("lon", "lat", "time"),
-                                 deflatelevel=4, fillvalue=-999.0f0)
-        nc_vars["NDWI"] = defVar(ds_out, "NDWI", Float32, ("lon", "lat", "time"),
-                                 deflatelevel=4, fillvalue=-999.0f0)
+        nc_vars["EVI"] = defVar(ds_out, "EVI", Float32, ("lon", "lat", "time");
+                                _storage_kwargs(output_options, grid_spec)...)
+        nc_vars["NDVI"] = defVar(ds_out, "NDVI", Float32, ("lon", "lat", "time");
+                                 _storage_kwargs(output_options, grid_spec)...)
+        nc_vars["NIRv"] = defVar(ds_out, "NIRv", Float32, ("lon", "lat", "time");
+                                 _storage_kwargs(output_options, grid_spec)...)
+        nc_vars["NDWI"] = defVar(ds_out, "NDWI", Float32, ("lon", "lat", "time");
+                                 _storage_kwargs(output_options, grid_spec)...)
     end
 
     grid_data = zeros(T, n_lon, n_lat, n_total)
@@ -939,6 +957,7 @@ function grid_center(config::DataSourceConfig, grid_spec::GridSpec{T}, time_spec
     total_files = 0
     successful_files = 0
     failed_files = 0
+    copy_attributes = true
 
     try
         open_geolocation!(provider)
@@ -1010,6 +1029,16 @@ function grid_center(config::DataSourceConfig, grid_spec::GridSpec{T}, time_spec
                         accumulate_center!(grid_data, grid_weights, lat_idx, lon_idx,
                                            values, valid, length(lat_idx), n_total)
                     end
+                    if !_looks_like_hdf4(filepath)
+                        Dataset(filepath) do fin
+                            _capture_input_metadata!(metadata, fin)
+                            if copy_attributes
+                                copy_variable_attributes!(nc_vars, fin, config.grid_vars;
+                                    attributes=get(metadata.settings, "variable_attributes", DEFAULT_VARIABLE_ATTRIBUTES))
+                                copy_attributes = false
+                            end
+                        end
+                    end
                     successful_files += 1
                     ProgressMeter.next!(p_files; showvalues=[(:File, filepath),
                                                               (:N_pixels, length(idx)),
@@ -1036,8 +1065,12 @@ function grid_center(config::DataSourceConfig, grid_spec::GridSpec{T}, time_spec
         total_files > 0 || error("No input files matched pattern '$(config.file_pattern)' in folder '$(config.folder)'")
         successful_files > 0 || error("No input files were successfully processed; failed files: $failed_files")
     finally
-        close_geolocation!(provider)
-        close(ds_out)
+        try
+            _write_input_metadata!(ds_out, metadata)
+        finally
+            close_geolocation!(provider)
+            close(ds_out)
+        end
     end
 
     println("Output written to: $outfile")
@@ -1074,13 +1107,21 @@ function _center_values(filepath::String, config::DataSourceConfig,
     transpose_data::Bool = Bool(get(config.options, "transpose_data", false))
 
     varpaths = [varpath for (_, varpath) in config.grid_vars]
-    arrays = read_arrays_from_file(filepath, varpaths)
+    arrays = read_arrays_from_file(filepath, vcat(varpaths, [r.variable for r in config.filters]))
     for co in 1:n_vars
         # Function-barrier on `data` so the per-pixel inner loop specializes on
         # the array element type instead of dispatching dynamically per call.
         _fill_center_column!(values, valid, idx, arrays[co], co,
                              scale, offset, fill_value, valid_min, valid_max,
                              transpose_data)
+    end
+
+    for (j, rule) in enumerate(config.filters)
+        data = arrays[n_vars + j]
+        for (i, ci) in enumerate(idx)
+            raw = _center_data_value(data, ci, transpose_data)
+            valid[i] &= _passes_quality_filter(raw, rule)
+        end
     end
 
     nir_index = _center_var_position(config, "vegetation_nir", 2;
@@ -1223,8 +1264,8 @@ end
 
 function _write_center_var!(nc_var, data, weights, ct::Int, min_count)
     da = round.(data ./ max.(weights, eps(eltype(data))), sigdigits=5)
-    da[weights .< min_count] .= eltype(data)(-999)
-    da[.!isfinite.(da)] .= eltype(data)(-999)
+    da[weights .< min_count] .= _output_fill(nc_var)
+    da[.!isfinite.(da)] .= _output_fill(nc_var)
     nc_var[:, :, ct] = da
     nothing
 end

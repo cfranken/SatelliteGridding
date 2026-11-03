@@ -8,7 +8,7 @@ Satellite instruments observe through irregularly shaped footprints that can ove
 
 ## Prerequisites
 
-**Julia ≥ 1.9** is required.
+**Julia ≥ 1.10** is required.
 
 If you don't have Julia installed:
 
@@ -231,8 +231,114 @@ sif_735 = "PRODUCT/SIF_735"
 | `[filter]` | no | Quality filters using string expressions (see below) |
 | `[center]` | no | Scale/fill options, MODIS pixel count, and explicit vegetation-index band roles for center gridding |
 | `[circle]` | no | Circular-footprint options: scalar `radius` and `radius_unit` (`degrees`, `km`, or `m`) |
+| `[output]` | no | NetCDF compression, chunking, checksum, and output missing value |
+| `[metadata]` | no | Source version selectors and input metadata to retain |
 | `filePattern` | yes | Glob pattern with `YYYY`/`MM`/`DD`/`DOY`/`YYMMDD` placeholders |
 | `folder` | yes | Root directory for input files (also supports date placeholders) |
+
+### Output size and missing values
+
+NetCDF science variables, standard deviations, counts, and vegetation indices use
+Float32 with **lossless DEFLATE level 4** by default. Spatial
+chunks are at most 1024 × 1024 cells, with one time slice per chunk (and one face
+for cubed-sphere output). This keeps slice writes local and avoids rewriting
+chunks that span multiple times. All these settings can be changed:
+
+```toml
+[output]
+compression = "deflate"    # "deflate" or "none"
+deflate_level = 4           # 0–9; 0 disables compression
+shuffle = false            # optional byte shuffling; compare on your data
+fill_value = -999.0         # default; use nan for a NaN sentinel
+checksum = "none"          # or "fletcher32"
+# chunksizes = [256, 256, 1]  # optional: lon, lat, time in Julia order
+# Cubed sphere: [Xdim, Ydim, nf, time], e.g. [48, 48, 1, 1]
+```
+
+Explicit spatial chunk lengths must fit the grid. `n` remains floating point
+because footprint weights can be fractional; zero means no observations.
+Science cells without observations use `_FillValue`, including entirely empty
+time slices. NCDatasets and CF-aware readers decode that sentinel as missing.
+`[center] fill_value` still describes **input** values; `[output] fill_value`
+controls the gridded file. Input netCDF packing and missing-value attributes are
+decoded before L2 science values and quality filters are used.
+
+Start with level 4, then compare level 1 for write speed and level 9 for smallest
+lossless files on representative data. Byte shuffling is optional: it can help
+dense fields but made a sparse OCO SIF sample larger, so it is off by default.
+Repeated NaNs and numeric sentinels both compress well; changing the sentinel alone does not guarantee a
+smaller file. Integer packing or quantization could reduce size further, but
+needs a variable-specific accuracy budget and is not enabled here. The
+[NCDatasets storage documentation](https://juliageo.org/NCDatasets.jl/stable/variables/)
+describes the lossless filters. These storage options apply to NetCDF; Zarr
+retains its existing Zstd compression and NaN fill.
+
+For a local comparison on a gridded Float32 variable, run:
+
+```bash
+julia --project=. bench/netcdf_storage.jl output.nc sif757 121 20
+```
+
+This compares filters on 20 slices starting at time index 121, verifies exact
+round trips, and reports file size and write time. It leaves the source untouched.
+
+Library callers can pass `output_options=NetCDFOptions(...)` to
+`create_output_dataset`. `grid_l2` and `grid_center` read `[output]` from their
+`DataSourceConfig` automatically.
+
+### Software and satellite provenance
+
+Every NetCDF output records `software_version`, `git_tag` (nearest reachable tag),
+`git_commit`, `git_dirty` (tracked changes), and `julia_version`, together with the
+command and quality filters. A checkout without tags records `git_tag="unknown"`;
+a source archive without Git records unknown Git fields and retains the package
+version. Fetch tags when cloning for production (CI uses full history).
+
+Satellite versions are read from the inputs automatically, including OCO SIF's
+`product_version` and `Metadata/BuildId`, and OCO XCO₂'s root `BuildId`.
+`satellite_product_version` lists distinct versions, choosing the first available
+version selector for each input file. `source_versions` retains **all** discovered
+version fields as a JSON mapping from selector to distinct values, including
+collection labels. Runs spanning multiple releases retain all encountered values.
+These fields describe opened input files, including files rejected by quality
+filters. Missing optional metadata is skipped; absent versions are `"unknown"`.
+
+Select additional metadata without copying source processing history, spatial
+coverage, or storage attributes into places where they would describe the
+gridded product incorrectly:
+
+```toml
+[metadata]
+# Optional override of automatic version detection; order sets precedence.
+# version_sources = ["@product_version", "@BuildId", "Metadata/BuildId"]
+attributes = ["@institution", "@identifier_product_doi", "Metadata/CollectionLabel"]
+variable_attributes = ["units", "long_name", "description"]
+```
+
+Selectors use `@name` for global attributes, `Group/@name` for group attributes,
+and `Group/name` for small metadata variables (at most 1024 elements). Additional
+metadata is stored in the NetCDF global `source_metadata` JSON mapping; distinct
+values are retained across inputs. `variable_attributes` selects attributes
+copied to gridded science variables from the first input; its default is
+`units`, `long_name`, `valid_range`, `description`, `unit`, and `longname`.
+Copying packing or missing-value attributes is rejected because output storage
+is configured separately. Metadata extraction currently uses netCDF inputs;
+center-mode HDF4 inputs retain software provenance but skip source metadata.
+
+Additive Zarr stores retain cumulative source versions and software provenance
+in each science array's `processing_provenance` attribute, preserving independent
+SIF and XCO₂ provenance when the same store receives both products.
+
+### Accuracy tests
+
+Run `julia --project=. -e 'using Pkg; Pkg.test()'`. CI tests Julia 1.10 and the
+latest stable Julia. Synthetic NetCDF fixtures check analytically known overlap
+fractions, weight conservation, multi-variable weighted means, population
+standard deviations, packed inputs, missing data, quality rejection, center
+binning, and rolling-window reuse. Expected values are derived independently
+from rectangle areas and elementary statistics; both sequential and KA CPU
+paths are checked. Storage and provenance tests reopen the files to verify the
+on-disk results.
 
 ### Filter expressions
 

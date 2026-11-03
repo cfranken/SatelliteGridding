@@ -137,6 +137,40 @@ function consolidate_zarr!(path::AbstractString)
     return path
 end
 
+# Zarr output is additive and may combine independent SIF / XCO2 runs. Keep
+# provenance per output variable so one product cannot overwrite another's.
+# Like consolidate_zarr!, this helper needs no Zarr package dependency.
+function _write_zarr_provenance!(path, config::DataSourceConfig, metadata::InputMetadata, command)
+    software = _software_provenance()
+    for name in keys(config.grid_vars)
+        file = joinpath(path, name, ".zattrs")
+        attrs = JSON.parsefile(file)
+        provenance = get!(attrs, "processing_provenance", Dict{String,Any}())
+        history = get!(provenance, "software", Any[])
+        software in history || push!(history, software)
+        for (key, current) in (("source_versions", metadata.versions),
+                               ("source_metadata", metadata.attributes))
+            saved = get!(provenance, key, Dict{String,Any}())
+            for (selector, entries) in current
+                existing = get!(saved, selector, Any[])
+                for value in entries
+                    any(x -> isequal(x, value), existing) || push!(existing, value)
+                end
+            end
+        end
+        versions = get!(provenance, "satellite_product_versions", Any[])
+        for version in sort!(collect(metadata.product_versions))
+            version in versions || push!(versions, version)
+        end
+        command === nothing || (provenance["last_command"] = command)
+        provenance["filters"] = [_format_filter_rule(r) for r in config.filters]
+        open(file, "w") do io
+            JSON.print(io, attrs)
+        end
+    end
+    nothing
+end
+
 """
     write_zarr_meta_json(webdir, grid_spec, grid_vars; epoch, registry)
 

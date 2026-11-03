@@ -19,6 +19,7 @@ using Zarr   # loads the SatelliteGriddingZarrExt extension for the Zarr daily-e
     include("test_synthetic_geometry.jl")
     include("test_cubed_sphere.jl")
     include("test_integration.jl")
+    include("test_accuracy.jl")
     include("test_rolling.jl")
     include("test_zarr_ordering.jl")
 end

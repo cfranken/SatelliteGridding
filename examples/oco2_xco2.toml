@@ -16,3 +16,12 @@ albedo_3 = "Retrieval/albedo_sco2"
 
 [filter]
 xco2_quality_flag = "== 0"
+
+[output]
+compression = "deflate"
+deflate_level = 4
+shuffle = false
+fill_value = -999.0
+
+[metadata]
+attributes = ["@identifier_product_doi", "@gesdisc_collection", "@CollectionLabel"]

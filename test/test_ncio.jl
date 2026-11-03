@@ -103,10 +103,117 @@
         @test size(ds["lon"]) == (4,)
         @test size(ds["time"]) == (3,)
         @test ds.attrib["command"] == "julia bin/grid.jl l2 --config data.toml"
+        @test ds.attrib["software_version"] == "0.1.0"
+        @test ds.attrib["julia_version"] == string(VERSION)
+        @test haskey(ds.attrib, "git_tag")
+        @test haskey(ds.attrib, "git_commit")
+        @test haskey(ds.attrib, "git_dirty")
         @test ds.attrib["filters"] ==
               "qa_value: x > 0.5; methane: 1600.0 < x < 2200.0"
 
         close(ds)
         rm(tmpfile)
+    end
+
+    @testset "NetCDF storage settings survive reopening" begin
+        mktempdir() do dir
+            gs = GridSpec(lat_min=0f0, lat_max=2f0, lon_min=0f0, lon_max=3f0, dlat=1f0, dlon=1f0)
+            gv = OrderedDict("value" => "value")
+            for (name, options, level, shuffled) in (
+                ("default", NetCDFOptions(), 4, false),
+                ("off", NetCDFOptions(compression="none"), 0, false),
+                ("fast", NetCDFOptions(deflate_level=1, shuffle=false, fill_value=-1234), 1, false),
+                ("small", NetCDFOptions(deflate_level=9, shuffle=true, fill_value=NaN, chunksizes=[2, 2, 1],
+                                         checksum="fletcher32"), 9, true),
+            )
+                file = joinpath(dir, name * ".nc")
+                ds, vars = create_output_dataset(file, gs, 2, gv, true; output_options=options)
+                # Include populated, missing, and entirely unwritten time slices.
+                vars["value"][:, :, 1] = Float32[1 2; options.fill_value 4; 5 6]
+                close(ds)
+                Dataset(file) do reopened
+                    for key in ("value", "value_std", "n")
+                        v = reopened[key]
+                        shuf, deflated, lev = NCDatasets.deflate(v.var)
+                        @test lev == level
+                        @test shuf == shuffled
+                        @test deflated == (level > 0)
+                        @test isequal(v.attrib["_FillValue"], options.fill_value)
+                        expected_chunks = options.chunksizes === nothing ? (3, 2, 1) : options.chunksizes
+                        @test NCDatasets.chunking(v.var)[2] == expected_chunks
+                        @test NCDatasets.checksum(v.var) == options.checksum
+                    end
+                    @test reopened["value"][1, 1, 1] == 1
+                    @test ismissing(reopened["value"][2, 1, 1])
+                    @test all(ismissing, reopened["value"][:, :, 2])
+                end
+            end
+
+            cube = CubedSphereGridSpec(Nc=4)
+            file = joinpath(dir, "cube.nc")
+            ds, vars = create_output_dataset(file, cube, 1, gv, true;
+                output_options=NetCDFOptions(fill_value=NaN, chunksizes=[2, 2, 1, 1]))
+            @test NCDatasets.chunking(vars["value"].var)[2] == (2, 2, 1, 1)
+            @test isnan(vars["value_std"].attrib["_FillValue"])
+            close(ds)
+            @test_throws ArgumentError create_output_dataset(joinpath(dir, "invalid.nc"), gs, 1, gv, false;
+                output_options=NetCDFOptions(chunksizes=[3, 2]))
+            @test !isfile(joinpath(dir, "invalid.nc"))
+        end
+    end
+
+    @testset "Git provenance, including source archives" begin
+        mktempdir() do dir
+            run(pipeline(`git -C $dir init`; stdout=devnull, stderr=devnull))
+            write(joinpath(dir, "code.txt"), "original\n")
+            run(`git -C $dir add code.txt`)
+            run(pipeline(`git -C $dir -c user.name=Test -c user.email=test@example.invalid commit -m initial`;
+                         stdout=devnull, stderr=devnull))
+            run(`git -C $dir tag v1.2.3`)
+            provenance = SatelliteGridding._software_provenance(; root=dir)
+            @test provenance["git_tag"] == "v1.2.3"
+            @test length(provenance["git_commit"]) == 40
+            @test provenance["git_dirty"] == "false"
+            write(joinpath(dir, "code.txt"), "changed\n")
+            @test SatelliteGridding._software_provenance(; root=dir)["git_dirty"] == "true"
+        end
+        mktempdir() do dir
+            provenance = SatelliteGridding._software_provenance(; root=dir)
+            @test provenance["git_tag"] == "unknown"
+            @test provenance["git_commit"] == "unknown"
+            @test provenance["git_dirty"] == "unknown"
+        end
+    end
+
+    @testset "OCO version layouts and metadata selection" begin
+        mktempdir() do dir
+            file = joinpath(dir, "metadata.nc")
+            Dataset(file, "c") do ds
+                ds.attrib["BuildId"] = "B11.3.00"
+                ds.attrib["institution"] = "JPL"
+                group = defGroup(ds, "Metadata")
+                group.attrib["version"] = "group-version"
+                defVar(group, "BuildId", String, ())[] = "B11.2.17"
+            end
+            cfg = DataSourceConfig(Dict{String,String}(), OrderedDict("a" => "a"),
+                                    FilterRule[], "*.nc", dir)
+            metadata = SatelliteGridding.InputMetadata(cfg)
+            Dataset(file) do ds
+                SatelliteGridding._capture_input_metadata!(metadata, ds)
+            end
+            @test metadata.product_versions == Set(["B11.3.00"])
+            @test metadata.versions["Metadata/BuildId"] == ["B11.2.17"]
+            cfg.options["metadata"] = Dict("version_sources" => ["Metadata/@version"],
+                "attributes" => ["@institution", "Metadata/BuildId", "@missing"])
+            selected = SatelliteGridding.InputMetadata(cfg)
+            Dataset(file) do ds
+                SatelliteGridding._capture_input_metadata!(selected, ds)
+                SatelliteGridding._capture_input_metadata!(selected, ds)
+            end
+            @test selected.product_versions == Set(["group-version"])
+            @test selected.attributes["@institution"] == ["JPL"]
+            @test selected.attributes["Metadata/BuildId"] == ["B11.2.17"]
+            @test !haskey(selected.attributes, "@missing")
+        end
     end
 end

@@ -412,5 +412,19 @@
 
         @test SatelliteGridding._resolve_date_placeholders(
             "YYYY/DOY/file.nc", DateTime("2020-02-01")) == "2020/032/file.nc"
+
+        mktempdir() do dir
+            literal = joinpath(dir, "literal_DD_MM_YY_DOY")
+            mkpath(literal)
+            file = joinpath(literal, "input_2020-02-01.nc")
+            write(file, "synthetic input")
+            @test find_files("input_YYYY-MM-DD.nc", literal, DateTime(2020, 2, 1)) == [file]
+
+            dated = joinpath(literal, "2020", "032")
+            mkpath(dated)
+            dated_file = joinpath(dated, "input.nc")
+            write(dated_file, "synthetic input")
+            @test find_files("input.nc", joinpath(literal, "YYYY", "DOY"), DateTime(2020, 2, 1)) == [dated_file]
+        end
     end
 end

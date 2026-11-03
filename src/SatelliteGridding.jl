@@ -50,6 +50,8 @@ include("backends.jl")
 include("config.jl")
 include("filepatterns.jl")
 include("system_netcdf.jl")
+include("output_options.jl")
+include("provenance.jl")
 include("ncio.jl")
 include("zarrio.jl")
 include("geolocation.jl")
@@ -74,7 +76,7 @@ export AbstractGriddingMethod, SubpixelGridding, CircularFootprintGridding,
        CenterPointGridding, ExactIntersectionGridding
 export supported_backend_names, backend_help_lines, resolve_backend,
        cuda_backend, metal_backend
-export load_config, find_files
+export load_config, find_files, NetCDFOptions
 export read_nc_variable, read_nc_attribute, read_variable_from_file, read_array_from_file,
        read_arrays_from_file, create_output_dataset
 export read_system_netcdf_variable, read_system_netcdf_variables

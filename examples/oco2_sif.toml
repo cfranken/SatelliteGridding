@@ -17,3 +17,12 @@ sif_unadj_771 = "Science/SIF_Unadjusted_771nm"
 
 [filter]
 Quality_Flag = "== 0"
+
+[output]
+compression = "deflate"
+deflate_level = 4
+shuffle = false
+fill_value = -999.0
+
+[metadata]
+attributes = ["@identifier_product_doi", "@gesdisc_collection", "Metadata/CollectionLabel"]

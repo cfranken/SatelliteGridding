@@ -39,7 +39,7 @@ Configuration loaded from a TOML/JSON file that defines a satellite data source.
 - `filters`: Quality filter rules parsed from `[filter]` section
 - `file_pattern`: Glob pattern with YYYY/MM/DD/DOY placeholders for finding input files
 - `folder`: Root folder for input data (may also contain YYYY/MM/DD placeholders)
-- `options`: Optional processing settings from `[options]`, `[center]`, or `[modis]`
+- `options`: Processing settings plus nested `[output]` storage and `[metadata]` selection tables
 """
 struct DataSourceConfig
     basic::Dict{String,String}

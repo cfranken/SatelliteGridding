@@ -1,3 +1,11 @@
+@inline function _passes_quality_filter(value, rule::FilterRule)
+    (ismissing(value) || !isfinite(value)) && return false
+    rule.op === :lt && return value < rule.lo
+    rule.op === :gt && return value > rule.lo
+    rule.op === :eq && return value == rule.lo
+    rule.lo < value < rule.hi
+end
+
 """
     apply_filters(dataset, config::DataSourceConfig, lat_bounds, lon_bounds,
                   grid_spec::GridSpec) -> Vector{Int}
@@ -26,16 +34,8 @@ function apply_filters(dataset, config::DataSourceConfig,
     n_criteria = 5
 
     for rule in config.filters
-        data = read_nc_variable(dataset, rule.variable)
-        if rule.op === :lt
-            bool_add .+= (data .< rule.lo)
-        elseif rule.op === :gt
-            bool_add .+= (data .> rule.lo)
-        elseif rule.op === :eq
-            bool_add .+= (data .== rule.lo)
-        elseif rule.op === :between
-            bool_add .+= ((data .> rule.lo) .& (data .< rule.hi))
-        end
+        data = _read_l2_values(dataset, rule.variable, Float64)
+        bool_add .+= _passes_quality_filter.(data, Ref(rule))
         n_criteria += 1
     end
 
@@ -59,16 +59,8 @@ function apply_filters(dataset, config::DataSourceConfig,
     n_criteria = 0
 
     for rule in config.filters
-        data = read_nc_variable(dataset, rule.variable)
-        if rule.op === :lt
-            bool_add .+= (data .< rule.lo)
-        elseif rule.op === :gt
-            bool_add .+= (data .> rule.lo)
-        elseif rule.op === :eq
-            bool_add .+= (data .== rule.lo)
-        elseif rule.op === :between
-            bool_add .+= ((data .> rule.lo) .& (data .< rule.hi))
-        end
+        data = _read_l2_values(dataset, rule.variable, Float64)
+        bool_add .+= _passes_quality_filter.(data, Ref(rule))
         n_criteria += 1
     end
 

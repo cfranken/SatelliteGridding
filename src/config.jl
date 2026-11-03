@@ -93,6 +93,11 @@ function load_config(config_path::String)::DataSourceConfig
         end
     end
     _warn_unknown_options(options)
+    for section in ("output", "metadata")
+        haskey(d, section) && (options[section] = d[section])
+    end
+    _output_options(options) # Validate before creating an output file.
+    _validate_metadata_options(get(options, "metadata", Dict()))
 
     DataSourceConfig(basic, grid_vars, filters, file_pattern, folder, options)
 end

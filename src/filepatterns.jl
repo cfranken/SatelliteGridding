@@ -8,9 +8,24 @@ then globs for matching files. Returns only non-empty files.
 """
 function find_files(pattern::String, folder::String, date::DateTime)::Vector{String}
     file_pattern = _resolve_date_placeholders(pattern, date)
-    folder_resolved = _resolve_date_placeholders(folder, date)
+    # An existing directory is a literal path. In particular, random temporary
+    # directory names can contain DD / MM / YY by coincidence.
+    folder_resolved = _resolve_date_folder(folder, date)
     files = glob(file_pattern, folder_resolved)
     filter(f -> stat(f).size > 0, files)
+end
+
+function _resolve_date_folder(folder::String, date::DateTime)::String
+    isdir(folder) && return folder
+    # Only expand the part below the deepest existing directory. A literal
+    # parent may itself contain DD, even when its child is a YYYY/DOY template.
+    parent = dirname(folder)
+    suffix = basename(folder)
+    while !isdir(parent) && dirname(parent) != parent
+        suffix = joinpath(basename(parent), suffix)
+        parent = dirname(parent)
+    end
+    normpath(joinpath(parent, _resolve_date_placeholders(suffix, date)))
 end
 
 """

@@ -152,6 +152,13 @@ function _read_full_array(var)
     var[selectors...]
 end
 
+# Science inputs must honor CF packing and missing-value attributes. The public
+# read_nc_variable helper retains its raw-read semantics for existing callers.
+function _read_l2_values(dataset, path::String, ::Type{T}) where {T}
+    data = _read_nc_array(dataset, path)
+    map(x -> ismissing(x) ? T(NaN) : T(x), vec(data))
+end
+
 """
     read_nc_attribute(dataset, path::String, attr::String)
 
@@ -201,7 +208,9 @@ function create_output_dataset(outfile::String, grid_spec::RectangularGridSpec,
                                window_bounds::Bool=false,
                                time_long_name::AbstractString="Time (UTC), start of interval",
                                command::Union{Nothing,String}=nothing,
-                               filters::Vector{FilterRule}=FilterRule[])
+                               filters::Vector{FilterRule}=FilterRule[],
+                               output_options::NetCDFOptions=NetCDFOptions())
+    storage = _storage_kwargs(output_options, grid_spec)
     ds = Dataset(outfile, "c")
 
     defDim(ds, "lon", length(grid_spec.lon))
@@ -231,17 +240,17 @@ function create_output_dataset(outfile::String, grid_spec::RectangularGridSpec,
     # Define output data variables
     nc_vars = Dict{String,Any}()
     for (key, _) in grid_vars
-        nc_vars[key] = defVar(ds, key, Float32, ("lon", "lat", "time"),
-                              deflatelevel=4, fillvalue=-999.0f0)
+        nc_vars[key] = defVar(ds, key, Float32, ("lon", "lat", "time");
+                              storage...)
         if compute_std
             key_std = key * "_std"
-            nc_vars[key_std] = defVar(ds, key_std, Float32, ("lon", "lat", "time"),
-                                      deflatelevel=4, fillvalue=-999.0f0)
+            nc_vars[key_std] = defVar(ds, key_std, Float32, ("lon", "lat", "time");
+                                      storage...)
         end
     end
 
-    nc_vars["n"] = defVar(ds, "n", Float32, ("lon", "lat", "time"),
-                          deflatelevel=4, fillvalue=-999.0f0,
+    nc_vars["n"] = defVar(ds, "n", Float32, ("lon", "lat", "time");
+                          storage...,
                           attrib=["units" => "", "long_name" => "Number of pixels in average"])
 
     return ds, nc_vars
@@ -262,7 +271,9 @@ function create_output_dataset(outfile::String, grid_spec::CubedSphereGridSpec,
                                window_bounds::Bool=false,
                                time_long_name::AbstractString="Time (UTC), start of interval",
                                command::Union{Nothing,String}=nothing,
-                               filters::Vector{FilterRule}=FilterRule[])
+                               filters::Vector{FilterRule}=FilterRule[],
+                               output_options::NetCDFOptions=NetCDFOptions())
+    storage = _storage_kwargs(output_options, grid_spec)
     ds = Dataset(outfile, "c")
 
     write_coordinates!(ds, grid_spec)
@@ -285,16 +296,16 @@ function create_output_dataset(outfile::String, grid_spec::CubedSphereGridSpec,
     cs_attrib = ["coordinates" => "lons lats", "grid_mapping" => "cubed_sphere"]
     nc_vars = Dict{String,Any}()
     for (key, _) in grid_vars
-        nc_vars[key] = defVar(ds, key, Float32, dims, deflatelevel=4, fillvalue=-999.0f0,
+        nc_vars[key] = defVar(ds, key, Float32, dims; storage...,
                               attrib=cs_attrib)
         if compute_std
             key_std = key * "_std"
-            nc_vars[key_std] = defVar(ds, key_std, Float32, dims,
-                                      deflatelevel=4, fillvalue=-999.0f0, attrib=cs_attrib)
+            nc_vars[key_std] = defVar(ds, key_std, Float32, dims;
+                                      storage..., attrib=cs_attrib)
         end
     end
 
-    nc_vars["n"] = defVar(ds, "n", Float32, dims, deflatelevel=4, fillvalue=-999.0f0,
+    nc_vars["n"] = defVar(ds, "n", Float32, dims; storage...,
                           attrib=["units" => "", "long_name" => "Number of pixels in average",
                                   "coordinates" => "lons lats", "grid_mapping" => "cubed_sphere"])
 
@@ -303,6 +314,9 @@ end
 
 function _set_provenance_attributes!(ds, command::Union{Nothing,String},
                                      filters::Vector{FilterRule})
+    for (key, value) in _software_provenance()
+        ds.attrib[key] = value
+    end
     command === nothing || (ds.attrib["command"] = command)
     ds.attrib["filters"] = isempty(filters) ? "none" :
         join((_format_filter_rule(rule) for rule in filters), "; ")
@@ -323,10 +337,10 @@ end
 
 Copy attributes (units, long_name, etc.) from the first input file to the output variables.
 """
-function copy_variable_attributes!(nc_vars::Dict, dataset, grid_vars::OrderedDict{String,String})
-    attrib_names = ["units", "long_name", "valid_range", "description", "unit", "longname"]
+function copy_variable_attributes!(nc_vars::Dict, dataset, grid_vars::OrderedDict{String,String};
+                                   attributes=DEFAULT_VARIABLE_ATTRIBUTES)
     for (key, value) in grid_vars
-        for at in attrib_names
+        for at in attributes
             try
                 nc_vars[key].attrib[at] = read_nc_attribute(dataset, value, at)
             catch

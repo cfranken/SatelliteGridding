@@ -101,6 +101,7 @@ read_variable_from_file
 read_array_from_file
 read_system_netcdf_variable
 create_output_dataset
+NetCDFOptions
 ```
 
 ## Geolocation

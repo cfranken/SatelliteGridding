@@ -34,7 +34,7 @@ the grid.
 
 ## Prerequisites
 
-**Julia ≥ 1.9** is required. If you don't have Julia installed:
+**Julia ≥ 1.10** is required. If you don't have Julia installed:
 
 1. Download from [julialang.org/downloads](https://julialang.org/downloads/)
 2. Follow the platform-specific install instructions

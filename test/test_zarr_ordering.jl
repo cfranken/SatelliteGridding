@@ -118,4 +118,41 @@
         @test init_zarr_store isa Function
         @test write_zarr_day! isa Function
     end
+
+    @testset "Zarr-only runs retain independent, cumulative provenance" begin
+        mktempdir() do tmp
+            input = joinpath(tmp, "input_2020-01-01.nc")
+            rect = (0.1, 0.9, 0.1, 0.9)
+            _accuracy_input(input, [rect], Float32[10]; version="B1")
+            basic = Dict("lat" => "lat", "lon" => "lon",
+                         "lat_bnd" => "lat_bounds", "lon_bnd" => "lon_bounds")
+            config = DataSourceConfig(basic, OrderedDict("signal" => "signal"),
+                FilterRule[], "input_YYYY-MM-DD.nc", tmp,
+                Dict{String,Any}("metadata" => Dict("attributes" => ["@institution"])))
+            grid_spec = GridSpec(lat_min=0f0, lat_max=2f0, lon_min=0f0, lon_max=2f0,
+                                 dlat=1f0, dlon=1f0)
+            ts = TimeSpec(DateTime(2020, 1, 1), DateTime(2020, 1, 1), Dates.Day(1))
+            store = joinpath(tmp, "provenance.zarr")
+            grid_l2(config, grid_spec, ts; outfile="", zarr_out=store,
+                    zarr_epoch=Date(2020, 1, 1), n_oversample=4)
+            _accuracy_input(input, [rect], Float32[30]; version="B2")
+            grid_l2(config, grid_spec, ts; outfile="", zarr_out=store,
+                    zarr_epoch=Date(2020, 1, 1), n_oversample=4)
+            attrs = SatelliteGridding.JSON.parsefile(joinpath(store, "signal", ".zattrs"))
+            prov = attrs["processing_provenance"]
+            @test prov["satellite_product_versions"] == ["B1", "B2"]
+            @test prov["source_versions"]["@product_version"] == ["B1", "B2"]
+            @test prov["source_metadata"]["@institution"] == ["Synthetic lab"]
+            @test length(prov["software"]) == 1
+            @test haskey(only(prov["software"]), "git_tag")
+            # A second product must not replace provenance for the first one.
+            other = DataSourceConfig(basic, OrderedDict("other" => "signal"),
+                                     FilterRule[], "input_YYYY-MM-DD.nc", tmp)
+            grid_l2(other, grid_spec, ts; outfile="", zarr_out=store,
+                    zarr_epoch=Date(2020, 1, 1), n_oversample=4)
+            consolidated = SatelliteGridding.JSON.parsefile(joinpath(store, ".zmetadata"))
+            @test consolidated["metadata"]["signal/.zattrs"]["processing_provenance"] == prov
+            @test consolidated["metadata"]["other/.zattrs"]["processing_provenance"]["satellite_product_versions"] == ["B2"]
+        end
+    end
 end

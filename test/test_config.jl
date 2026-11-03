@@ -1,5 +1,39 @@
 @testset "Configuration" begin
 
+    @testset "Output and metadata validation" begin
+        for kwargs in ((; compression="zstd"), (; deflate_level=10), (; deflate_level=1.5),
+                       (; shuffle="yes"), (; fill_value=Inf), (; fill_value=1e100),
+                       (; chunksizes=[0, 2, 1]), (; checksum="invalid"))
+            @test_throws ArgumentError NetCDFOptions(; kwargs...)
+        end
+        mktempdir() do dir
+            file = joinpath(dir, "config.toml")
+            base = """
+            filePattern = "*.nc"
+            folder = "/data"
+            [grid]
+            value = "value"
+            """
+            write(file, base * """
+            [output]
+            compression = "none"
+            fill_value = -32767.0
+            [metadata]
+            version_sources = ["@BuildId", "Metadata/BuildId"]
+            attributes = ["@institution"]
+            variable_attributes = ["units"]
+            """)
+            cfg = load_config(file)
+            @test cfg.options["output"]["fill_value"] == -32767
+            @test cfg.options["metadata"]["version_sources"] == ["@BuildId", "Metadata/BuildId"]
+            for invalid in ("[output]\ndefalte_level = 4\n", "[metadata]\nattributes = true\n",
+                            "[metadata]\nvariable_attributes = [\"scale_factor\"]\n")
+                write(file, base * invalid)
+                @test_throws ArgumentError load_config(file)
+            end
+        end
+    end
+
     @testset "load_config — TOML with string filter expressions" begin
         toml_content = """
         filePattern = "data_YYYY-MM-DD_*.nc"

@@ -25,6 +25,53 @@ sif_735 = "PRODUCT/SIF_735"
 "PRODUCT/qa_value" = "> 0.5"
 ```
 
+## NetCDF storage and provenance
+
+Optional `[output]` settings control lossless Float32 NetCDF storage:
+
+```toml
+[output]
+compression = "deflate"  # or "none"
+deflate_level = 4         # 0–9; 0 disables compression
+shuffle = false          # compare true on representative data
+fill_value = -999.0       # or nan
+checksum = "none"        # or "fletcher32"
+# chunksizes = [256, 256, 1]  # lon, lat, time; must fit spatial dimensions
+```
+
+Default chunks are at most 1024 × 1024 spatial cells and one time slice. Cube
+chunks use one face; custom cube chunks follow `[Xdim, Ydim, nf, time]` order.
+Counts stay Float32 because footprint weights can be fractional, with zero
+meaning no observations. The fill value applies to empty science cells and
+entirely empty time slices. `[center] fill_value` describes input values;
+`[output] fill_value` describes output storage. Zarr retains its existing Zstd
+compression and NaN fill.
+
+NetCDF outputs always record the package version, nearest Git tag, commit,
+tracked dirty state, Julia version, command (when supplied), and filters.
+Unavailable Git fields are `"unknown"`. Input satellite version fields are
+detected automatically, including OCO's `product_version`, root `BuildId`, and
+`Metadata/BuildId`. Optional metadata selectors control what else is retained:
+
+```toml
+[metadata]
+# Optional override; first available source determines each file's product version.
+# version_sources = ["@product_version", "@BuildId", "Metadata/BuildId"]
+attributes = ["@institution", "@identifier_product_doi", "Metadata/CollectionLabel"]
+variable_attributes = ["units", "long_name", "description"]
+```
+
+Use `@name` for global attributes, `Group/@name` for group attributes, and
+`Group/name` for small metadata variables (at most 1024 elements).
+`satellite_product_version` lists distinct primary versions; `source_versions`
+and `source_metadata` are JSON maps retaining all distinct selected values across
+opened input files. Missing optional fields are skipped. Attributes describing
+packing or missing-value storage cannot be copied to science variables. The
+default variable attributes are `units`, `long_name`, `valid_range`,
+`description`, `unit`, and `longname`. Center-mode HDF4 skips source metadata.
+Additive Zarr stores keep cumulative versions and software provenance per
+science variable in `processing_provenance`.
+
 ## Top-Level Fields
 
 | Field | Description |
@@ -35,6 +82,10 @@ sif_735 = "PRODUCT/SIF_735"
 ### Date Placeholders
 
 The file pattern and folder path support these placeholders:
+
+Existing directories are treated literally. For templated folders, only the
+path below the deepest existing parent is expanded, so names containing `DD` or
+`MM` by coincidence are preserved.
 
 - `YYYY` — 4-digit year (e.g., `2019`)
 - `YYMMDD` — compact date (e.g., `190701`)
