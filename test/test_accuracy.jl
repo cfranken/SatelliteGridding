@@ -1,36 +1,59 @@
-# Numerical expectations below come from rectangle areas and elementary moments,
-# independently of the package's geometry / accumulation helpers.
-function _accuracy_input(file, rectangles, values; qa=ones(Float32, length(values)), version="B1")
-    Dataset(file, "c") do ds
-        defDim(ds, "sounding", length(values))
-        defDim(ds, "vertex", 4)
-        lat = defVar(ds, "lat", Float32, ("sounding",))
-        lon = defVar(ds, "lon", Float32, ("sounding",))
-        lb = defVar(ds, "lat_bounds", Float32, ("sounding", "vertex"))
-        ob = defVar(ds, "lon_bounds", Float32, ("sounding", "vertex"))
-        a = defVar(ds, "signal", Float32, ("sounding",); fillvalue=-9999f0,
-                   attrib=["units" => "ppm", "long_name" => "Synthetic signal"])
-        # Physical packed values = 2*signal + 7; raw integers = 4*signal.
-        b = defVar(ds, "packed", Int16, ("sounding",); fillvalue=Int16(-32768),
-                   attrib=["scale_factor" => 0.5f0, "add_offset" => 7f0])
-        quality = defVar(ds, "qa", Float32, ("sounding",))
-        for (i, (x0, x1, y0, y1)) in enumerate(rectangles)
-            lat[i] = (y0 + y1) / 2
-            lon[i] = (x0 + x1) / 2
-            lb[i, :] = Float32[y0, y0, y1, y1]
-            ob[i, :] = Float32[x0, x1, x1, x0]
-        end
-        a[:] = values
-        b.var[:] = [isfinite(v) && v != -9999 ? Int16(4v) : Int16(-32768) for v in values]
-        quality[:] = qa
-        ds.attrib["product_version"] = version
-        ds.attrib["institution"] = "Synthetic lab"
-        group = defGroup(ds, "Metadata")
-        defVar(group, "BuildId", String, ())[] = version * ".build"
-    end
-end
-
 @testset "Accuracy — analytic synthetic inputs through NetCDF" begin
+    @testset "Four observations retain their own corners in either bounds layout" begin
+        mktempdir() do dir
+            rectangles = [(x - 0.5, x + 0.5, y - 0.5, y + 0.5)
+                          for (x, y) in zip((-100, -50, 50, 100), (-30, -10, 10, 30))]
+            signals = Float32[10, 20, 30, 40]
+            gs = GridSpec(lat_min=-40f0, lat_max=40f0, lon_min=-120f0, lon_max=120f0,
+                          dlat=20f0, dlon=60f0)
+            ts = TimeSpec(DateTime(2020, 1, 1), DateTime(2020, 1, 1), Dates.Day(1))
+            input = joinpath(dir, "four_2020-01-01.nc")
+            expected_weights = zeros(Float32, 4, 4)
+            for i in 1:4
+                expected_weights[i, i] = 1
+            end
+            for vertex_first in (false, true), grouped in (false, true)
+                _accuracy_input(input, rectangles, signals; vertex_first=vertex_first,
+                                bounds_group=grouped ? "Geolocation" : nothing)
+                prefix = grouped ? "Geolocation/" : ""
+                cfg = DataSourceConfig(Dict("lat_bnd" => prefix * "lat_bounds",
+                                            "lon_bnd" => prefix * "lon_bounds"),
+                    OrderedDict("signal" => "signal"), FilterRule[], "four_YYYY-MM-DD.nc", dir)
+                for backend in (nothing, CPU())
+                    out = joinpath(dir, "four_output.nc")
+                    grid_l2(cfg, gs, ts; backend=backend, outfile=out, n_oversample=4)
+                    Dataset(out) do ds
+                        @test ds["n"][:, :, 1] ≈ expected_weights
+                        for i in 1:4
+                            @test ds["signal"][i, i, 1] ≈ signals[i]
+                        end
+                        @test count(ismissing, ds["signal"][:, :, 1]) == 12
+                    end
+                end
+                out = joinpath(dir, "four_cube.nc")
+                grid_l2(cfg, CubedSphereGridSpec(Nc=8), ts; outfile=out, n_oversample=4)
+                Dataset(out) do ds
+                    @test sum(ds["n"][:, :, :, 1]) ≈ 4
+                    @test Set(skipmissing(vec(ds["signal"][:, :, :, 1]))) == Set(signals)
+                end
+            end
+            # Selecting rows must retain the previous rejection of science
+            # variables whose full length does not match the sounding axis.
+            for n_bad in (2, 5)
+                path = "bad_signal_$n_bad"
+                Dataset(input, "a") do ds
+                    defDim(ds, "bad_dim_$n_bad", n_bad)
+                    defVar(ds, path, Float32, ("bad_dim_$n_bad",))[:] = ones(Float32, n_bad)
+                end
+                cfg = DataSourceConfig(Dict("lat_bnd" => "Geolocation/lat_bounds",
+                                            "lon_bnd" => "Geolocation/lon_bounds"),
+                    OrderedDict("signal" => path), FilterRule[], "four_YYYY-MM-DD.nc", dir)
+                @test_throws ErrorException grid_l2(cfg, gs, ts;
+                    outfile=joinpath(dir, "invalid.nc"), n_oversample=4)
+            end
+        end
+    end
+
     mktempdir() do dir
         broad = (0.5, 1.5, 0.25, 0.75) # half its area in each of two cells
         left = (0.1, 0.9, 0.25, 0.75)  # entirely in the left cell

@@ -99,7 +99,8 @@ end
 
 Write one day's gridded fields into the store `g` (the group returned by
 [`init_zarr_store`](@ref)) at the absolute time index for `date`. `grid_data`,
-`grid_std` are `[lon, lat, var]`; `grid_weights` is `[lon, lat]` (fractional
+`grid_std` are `[lon, lat, var]` (`grid_std` may be `nothing` for mean-only writes);
+`grid_weights` is `[lon, lat]` (fractional
 footprint weights). Writes exactly one chunk per array: the transposed/flipped
 mean, the per-cell count (`Int16`, weights rounded; empty → −1), and — when
 `compute_std` — the standard error of the mean `std / √n`. Empty cells stay

@@ -1,5 +1,59 @@
 @testset "NetCDF I/O" begin
 
+    @testset "Bounds have one canonical orientation, including four soundings" begin
+        mktempdir() do dir
+            for n in (3, 4, 5), vertex_first in (false, true), grouped in (false, true)
+                file = joinpath(dir, "bounds.nc")
+                expected = Float32[10i + corner for i in 1:n, corner in (0.1, 0.1, 0.9, 0.9)]
+                Dataset(file, "c") do ds
+                    defDim(ds, "sounding", n)
+                    defDim(ds, "vertex", 4)
+                    parent = grouped ? defGroup(ds, "Geolocation") : ds
+                    dims = vertex_first ? ("vertex", "sounding") : ("sounding", "vertex")
+                    bounds = defVar(parent, "latitude_bounds", Float32, dims)
+                    bounds[:, :] = vertex_first ? permutedims(expected) : expected
+                end
+                Dataset(file) do ds
+                    path = grouped ? "Geolocation/latitude_bounds" : "latitude_bounds"
+                    @test read_nc_variable(ds, path; bounds=true) == expected
+                    @test size(read_nc_variable(ds, path; bounds=true)) == (n, 4)
+                end
+            end
+
+            # Singleton time dimensions and an interior vertex axis also flatten
+            # into sounding × vertex, using the same path as ordinary bounds.
+            file = joinpath(dir, "nested.nc")
+            expected = Float32[10i + corner for i in 1:4, corner in 1:4]
+            Dataset(file, "c") do ds
+                defDim(ds, "time", 1)
+                defDim(ds, "sounding", 4)
+                defDim(ds, "vertex", 4)
+                group = defGroup(ds, "Geo")
+                v = defVar(group, "bounds", Float32, ("time", "vertex", "sounding"))
+                v[:, :, :] = reshape(permutedims(expected), 1, 4, 4)
+            end
+            Dataset(file) do ds
+                @test read_nc_variable(ds, "Geo/bounds"; bounds=true) == expected
+            end
+        end
+    end
+
+    @testset "Output definition failures close the dataset immediately" begin
+        mktempdir() do dir
+            opened = Ref{Any}(nothing)
+            @test_throws ErrorException SatelliteGridding._with_output_setup(joinpath(dir, "failed.nc")) do ds
+                opened[] = ds
+                defDim(ds, "x", 1)
+                error("synthetic failure while defining output")
+            end
+            @test !NCDatasets.isopen(opened[])
+            # On success, the caller owns the open dataset, as before.
+            ds = SatelliteGridding._with_output_setup(identity, joinpath(dir, "ok.nc"))
+            @test NCDatasets.isopen(ds)
+            close(ds)
+        end
+    end
+
     @testset "read_nc_variable — flat variable" begin
         tmpfile = tempname() * ".nc"
         ds = Dataset(tmpfile, "c")

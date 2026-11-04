@@ -7,6 +7,8 @@ using OrderedCollections
 using KernelAbstractions
 using Zarr   # loads the SatelliteGriddingZarrExt extension for the Zarr daily-emit tests
 
+include("fixtures.jl")
+
 @testset "SatelliteGridding.jl" begin
     include("test_oversampling.jl")
     include("test_averaging.jl")

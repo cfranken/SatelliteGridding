@@ -1,5 +1,44 @@
 @testset "Integration — end-to-end L2 gridding" begin
 
+    @testset "Setup validation preserves output and failures close handles" begin
+        mktempdir() do dir
+            cfg = DataSourceConfig(Dict("lat" => "lat", "lon" => "lon",
+                                        "lat_bnd" => "lat_bounds", "lon_bnd" => "lon_bounds"),
+                OrderedDict("signal" => "signal"), FilterRule[], "*.nc", dir)
+            gs = GridSpec(lat_min=0f0, lat_max=1f0, lon_min=0f0, lon_max=1f0, dlat=1f0, dlon=1f0)
+            ts = TimeSpec(DateTime(2020, 1, 1), DateTime(2020, 1, 1), Dates.Day(1))
+            outfile = joinpath(dir, "existing.nc")
+            write(outfile, "preserve this file on invalid configuration")
+            @test_throws ErrorException grid_center(cfg, gs, ts; outfile=outfile, geo_provider=:invalid)
+            @test read(outfile, String) == "preserve this file on invalid configuration"
+            @test_throws ErrorException grid_l2(cfg, CubedSphereGridSpec(Nc=4), ts;
+                outfile=outfile, zarr_out=joinpath(dir, "cube.zarr"))
+            @test read(outfile, String) == "preserve this file on invalid configuration"
+
+            # Validate the geolocation lookup before truncating an existing file.
+            @test_throws Exception grid_center(cfg, gs, ts; outfile=outfile,
+                geo_provider=:lut, geo_table=joinpath(dir, "missing_lookup.nc"))
+            @test read(outfile, String) == "preserve this file on invalid configuration"
+
+            # Fail after opening output: a requested vegetation variable collides
+            # with a configured science variable. Closure must not wait for GC.
+            collision = DataSourceConfig(cfg.basic, OrderedDict("EVI" => "signal"),
+                                          cfg.filters, cfg.file_pattern, cfg.folder)
+            @test_throws Exception grid_center(collision, gs, ts; outfile=outfile,
+                                               geo_provider=:variables, veg_indices=true)
+            if isdir("/proc/self/fd")
+                open_output_handles = count(readdir("/proc/self/fd"; join=true)) do fd
+                    try
+                        readlink(fd) == outfile
+                    catch
+                        false
+                    end
+                end
+                @test open_output_handles == 0
+            end
+        end
+    end
+
     @testset "Synthetic L2 file → grid_l2 pipeline" begin
         test_dir = mktempdir()
 

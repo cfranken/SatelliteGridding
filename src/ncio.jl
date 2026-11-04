@@ -7,44 +7,43 @@ If `bounds=true`, reshape the result so that footprint vertices are in the last 
 returning an N×4 matrix (N soundings, 4 corners).
 """
 function read_nc_variable(dataset, path::String; bounds::Bool=false)
-    loc = split(path, "/")
-
-    if length(loc) == 1
-        return _read_flat_variable(dataset, path, bounds)
-    end
-
-    # Navigate nested groups
-    gr = dataset.group[loc[1]]
-    for i in 2:length(loc)-1
-        gr = gr.group[loc[i]]
-    end
-
-    varname = loc[end]
-    si = size(gr[varname])
-
-    if bounds
-        if si[1] == 4
-            return reshape(gr[varname].var[:], 4, prod(si[2:end]))'
-        elseif si[end] == 4
-            return reshape(gr[varname].var[:], prod(si[1:end-1]), 4)
-        end
-    end
-
-    return reshape(gr[varname].var[:], prod(si))
+    var = _nc_variable(dataset, path)
+    bounds && return _read_bounds(var)
+    data = var.var[:]
+    occursin('/', path) ? vec(data) : data
 end
 
-function _read_flat_variable(dataset, varname::String, bounds::Bool)
-    if !bounds
-        return dataset[varname].var[:]
+# Resolve paths once for raw reads, CF reads, and variable attributes.
+function _nc_variable(dataset, path::String)
+    parts = split(strip(path, '/'), '/')
+    node = dataset
+    for group in parts[1:end-1]
+        node = node.group[group]
     end
-    si = size(dataset[varname])
-    if si[1] == 4
-        return reshape(dataset[varname].var[:], 4, prod(si[2:end]))'
-    elseif si[end] == 4
-        return reshape(dataset[varname].var[:], prod(si[1:end-1]), 4)
-    end
-    return dataset[varname].var[:]
+    node[parts[end]]
 end
+
+function _read_bounds(var)
+    shape = size(var)
+    axes4 = findall(==(4), collect(shape))
+    isempty(axes4) && return var.var[:]
+    # Size alone is ambiguous for four soundings. Prefer a named vertex axis;
+    # retain the historical first size-4 axis when dimension names give no clue.
+    names = lowercase.(String.(dimnames(var)))
+    vertex_axes = filter(axes4) do axis
+        name = names[axis]
+        occursin(r"vertex|vertices|corner|bound|bnd|^n?v$|^nv4$", name)
+    end
+    axis = length(vertex_axes) == 1 ? only(vertex_axes) : first(axes4)
+    data = reshape(var.var[:], shape)
+    axis == ndims(var) && return reshape(data, :, 4)
+    axis == 1 && return transpose(reshape(data, 4, :))
+    order = (filter(!=(axis), collect(1:ndims(var)))..., axis)
+    reshape(permutedims(data, order), :, 4)
+end
+
+_read_flat_variable(dataset, varname::String, bounds::Bool) =
+    bounds ? _read_bounds(dataset[varname]) : dataset[varname].var[:]
 
 """
     read_variable_from_file(path, variable; bounds=false)
@@ -134,18 +133,7 @@ function read_arrays_from_file(path::String,
     end
 end
 
-function _read_nc_array(dataset, path::String)
-    loc = split(path, "/")
-    if length(loc) == 1
-        return _read_full_array(dataset[path])
-    end
-
-    gr = dataset.group[loc[1]]
-    for i in 2:length(loc)-1
-        gr = gr.group[loc[i]]
-    end
-    _read_full_array(gr[loc[end]])
-end
+_read_nc_array(dataset, path::String) = _read_full_array(_nc_variable(dataset, path))
 
 function _read_full_array(var)
     selectors = ntuple(_ -> Colon(), ndims(var))
@@ -164,28 +152,10 @@ end
 
 Read an attribute from a possibly group-nested variable.
 """
-function read_nc_attribute(dataset, path::String, attr::String)
-    loc = split(path, "/")
+read_nc_attribute(dataset, path::String, attr::String) =
+    _nc_variable(dataset, path).attrib[attr]
 
-    if length(loc) == 1
-        return dataset[path].attrib[attr]
-    end
 
-    gr = dataset.group[loc[1]]
-    for i in 2:length(loc)-1
-        gr = gr.group[loc[i]]
-    end
-    return gr[loc[end]].attrib[attr]
-end
-
-"""
-    create_output_dataset(outfile, grid_spec, time_spec, grid_vars, compute_std) -> Dataset, Dict
-
-Create the output NetCDF4 file with dimensions, coordinate variables, and data variable
-definitions. Returns the dataset and a Dict mapping variable names to NCDatasets variables.
-The global `command` and `filters` attributes record the invocation and configured
-quality-filter rules when provided.
-"""
 # Define the per-snapshot averaging-window bounds along the unlimited `time` dim.
 # `time` itself holds the snapshot reference (start of interval, or window center for a
 # rolling mean); `window_start`/`window_end` make the actual averaging interval explicit
@@ -202,6 +172,35 @@ function _define_window_bounds!(ds, n_times::Int)
     nothing
 end
 
+# Transfer ownership to the caller only after all definitions succeed.
+function _with_output_setup(f, outfile::String)
+    ds = Dataset(outfile, "c")
+    try
+        f(ds)
+    catch
+        close(ds)
+        rethrow()
+    end
+end
+
+function _close_output_dataset!(ds, metadata::InputMetadata)
+    ds === nothing && return nothing
+    try
+        _write_input_metadata!(ds, metadata)
+    finally
+        close(ds)
+    end
+    nothing
+end
+
+"""
+    create_output_dataset(outfile, grid_spec, n_times, grid_vars, compute_std) -> Dataset, Dict
+
+Create the output NetCDF4 file with dimensions, coordinate variables, and data variable
+definitions. Returns the dataset and a Dict mapping variable names to NCDatasets variables.
+The global `command` and `filters` attributes record the invocation and configured
+quality-filter rules when provided.
+"""
 function create_output_dataset(outfile::String, grid_spec::RectangularGridSpec,
                                n_times::Int, grid_vars::OrderedDict{String,String},
                                compute_std::Bool;
@@ -210,61 +209,11 @@ function create_output_dataset(outfile::String, grid_spec::RectangularGridSpec,
                                command::Union{Nothing,String}=nothing,
                                filters::Vector{FilterRule}=FilterRule[],
                                output_options::NetCDFOptions=NetCDFOptions())
-    storage = _storage_kwargs(output_options, grid_spec)
-    ds = Dataset(outfile, "c")
-
-    defDim(ds, "lon", length(grid_spec.lon))
-    defDim(ds, "lat", length(grid_spec.lat))
-    # Time is unlimited so per-chunk outputs can be concatenated with ncrcat.
-    defDim(ds, "time", Inf)
-
-    ds_lat = defVar(ds, "lat", Float32, ("lat",),
-                    attrib=["units" => "degrees_north", "long_name" => "Latitude"])
-    ds_lon = defVar(ds, "lon", Float32, ("lon",),
-                    attrib=["units" => "degrees_east", "long_name" => "Longitude"])
-    ds_time = defVar(ds, "time", Float32, ("time",),
-                     attrib=["units" => "days since 1970-01-01",
-                              "long_name" => time_long_name])
-
-    ds_lat[:] = grid_spec.lat
-    ds_lon[:] = grid_spec.lon
-    # Bump the unlimited time dim to its expected length so dependent variables
-    # are sized correctly; gridder overwrites these placeholder times per slice.
-    ds_time[1:n_times] = zeros(Float32, n_times)
-    window_bounds && _define_window_bounds!(ds, n_times)
-
-    ds.attrib["title"] = "Gridded satellite data"
-    ds.attrib["created_with"] = "SatelliteGridding.jl"
-    _set_provenance_attributes!(ds, command, filters)
-
-    # Define output data variables
-    nc_vars = Dict{String,Any}()
-    for (key, _) in grid_vars
-        nc_vars[key] = defVar(ds, key, Float32, ("lon", "lat", "time");
-                              storage...)
-        if compute_std
-            key_std = key * "_std"
-            nc_vars[key_std] = defVar(ds, key_std, Float32, ("lon", "lat", "time");
-                                      storage...)
-        end
-    end
-
-    nc_vars["n"] = defVar(ds, "n", Float32, ("lon", "lat", "time");
-                          storage...,
-                          attrib=["units" => "", "long_name" => "Number of pixels in average"])
-
-    return ds, nc_vars
+    _create_output_dataset(outfile, grid_spec, n_times, grid_vars, compute_std;
+        window_bounds=window_bounds, time_long_name=time_long_name,
+        command=command, filters=filters, output_options=output_options)
 end
 
-"""
-    create_output_dataset(outfile, grid_spec::CubedSphereGridSpec, n_times,
-                          grid_vars, compute_std) -> Dataset, Dict
-
-Cubed-sphere output file: GCHP-style dims `Xdim`/`Ydim`/`nf` (=Nc, Nc, 6) plus an
-unlimited `time`. Spatial coordinates (`lons`/`lats` and `corner_lons`/
-`corner_lats` aux arrays, index coords, global attrs) are written by
-[`write_coordinates!`](@ref). Payload variables are 4D `(Xdim, Ydim, nf, time)`.
-"""
 function create_output_dataset(outfile::String, grid_spec::CubedSphereGridSpec,
                                n_times::Int, grid_vars::OrderedDict{String,String},
                                compute_std::Bool;
@@ -273,43 +222,47 @@ function create_output_dataset(outfile::String, grid_spec::CubedSphereGridSpec,
                                command::Union{Nothing,String}=nothing,
                                filters::Vector{FilterRule}=FilterRule[],
                                output_options::NetCDFOptions=NetCDFOptions())
-    storage = _storage_kwargs(output_options, grid_spec)
-    ds = Dataset(outfile, "c")
+    _create_output_dataset(outfile, grid_spec, n_times, grid_vars, compute_std;
+        window_bounds=window_bounds, time_long_name=time_long_name,
+        command=command, filters=filters, output_options=output_options)
+end
 
-    write_coordinates!(ds, grid_spec)
+_output_title(::RectangularGridSpec) = "Gridded satellite data"
+_output_title(::CubedSphereGridSpec) = "Gridded satellite data (cubed sphere)"
+_payload_attributes(::RectangularGridSpec) = Pair{String,String}[]
+_payload_attributes(::CubedSphereGridSpec) =
+    ["coordinates" => "lons lats", "grid_mapping" => "cubed_sphere"]
 
-    # Time is unlimited so per-chunk outputs can be concatenated with ncrcat.
-    defDim(ds, "time", Inf)
-    ds_time = defVar(ds, "time", Float32, ("time",),
-                     attrib=["units" => "days since 1970-01-01",
-                              "long_name" => time_long_name])
-    ds_time[1:n_times] = zeros(Float32, n_times)
-    window_bounds && _define_window_bounds!(ds, n_times)
+function _create_output_dataset(outfile, spec, n_times, grid_vars, compute_std;
+                                 window_bounds, time_long_name, command, filters, output_options)
+    storage = _storage_kwargs(output_options, spec)
+    _with_output_setup(outfile) do ds
+        write_coordinates!(ds, spec)
+        # Unlimited time supports concatenation with ncrcat. Placeholder times
+        # size all dependent variables; the gridders write the actual dates.
+        defDim(ds, "time", Inf)
+        time = defVar(ds, "time", Float32, ("time",);
+                      attrib=["units" => "days since 1970-01-01", "long_name" => time_long_name])
+        time[1:n_times] = zeros(Float32, n_times)
+        window_bounds && _define_window_bounds!(ds, n_times)
+        ds.attrib["title"] = _output_title(spec)
+        ds.attrib["created_with"] = "SatelliteGridding.jl"
+        _set_provenance_attributes!(ds, command, filters)
 
-    ds.attrib["title"] = "Gridded satellite data (cubed sphere)"
-    ds.attrib["created_with"] = "SatelliteGridding.jl"
-    _set_provenance_attributes!(ds, command, filters)
-
-    dims = (payload_dims(grid_spec)..., "time")
-    # `coordinates`/`grid_mapping` make Panoply, xarray, and GCHP tooling plot the
-    # data on the 2D lons/lats aux coordinates rather than the fake 1D axes.
-    cs_attrib = ["coordinates" => "lons lats", "grid_mapping" => "cubed_sphere"]
-    nc_vars = Dict{String,Any}()
-    for (key, _) in grid_vars
-        nc_vars[key] = defVar(ds, key, Float32, dims; storage...,
-                              attrib=cs_attrib)
-        if compute_std
-            key_std = key * "_std"
-            nc_vars[key_std] = defVar(ds, key_std, Float32, dims;
-                                      storage..., attrib=cs_attrib)
+        dims = (payload_dims(spec)..., "time")
+        attributes = _payload_attributes(spec)
+        nc_vars = Dict{String,Any}()
+        for key in keys(grid_vars)
+            nc_vars[key] = defVar(ds, key, Float32, dims; storage..., attrib=attributes)
+            if compute_std
+                nc_vars[key * "_std"] = defVar(ds, key * "_std", Float32, dims;
+                                               storage..., attrib=attributes)
+            end
         end
+        nc_vars["n"] = defVar(ds, "n", Float32, dims; storage...,
+            attrib=vcat(["units" => "", "long_name" => "Number of pixels in average"], attributes))
+        ds, nc_vars
     end
-
-    nc_vars["n"] = defVar(ds, "n", Float32, dims; storage...,
-                          attrib=["units" => "", "long_name" => "Number of pixels in average",
-                                  "coordinates" => "lons lats", "grid_mapping" => "cubed_sphere"])
-
-    return ds, nc_vars
 end
 
 function _set_provenance_attributes!(ds, command::Union{Nothing,String},

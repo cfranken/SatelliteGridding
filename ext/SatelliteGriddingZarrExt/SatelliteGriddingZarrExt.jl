@@ -96,7 +96,7 @@ See `SatelliteGridding.write_zarr_day!`. Writes one `(NX, NY)` lat-flipped slice
 array at the absolute Julia time index `ti` (`Z[:, :, ti]`), i.e. exactly one chunk.
 """
 function write_zarr_day!(g, date, grid_data::AbstractArray{<:Any,3},
-                         grid_std::AbstractArray{<:Any,3}, grid_weights::AbstractMatrix,
+                         grid_std::Union{Nothing,AbstractArray{<:Any,3}}, grid_weights::AbstractMatrix,
                          grid_vars, compute_std::Bool; epoch::Date = ZARR_EPOCH)
     ti = zarr_time_index(date, epoch)
     # Bound against the store's ACTUAL time axis (sized from its own epoch/horizon),

@@ -18,7 +18,8 @@
     grid_std = zeros(Float32, 360, 180, 1)
 
     g = init_zarr_store(path, gs, gv; compute_std = false)
-    ti = write_zarr_day!(g, Date(2021, 1, 1), grid_data, grid_std, grid_w, gv, false)
+    # Mean-only writers accept no variance buffer; array callers remain valid below.
+    ti = write_zarr_day!(g, Date(2021, 1, 1), grid_data, nothing, grid_w, gv, false)
     consolidate_zarr!(path)
     @test ti == 1                          # epoch day → absolute index 1
 

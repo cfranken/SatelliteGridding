@@ -1,5 +1,23 @@
 @testset "Averaging" begin
 
+    @testset "Mean-only accumulation needs no variance workspace" begin
+        for T in (Float32, Float64)
+            means = zeros(T, 3, 3, 1)
+            weights = zeros(T, 3, 3)
+            values = reshape(T[10, 30], 2, 1)
+            corners = fill(T(1.5), 2, 4)
+            n = 4
+            accumulate_footprint!(means, nothing, weights, false, corners, corners,
+                values, 2, 1, n, zeros(T, n, n, 2), zeros(Int32, n^2), zeros(Int32, n^2),
+                zeros(T, n), zeros(T, n), zeros(T, n), zeros(T, n))
+            @test means[1, 1, 1] ≈ 20
+            @test weights[1, 1] == 2
+            S1 = similar(means)
+            SatelliteGridding.welford_to_moments!(S1, nothing, means, nothing, weights, false)
+            @test S1[1, 1, 1] ≈ 40
+        end
+    end
+
     @testset "Welford single-cell — fast path (all corners in one cell)" begin
         # Setup: 5×5 grid, 1 variable
         grid_data = zeros(Float32, 5, 5, 1)

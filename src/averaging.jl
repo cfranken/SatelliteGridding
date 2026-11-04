@@ -19,7 +19,7 @@ enabling numerically stable computation of mean and variance in a single pass.
 
 # Arguments
 - `grid_data`: Output array `(n_lon, n_lat, n_vars)` — running mean
-- `grid_std`: Output array `(n_lon, n_lat, n_vars)` — running M2 (sum of squared deviations)
+- `grid_std`: Output array `(n_lon, n_lat, n_vars)` — running M2 (sum of squared deviations); may be `nothing` when `compute_std=false`
 - `grid_weights`: Output array `(n_lon, n_lat)` — accumulated weights
 - `compute_std`: Whether to track variance
 - `lat_idx`, `lon_idx`: Pre-computed fractional grid indices for corners, size `(n_pixels, 4)`
@@ -30,7 +30,7 @@ enabling numerically stable computation of mean and variance in a single pass.
 - Remaining arguments are pre-allocated work buffers
 """
 function accumulate_footprint!(grid_data::AbstractArray{T,3},
-                               grid_std::AbstractArray{T,3},
+                               grid_std::Union{Nothing,AbstractArray{T,3}},
                                grid_weights::AbstractMatrix{T},
                                compute_std::Bool,
                                lat_idx::AbstractMatrix, lon_idx::AbstractMatrix,
@@ -100,7 +100,7 @@ For each pixel:
 [`compute_subpixels!`].
 """
 function accumulate_footprint_cs!(grid_data::AbstractArray{T,3},
-                                  grid_std::AbstractArray{T,3},
+                                  grid_std::Union{Nothing,AbstractArray{T,3}},
                                   grid_weights::AbstractMatrix{T},
                                   compute_std::Bool,
                                   spec::CubedSphereGridSpec{T},
@@ -170,7 +170,7 @@ coordinate gives the footprint center and the four coordinates define its
 bounding box or edge points. Sampling is done in fractional grid-index space.
 """
 function accumulate_circular_footprint!(grid_data::AbstractArray{T,3},
-                                        grid_std::AbstractArray{T,3},
+                                        grid_std::Union{Nothing,AbstractArray{T,3}},
                                         grid_weights::AbstractMatrix{T},
                                         compute_std::Bool,
                                         center_lat_idx::AbstractVector,
@@ -483,11 +483,11 @@ end
 
 Convert a day's Welford accumulators (`mean`, Welford `M2`, `weights`) into additive raw
 moments: `S1 = Σw·x = w·mean` and, when `compute_std`, `S2 = Σw·x² = M2 + w·mean²`.
-`S0` is just the `weights` array itself (no copy needed). `S2` may be `nothing` when
+`S0` is just the `weights` array itself (no copy needed). `M2` and `S2` may be `nothing` when
 `compute_std` is false.
 """
 function welford_to_moments!(S1::AbstractArray{T,3}, S2,
-                             mean::AbstractArray{T,3}, M2::AbstractArray{T,3},
+                             mean::AbstractArray{T,3}, M2::Union{Nothing,AbstractArray{T,3}},
                              weights::AbstractMatrix{T}, compute_std::Bool) where {T}
     nlon, nlat, nvars = size(mean)
     @inbounds for j in 1:nlat, i in 1:nlon
