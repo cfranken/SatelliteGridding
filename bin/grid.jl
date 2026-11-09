@@ -71,6 +71,7 @@ function main()
              zarr_epoch=Date(args["zarrEpoch"]),
              backend=backend,
              keep_going=args["keepGoing"],
+             progress=!args["noProgress"] && SatelliteGridding._default_progress(),
              command=command_line)
 
     elseif command == "center"
@@ -88,6 +89,7 @@ function main()
              veg_indices=args["vegIndices"],
              outfile=args["outFile"],
              keep_going=args["keepGoing"],
+             progress=!args["noProgress"] && SatelliteGridding._default_progress(),
              command=command_line)
     else
         error("Unknown command: $command. Use 'l2' or 'center'.")
