@@ -24,6 +24,9 @@ circular products such as GOSAT. Circular footprints can be read from
   Use `CPU()`, `CUDABackend()`, `MetalBackend()`, or another compatible KA backend.
 - `keep_going::Bool=false`: Continue after per-file errors. By default, the
   first file error stops the run.
+- `progress::Bool=stderr isa Base.TTY`: Draw progress bars (on stderr). By default they're
+  drawn only when stderr is a terminal: redirected to a file or a pipe, as in batch jobs, every
+  redraw would become new lines.
 """
 function grid_l2(config::DataSourceConfig, grid_spec::AbstractGridSpec{T}, time_spec::TimeSpec;
                  n_oversample::Union{Nothing,Int}=nothing,
@@ -35,6 +38,7 @@ function grid_l2(config::DataSourceConfig, grid_spec::AbstractGridSpec{T}, time_
                  zarr_epoch::Date=ZARR_EPOCH,
                  backend=nothing,
                  keep_going::Bool=false,
+                 progress::Bool=_default_progress(),
                  command::Union{Nothing,String}=nothing) where {T}
 
     footprint_method isa SubpixelGridding ||
@@ -109,7 +113,7 @@ function grid_l2(config::DataSourceConfig, grid_spec::AbstractGridSpec{T}, time_
                 ds_out, nc_vars, config, grid_spec, time_spec, snapshots,
                 acc1, acc2, n_vars, use_ka, backend, compute_std,
                 effective_n_oversample, footprint_method, keep_going;
-                zg=zg, zarr_epoch=zarr_epoch, metadata=metadata)
+                zg=zg, zarr_epoch=zarr_epoch, metadata=metadata, progress=progress)
         else
             # Allocate work arrays (on backend for GPU, regular Array for CPU)
             if use_ka
@@ -123,7 +127,7 @@ function grid_l2(config::DataSourceConfig, grid_spec::AbstractGridSpec{T}, time_
             end
 
             fill_attrib = true
-            p_time = Progress(n_times, desc="Time steps: ")
+            p_time = _progress_bar(n_times, "Time steps: ", progress)
 
             for (ct, d) in enumerate(snapshots)
                 ProgressMeter.next!(p_time; showvalues=[(:Time, d)])
@@ -133,7 +137,7 @@ function grid_l2(config::DataSourceConfig, grid_spec::AbstractGridSpec{T}, time_
                 files = find_files_range(config.file_pattern, config.folder, d, end_date)
                 total_files += length(files)
 
-                p_files = Progress(length(files), desc="  Files: ")
+                p_files = _progress_bar(length(files), "  Files: ", progress)
 
                 for filepath in files
                     try

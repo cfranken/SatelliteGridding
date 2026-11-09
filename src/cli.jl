@@ -97,6 +97,9 @@ function parse_l2_args(args=ARGS)
         "--keepGoing"
             help = "Continue after per-file processing errors and report failures at the end"
             action = :store_true
+        "--noProgress"
+            help = "Don't draw progress bars. By default they're drawn only when stderr is a terminal"
+            action = :store_true
         "--zarrOut"
             help = "Also write a per-day Zarr v2 store at this path (additive; one chunk per variable per day, alongside the NetCDF). Requires Zarr.jl. Rectangular grids only."
             arg_type = String
@@ -186,6 +189,9 @@ function parse_center_args(args=ARGS)
             action = :store_true
         "--keepGoing"
             help = "Continue after per-file processing errors and report failures at the end"
+            action = :store_true
+        "--noProgress"
+            help = "Don't draw progress bars. By default they're drawn only when stderr is a terminal"
             action = :store_true
     end
     parse_args(args, s)

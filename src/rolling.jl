@@ -15,7 +15,8 @@ function _grid_l2_rolling!(ds_out, nc_vars, config, grid_spec::AbstractGridSpec{
                            time_spec::TimeSpec, snapshots,
                            acc1, acc2, n_vars, use_ka, backend, compute_std,
                            effective_n_oversample, footprint_method, keep_going;
-                           zg=nothing, zarr_epoch::Date=ZARR_EPOCH, metadata=nothing) where {T}
+                           zg=nothing, zarr_epoch::Date=ZARR_EPOCH, metadata=nothing,
+                           progress::Bool=true) where {T}
     N = Dates.Day(time_spec.window_halfwidth_days)
 
     # day (calendar Date) => (S0, S1, S2) raw moments, or `nothing` when the day had no
@@ -31,7 +32,7 @@ function _grid_l2_rolling!(ds_out, nc_vars, config, grid_spec::AbstractGridSpec{
     win_S1 = zeros(T, acc1, acc2, n_vars)
     win_S2 = compute_std ? zeros(T, acc1, acc2, n_vars) : nothing
 
-    p_time = Progress(length(snapshots), desc="Snapshots: ")
+    p_time = _progress_bar(length(snapshots), "Snapshots: ", progress)
     for (ct, c) in enumerate(snapshots)
         ProgressMeter.next!(p_time; showvalues=[(:Center, c)])
         ws = c - N
@@ -45,7 +46,8 @@ function _grid_l2_rolling!(ds_out, nc_vars, config, grid_spec::AbstractGridSpec{
                 g, tf, sf, ff = _grid_one_day(dd, config, grid_spec, acc1, acc2, n_vars,
                                               use_ka, backend, compute_std,
                                               effective_n_oversample, footprint_method,
-                                              nc_vars, fill_attrib, keep_going; metadata=metadata)
+                                              nc_vars, fill_attrib, keep_going; metadata=metadata,
+                                              progress=progress)
                 total_files += tf
                 successful_files += sf
                 failed_files += ff
@@ -89,7 +91,7 @@ end
 """
     _grid_one_day(d, config, grid_spec, acc1, acc2, n_vars, use_ka, backend,
                   compute_std, effective_n_oversample, footprint_method,
-                  nc_vars, fill_attrib, keep_going; metadata=nothing)
+                  nc_vars, fill_attrib, keep_going; metadata=nothing, progress=true)
         -> ((S0, S1, S2) | nothing, total_files, successful_files, failed_files)
 
 Grid all input files for the single calendar day `d` into additive raw moments. Returns
@@ -100,14 +102,15 @@ are already weighted sums (`S0 = Σw`, `S1 = Σw·x`).
 function _grid_one_day(d::DateTime, config, grid_spec::AbstractGridSpec{T},
                        acc1, acc2, n_vars, use_ka, backend, compute_std,
                        effective_n_oversample, footprint_method,
-                       nc_vars, fill_attrib::Ref{Bool}, keep_going; metadata=nothing) where {T}
+                       nc_vars, fill_attrib::Ref{Bool}, keep_going; metadata=nothing,
+                       progress::Bool=true) where {T}
     files = find_files_range(config.file_pattern, config.folder, d, d)
     isempty(files) && return (nothing, 0, 0, 0)
 
     total = length(files)
     successful = 0
     failed = 0
-    p_files = Progress(total, desc="  $(Date(d)): ")
+    p_files = _progress_bar(total, "  $(Date(d)): ", progress)
 
     if use_ka
         day_sum = KernelAbstractions.zeros(backend, T, acc1, acc2, n_vars)
