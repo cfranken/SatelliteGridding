@@ -45,6 +45,7 @@ julia --project=. bin/grid.jl l2 [options]
 | `--compSTD` | Flag | false | Compute standard deviation |
 | `--backend` | String | `sequential` | Compute backend: `sequential`, `cpu`, `cuda`, or `metal` |
 | `--keepGoing` | Flag | false | Continue after per-file processing errors |
+| `--noProgress` | Flag | false | Don't draw progress bars. By default they're drawn only when stderr is a terminal |
 
 #### Examples
 
@@ -161,6 +162,7 @@ julia --project=. bin/grid.jl center [options]
 | `--geoCache` | String | user cache | Directory for generated per-tile MODIS sinusoidal geolocation |
 | `--vegIndices` | Flag | false | Compute vegetation indices (EVI, NDVI, NIRv, NDWI) |
 | `--keepGoing` | Flag | false | Continue after per-file processing errors |
+| `--noProgress` | Flag | false | Don't draw progress bars. By default they're drawn only when stderr is a terminal |
 
 #### Example
 

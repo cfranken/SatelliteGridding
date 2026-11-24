@@ -43,6 +43,12 @@ using KernelAbstractions
 using Atomix: @atomic
 using Libdl
 
+# Progress bars are drawn on stderr only when `progress` is true: by default, only when stderr
+# is a terminal (the `progress` keyword of `grid_l2` and `grid_center`). Redirected to a file or
+# a pipe, every redraw would become new lines.
+_default_progress() = stderr isa Base.TTY
+_progress_bar(n, desc, progress::Bool) = Progress(n; desc=desc, enabled=progress)
+
 include("types.jl")
 include("grid_spec.jl")
 include("cubed_sphere.jl")

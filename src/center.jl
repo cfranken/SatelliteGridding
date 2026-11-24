@@ -13,6 +13,9 @@ MODIS-style data where each pixel maps to exactly one grid cell.
 - `outfile::String="gridded_output.nc"`: Output file path
 - `keep_going::Bool=false`: Continue after per-file errors. By default, the
   first file error stops the run.
+- `progress::Bool=stderr isa Base.TTY`: Draw progress bars (on stderr). By default they're
+  drawn only when stderr is a terminal: redirected to a file or a pipe, as in batch jobs, every
+  redraw would become new lines.
 """
 function grid_center(config::DataSourceConfig, grid_spec::GridSpec{T}, time_spec::TimeSpec;
                      geo_table::Union{Nothing,String}=nothing,
@@ -22,6 +25,7 @@ function grid_center(config::DataSourceConfig, grid_spec::GridSpec{T}, time_spec
                      compute_std::Bool=false,
                      outfile::String="gridded_output.nc",
                      keep_going::Bool=false,
+                     progress::Bool=_default_progress(),
                      command::Union{Nothing,String}=nothing) where {T}
 
     output_options = _output_options(config.options)
@@ -71,7 +75,7 @@ function grid_center(config::DataSourceConfig, grid_spec::GridSpec{T}, time_spec
         grid_data = zeros(T, n_lon, n_lat, n_total)
         grid_weights = zeros(T, n_lon, n_lat)
 
-        p_time = Progress(n_times, desc="Time steps: ")
+        p_time = _progress_bar(n_times, "Time steps: ", progress)
 
         # Per-tile cache: when consecutive files share a tile (file sort puts
         # same-tile granules adjacent), `lat_in`/`lon_in` come back as the
@@ -94,7 +98,7 @@ function grid_center(config::DataSourceConfig, grid_spec::GridSpec{T}, time_spec
             files = sort_files_for_provider(provider, files)
             total_files += length(files)
 
-            p_files = Progress(length(files), desc="  Files: ")
+            p_files = _progress_bar(length(files), "  Files: ", progress)
 
             for filepath in files
                 try
