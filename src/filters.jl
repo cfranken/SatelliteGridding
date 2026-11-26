@@ -13,9 +13,11 @@ end
 Apply spatial bounding box and quality filters, returning indices of pixels that pass
 all criteria.
 
-The spatial filter requires all 4 corners to be within the grid bounds and the footprint
-to not cross the dateline (lon span < 50°). Quality filters from `config.filters` are
-applied as additional criteria.
+The spatial filter requires all four footprint corners to lie strictly inside
+`(lat_min, lat_max) × (lon_min, lon_max)` and the footprint not to cross the dateline
+(`lon span < 50°`); footprints with any corner on or outside the domain boundary are
+excluded before accumulation. Quality filters from `config.filters` are applied as
+additional criteria.
 """
 function apply_filters(dataset, config::DataSourceConfig,
                        lat_bounds::AbstractMatrix, lon_bounds::AbstractMatrix,

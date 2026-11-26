@@ -140,9 +140,13 @@ end
                              n_lon, n_lat, n_oversample)
 
 Compute sampled per-cell weights for one circular or near-circular footprint in
-fractional grid-index coordinates. The four coordinates define the footprint
-bounding box or edge points. In grid-index space the sampled shape may be an
-ellipse when the output grid has unequal latitude and longitude resolutions.
+fractional grid-index coordinates. Symmetric latitude and longitude radii are
+inferred from the farthest corner (`max |corner - center|` along each axis;
+`≲ 0.1%` edge weight bias for GOSAT-like viewing geometry). In grid-index space
+the sampled shape may be an ellipse when the output grid has unequal latitude
+and longitude resolutions. Sub-samples outside `1..n_lon × 1..n_lat` are dropped
+without renormalizing remaining weights so boundary-cell weights reflect true
+fractional footprint overlap.
 """
 function circle_footprint_weights(center_lat, center_lon, lat_corners, lon_corners;
                                   n_lon::Integer, n_lat::Integer,

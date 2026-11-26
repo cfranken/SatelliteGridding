@@ -162,10 +162,13 @@ SubpixelGridding(; n_oversample=nothing) =
     CircularFootprintGridding(; n_oversample=nothing)
 
 Footprint-aware gridding for circular or near-circular footprints described by
-a center coordinate and four bounding coordinates. The implementation samples an
-`n × n` grid over the footprint bounding box and keeps points inside the inferred
-circle or ellipse. An explicit count must be in `1:1024`. `nothing` keeps the
-existing automatic oversampling heuristic.
+a center coordinate and four bounding coordinates (or a radius). Symmetric
+latitude and longitude radii are inferred from the farthest corner
+(`max |corner - center|` along each axis; `≲ 0.1%` edge weight bias for
+GOSAT-like viewing geometry), and an `n × n` grid over the bounding box is
+masked to the inferred circle or ellipse. Out-of-grid sub-samples are dropped
+without renormalizing remaining weights. An explicit count must be in `1:1024`;
+`nothing` keeps the automatic oversampling heuristic.
 """
 struct CircularFootprintGridding <: AbstractGriddingMethod
     n_oversample::Union{Nothing,Int}

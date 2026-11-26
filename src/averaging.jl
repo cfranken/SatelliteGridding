@@ -1,7 +1,7 @@
 """
     accumulate_footprint!(grid_data, grid_std, grid_weights, compute_std,
                           lat_idx, lon_idx, values, n_pixels, n_vars, n_oversample,
-                          grid_spec, points_buf, ix_buf, iy_buf,
+                          points_buf, ix_buf, iy_buf,
                           lats0_buf, lons0_buf, lats1_buf, lons1_buf)
 
 Accumulate a batch of satellite observations into the output grid using footprint-aware
@@ -13,6 +13,11 @@ For each pixel:
 - **Oversample path**: If the footprint spans multiple cells, it is subdivided into
   `n_oversample × n_oversample` sub-pixels. Each sub-pixel contributes weight `1/n²`
   to whichever grid cell it falls in.
+
+Sub-pixels (or single-cell footprints) that fall outside `1..n_lon × 1..n_lat` are
+dropped without renormalizing remaining weights so boundary-cell weights reflect true
+fractional footprint overlap and remain domain-invariant. On global rectangular grids,
+samples beyond `±180°` longitude or beyond the poles are dropped rather than wrapped.
 
 The Welford algorithm maintains a running mean and sum-of-squared-deviations (M2),
 enabling numerically stable computation of mean and variance in a single pass.
@@ -43,6 +48,8 @@ function accumulate_footprint!(grid_data::AbstractArray{T,3},
                                lons0_buf::AbstractVector,
                                lats1_buf::AbstractVector,
                                lons1_buf::AbstractVector) where {T}
+    n_lon, n_lat = size(grid_weights)
+
     # Compute grid-cell indices for all 4 corners
     ilon = floor.(Int32, lon_idx)
     ilat = floor.(Int32, lat_idx)
@@ -59,8 +66,12 @@ function accumulate_footprint!(grid_data::AbstractArray{T,3},
     @inbounds for i in 1:n_pixels
         if (dim_lat[i] == 0) & (dim_lon[i] == 0)
             # Fast path: all corners in one cell
-            _welford_update!(grid_data, grid_std, grid_weights, compute_std,
-                             ilon[i, 1], ilat[i, 1], values, i, n_vars, T(1))
+            col = ilon[i, 1]
+            row = ilat[i, 1]
+            if 1 <= col <= n_lon && 1 <= row <= n_lat
+                _welford_update!(grid_data, grid_std, grid_weights, compute_std,
+                                 col, row, values, i, n_vars, T(1))
+            end
         elseif dist_lon[i] < n_oversample
             # Oversample path: footprint spans multiple cells
             compute_subpixels!(points_buf, lat_idx[i, :], lon_idx[i, :], n_oversample,
@@ -68,8 +79,12 @@ function accumulate_footprint!(grid_data::AbstractArray{T,3},
             floor_indices!(ix_buf, iy_buf, points_buf)
 
             @inbounds for j in eachindex(ix_buf)
-                _welford_update!(grid_data, grid_std, grid_weights, compute_std,
-                                 iy_buf[j], ix_buf[j], values, i, n_vars, fac)
+                col = iy_buf[j]
+                row = ix_buf[j]
+                if 1 <= col <= n_lon && 1 <= row <= n_lat
+                    _welford_update!(grid_data, grid_std, grid_weights, compute_std,
+                                     col, row, values, i, n_vars, fac)
+                end
             end
         end
     end
@@ -285,9 +300,17 @@ end
                                    lat_idx, lon_idx, values,
                                    n_pixels, n_vars, n_oversample)
 
-Accumulate observations with circular or near-circular footprints. The center
-coordinate gives the footprint center and the four coordinates define its
-bounding box or edge points. Sampling is done in fractional grid-index space.
+Accumulate observations with circular or near-circular footprints. Symmetric
+latitude and longitude radii are inferred from the farthest corner
+(`max |corner - center|` along each axis; `≲ 0.1%` edge weight bias for
+GOSAT-like viewing geometry), and sampling is performed in `Float64` fractional
+grid-index space.
+
+Sub-samples outside `1..n_lon × 1..n_lat` are dropped without renormalizing the
+per-footprint weight `1 / inside_count`, keeping boundary-cell weights equal to
+true fractional footprint overlap so regional boundary means remain
+domain-invariant. On global rectangular grids, samples beyond `±180°` longitude
+or beyond the poles are dropped rather than wrapped.
 """
 function accumulate_circular_footprint!(grid_data::AbstractArray{T,3},
                                         grid_std::Union{Nothing,AbstractArray{T,3}},
@@ -378,15 +401,24 @@ end
     accumulate_batch!(backend, grid_sum, grid_weights,
                       lat_corners, lon_corners, values, n, n_vars)
 
-Accumulate observations into the grid using the KA kernel pipeline.
-This function works identically on CPU and GPU backends.
+Accumulate quadrilateral observations into the grid using the KA kernel pipeline.
+This function works on KA CPU, CUDA, Metal, and other compatible backends.
 
 The pipeline:
-1. Sort corners into CCW order
-2. Compute n×n subpixel grid indices per footprint
-3. Scatter-accumulate weighted sums into grid cells (using atomics)
+1. Sort corners into CCW order in the input coordinate type (or `Float32` on Metal)
+2. Compute `n×n` subpixel grid indices per footprint, mirroring
+   [`accumulate_footprint!`](@ref) (`compute_subpixels!` / `floor_indices!`,
+   rounding sub-sample positions to the accumulator type `T` before `floor` on
+   backends with `Float64` support, and executing in `Float32` on Metal)
+3. Scatter-accumulate weighted sums into grid cells (using atomics on GPU)
 
-After processing all files, call `finalize_mean!` to convert sums to means.
+Sub-pixels outside `1..n_lon × 1..n_lat` are dropped without renormalizing
+remaining weights (`1/n²`) so boundary-cell weights reflect true fractional
+footprint overlap and regional boundary means remain domain-invariant. On global
+rectangular grids, samples beyond `±180°` longitude or beyond the poles are
+dropped rather than wrapped.
+
+After processing all files, call [`finalize_mean!`](@ref) to convert sums to means.
 
 For spherical KA gridding with `compute_std=true`, the fused spherical
 kernel provides two passes. The first accumulates shifted sums and weights
@@ -395,11 +427,12 @@ linear and squared deviations.
 
 # Arguments
 - `backend`: KernelAbstractions backend (`CPU()`, `CUDABackend()`, `MetalBackend()`, etc.)
-- `grid_sum`: (n_lon, n_lat, n_vars) — weighted sum accumulator
-- `grid_weights`: (n_lon, n_lat) — weight accumulator
-- `lat_corners`, `lon_corners`: (n_fp, 4) — fractional grid indices of corners
-- `values`: (n_fp, n_vars) — observation values
+- `grid_sum`: `(n_lon, n_lat, n_vars)` — weighted sum accumulator
+- `grid_weights`: `(n_lon, n_lat)` — weight accumulator
+- `lat_corners`, `lon_corners`: `(n_fp, 4)` — fractional grid indices of corners
+- `values`: `(n_fp, n_vars)` — observation values
 - `n`: oversampling factor
+- `n_vars`: number of variables being gridded
 """
 function accumulate_batch!(backend,
                            grid_sum::AbstractArray{T,3},
@@ -408,32 +441,55 @@ function accumulate_batch!(backend,
                            lon_corners::AbstractMatrix,
                            values::AbstractMatrix,
                            n::Int, n_vars::Int) where {T}
+    _accumulate_batch!(backend, grid_sum, grid_weights,
+                       lat_corners, lon_corners, values, n, n_vars;
+                       sort_corners=true)
+end
+
+# Private entry for L2 callers whose corners are already CCW-sorted in degrees
+# (`_read_l2_geometry`). Skipping a second sort on fractional indices prevents
+# Float32 rounding from rotating the starting corner relative to sequential gridding.
+function _accumulate_sorted_batch!(backend,
+                                   grid_sum::AbstractArray{T,3},
+                                   grid_weights::AbstractMatrix{T},
+                                   lat_corners::AbstractMatrix,
+                                   lon_corners::AbstractMatrix,
+                                   values::AbstractMatrix,
+                                   n::Int, n_vars::Int) where {T}
+    _accumulate_batch!(backend, grid_sum, grid_weights,
+                       lat_corners, lon_corners, values, n, n_vars;
+                       sort_corners=false)
+end
+
+function _accumulate_batch!(backend,
+                            grid_sum::AbstractArray{T,3},
+                            grid_weights::AbstractMatrix{T},
+                            lat_corners::AbstractMatrix,
+                            lon_corners::AbstractMatrix,
+                            values::AbstractMatrix,
+                            n::Int, n_vars::Int;
+                            sort_corners::Bool) where {T}
     n_fp = size(lat_corners, 1)
     n_fp == 0 && return nothing
 
-    # Transfer inputs to backend (no-op for CPU — arrays are already there)
-    if backend isa CPU
-        lat_c = lat_corners
-        lon_c = lon_corners
-        val = values
-    else
-        lat_c = KernelAbstractions.allocate(backend, T, size(lat_corners))
-        copyto!(lat_c, lat_corners)
-        lon_c = KernelAbstractions.allocate(backend, T, size(lon_corners))
-        copyto!(lon_c, lon_corners)
-        val = KernelAbstractions.allocate(backend, eltype(values), size(values))
-        copyto!(val, values)
-    end
+    # Transfer inputs to backend (no-op for CPU — preserves element types)
+    lat_c = _to_backend_array(backend, lat_corners)
+    lon_c = _to_backend_array(backend, lon_corners)
+    val = _to_backend_array(backend, values)
 
     # Step 1: Sort corners into CCW order (KA kernel — parallel)
-    sort_corners_ccw_ka!(backend, lat_c, lon_c)
+    if sort_corners
+        sort_corners_ccw_ka!(backend, lat_c, lon_c)
+    end
 
     # Step 2: Compute subpixel indices (KA kernel — parallel)
+    n_lon, n_lat = size(grid_weights)
     nsq = n * n
     ix = KernelAbstractions.zeros(backend, Int32, n_fp, nsq)
     iy = KernelAbstractions.zeros(backend, Int32, n_fp, nsq)
     skip = KernelAbstractions.zeros(backend, Int32, n_fp)
-    compute_footprint_indices_ka!(backend, ix, iy, skip, lat_c, lon_c, n)
+    _compute_footprint_indices_ka!(backend, ix, iy, skip, lat_c, lon_c, n,
+                                   n_lon, n_lat, _ka_supported_float(backend, T))
 
     # Step 3: Scatter-accumulate
     # CPU: sequential scatter (no atomics needed, better cache locality)
@@ -453,8 +509,20 @@ end
                                lat_corners, lon_corners, values, n, n_vars)
 
 Accumulate circular or near-circular footprints using the KA pipeline. This is
-the sum-based backend counterpart to `accumulate_circular_footprint!` and works
-with KA CPU, CUDA, Metal, and other compatible backends.
+the sum-based backend counterpart to [`accumulate_circular_footprint!`](@ref)
+and works with KA CPU, CUDA, Metal, and other compatible backends.
+
+Symmetric latitude and longitude radii are inferred from the farthest corner
+(`max |corner - center|` along each axis; `≲ 0.1%` edge weight bias for
+GOSAT-like viewing geometry). On backends that support double precision
+(KA CPU, CUDA), radii and sub-sample positions are promoted to `Float64` inside
+the index kernel to mirror `accumulate_circular_footprint!`; on Metal, where
+`Float64` is unavailable, they execute in `Float32` and boundary cell
+assignments may differ from the sequential path. Sub-samples outside
+`1..n_lon × 1..n_lat` are dropped without renormalizing `1 / inside_count` so
+boundary-cell weights reflect true fractional footprint overlap and remain
+domain-invariant. On global rectangular grids, samples beyond `±180°` longitude
+or beyond the poles are dropped rather than wrapped.
 """
 function accumulate_circular_batch!(backend,
                                     grid_sum::AbstractArray{T,3},
@@ -468,32 +536,21 @@ function accumulate_circular_batch!(backend,
     n_fp = size(lat_corners, 1)
     n_fp == 0 && return nothing
 
-    if backend isa CPU
-        clat = center_lat
-        clon = center_lon
-        lat_c = lat_corners
-        lon_c = lon_corners
-        val = values
-    else
-        clat = KernelAbstractions.allocate(backend, T, size(center_lat))
-        copyto!(clat, center_lat)
-        clon = KernelAbstractions.allocate(backend, T, size(center_lon))
-        copyto!(clon, center_lon)
-        lat_c = KernelAbstractions.allocate(backend, T, size(lat_corners))
-        copyto!(lat_c, lat_corners)
-        lon_c = KernelAbstractions.allocate(backend, T, size(lon_corners))
-        copyto!(lon_c, lon_corners)
-        val = KernelAbstractions.allocate(backend, eltype(values), size(values))
-        copyto!(val, values)
-    end
+    clat = _to_backend_array(backend, center_lat)
+    clon = _to_backend_array(backend, center_lon)
+    lat_c = _to_backend_array(backend, lat_corners)
+    lon_c = _to_backend_array(backend, lon_corners)
+    val = _to_backend_array(backend, values)
 
+    n_lon, n_lat = size(grid_weights)
     nsq = n * n
     ix = KernelAbstractions.zeros(backend, Int32, n_fp, nsq)
     iy = KernelAbstractions.zeros(backend, Int32, n_fp, nsq)
     inside_count = KernelAbstractions.zeros(backend, Int32, n_fp)
     skip = KernelAbstractions.zeros(backend, Int32, n_fp)
     compute_circular_footprint_indices_ka!(backend, ix, iy, inside_count, skip,
-                                           clat, clon, lat_c, lon_c, n)
+                                           clat, clon, lat_c, lon_c, n;
+                                           n_lon=n_lon, n_lat=n_lat)
 
     if backend isa CPU
         scatter_accumulate_circular!(grid_sum, grid_weights, ix, iy, inside_count,

@@ -69,8 +69,7 @@ function _process_l2_file_ka!(filepath::String, config::DataSourceConfig,
                               pass=nothing) where {T}
     _with_l2_observations(filepath, config, spec, method, nc_vars, fill_attrib,
                           progress; metadata=metadata) do observations
-        ilat, ilon, ilat_center, ilon_center =
-            map(indices -> T.(indices), _rectangular_indices(observations, spec))
+        ilat, ilon, ilat_center, ilon_center = _rectangular_indices(observations, spec)
         n = _l2_oversampling(ilat, ilon, n_override)
         values = observations.values
         n_vars = size(values, 2)
@@ -79,8 +78,8 @@ function _process_l2_file_ka!(filepath::String, config::DataSourceConfig,
                                        ilat_center, ilon_center, ilat, ilon,
                                        values, n, n_vars)
         else
-            accumulate_batch!(backend, grid_sum, grid_weights, ilat, ilon,
-                              values, n, n_vars)
+            _accumulate_sorted_batch!(backend, grid_sum, grid_weights, ilat, ilon,
+                                      values, n, n_vars)
         end
     end
     nothing
