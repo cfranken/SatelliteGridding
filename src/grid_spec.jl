@@ -48,7 +48,7 @@ abstract type AbstractGridSpec{T<:AbstractFloat} end
 """
     AbstractSphericalGridSpec{T} <: AbstractGridSpec{T}
 
-Whole-sphere grid for sequential quadrilateral footprint gridding.
+Whole-sphere grid for quadrilateral footprint gridding.
 Implement these methods to use a new spherical grid with [`grid`](@ref).
 
 - `_spherical_cell(spec, lat, lon)` locates a point in degrees and returns
@@ -65,10 +65,26 @@ Optionally specialize `_spherical_subdivision(spec)`. The default
 space. `Val(:unit_vectors)` samples every footprint in 3-D and can be used
 with a fixed `n_oversample` (four per side by default). HEALPix also provides
 an adaptive sample count.
+
+To opt into KernelAbstractions, define `_spherical_subdivision(spec) = Val(:unit_vectors)`
+so the sequential and device paths both use unit-vector subdivision. Implement
+`_device_locator(spec)` to return an isbits locator and
+`locate(locator, x, y, z)` to return a one-based linear accumulator index
+for a normalized unit vector. The locator must accept the
+chosen geometry float type and use allocation-free device operations.
+Optionally implement `_device_cell_spacing(locator, F)` to supply the angular
+grid spacing for adaptive subdivision. The default uses four samples per side.
 """
 abstract type AbstractSphericalGridSpec{T<:AbstractFloat} <: AbstractGridSpec{T} end
 
 function _spherical_cell end
+function locate end
+
+_device_locator(::AbstractSphericalGridSpec) = nothing
+_device_cell_spacing(locator, ::Type{F}) where {F} = F(Inf)
+
+# All device radicands are constructed from finite, nonnegative terms.
+@inline _spherical_sqrt(x::Union{Float32,Float64}) = Core.Intrinsics.sqrt_llvm(x)
 
 _spherical_subdivision(::AbstractSphericalGridSpec) = Val(:lonlat)
 _spherical_subpixel_type(::AbstractSphericalGridSpec) = Float64

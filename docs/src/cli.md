@@ -41,10 +41,12 @@ julia --project=. bin/grid.jl l2 [options]
 | `--oversample_temporal` | Float32 | 1.0 | Temporal oversampling factor |
 | `--sample_step` | Int | 0 | Rolling mean: snapshot spacing in days (>0 enables rolling mode) |
 | `--window_days` | Int | 0 | Rolling mean: averaging half-width N in days (window = center ± N) |
-| `--nOversample` | Int | 0 (auto) | Sub-pixel factor (0 = auto-compute) |
+| `--nOversample` | Int | Automatic | Fixed sub-pixel factor from 1 to 1024 |
 | `--footprint` | String | `quad` | Footprint geometry: `quad` or `circle` |
 | `--compSTD` | Flag | false | Compute standard deviation |
 | `--backend` | String | `sequential` | Compute backend: `sequential`, `cpu`, `cuda`, or `metal` |
+| `--geometry-precision` | String | Backend default | HEALPix KA geometry precision, `float32` or `float64` |
+| `--accumulator-precision` | String | `float64` on CUDA and KA CPU, `float32` on Metal | HEALPix KA precision for weights, sums, deviations, and rolling moments. Metal rejects `float64`. |
 | `--keepGoing` | Flag | false | Continue after per-file processing errors |
 | `--noProgress` | Flag | false | Don't draw progress bars. By default they're drawn only when stderr is a terminal |
 
@@ -118,8 +120,8 @@ not re-grid the same data. The `time` coordinate holds the window center, and
 every output also carries `window_start`/`window_end` recording the exact
 averaging interval (these clip naturally at the data edges). Rolling mode runs on
 `--backend sequential` on all grids. For rectangular grids,
-`--backend cpu`/`cuda`/`metal` also support the mean. `--compSTD` requires
-the sequential CPU path.
+`--backend cpu`/`cuda`/`metal` also support the mean. For HEALPix, all
+three KA backends support both the mean and `--compSTD`.
 
 TROPOMI SIF onto a GEOS/GCHP C360 cubed sphere (sequential CPU only):
 
@@ -201,5 +203,6 @@ julia --project=. bin/generate_modis_geolocation.jl \
 | KA Metal | `--backend metal` | KernelAbstractions Metal backend. Requires Metal.jl on macOS/Apple GPU. |
 
 The KernelAbstractions backends use sum-based accumulation (mean = sum/weight) instead of
-Welford's incremental mean. This is fully parallelizable but does not support `--compSTD`
-in a single pass. Standard deviation with KA backends requires a two-pass approach.
+Welford's incremental mean. HEALPix supports `--compSTD` through two passes
+on KA backends. For rectangular and cubed-sphere grids, use `--backend
+sequential` to compute standard deviation.

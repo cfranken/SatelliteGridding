@@ -59,6 +59,7 @@ accumulator_shape
 ```@docs
 HEALPixGridSpec
 ang2pix_nest
+vec2pix_nest
 pix2ang_nest
 healpix_corners
 nside2npix

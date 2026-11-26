@@ -261,10 +261,11 @@ function create_output_dataset(outfile::String, grid_spec::AbstractGridSpec,
                                time_long_name::AbstractString="Time (UTC), start of interval",
                                command::Union{Nothing,String}=nothing,
                                filters::Vector{FilterRule}=FilterRule[],
-                               output_options::NetCDFOptions=NetCDFOptions())
+                               output_options::NetCDFOptions=NetCDFOptions(),
+                               spherical_ka_std::Bool=false)
     _create_output_dataset(outfile, grid_spec, n_times, grid_vars, compute_std;
         window_bounds=window_bounds, time_long_name=time_long_name,
-        command=command, filters=filters, output_options=output_options)
+        command=command, filters=filters, output_options=output_options, spherical_ka_std)
 end
 
 _output_title(::AbstractGridSpec) = "Gridded satellite data"
@@ -280,7 +281,8 @@ _weight_long_name(::AbstractGridSpec) = "Number of pixels in average"
 _weight_long_name(::HEALPixGridSpec) = "Sum of fractional footprint overlap weights"
 
 function _create_output_dataset(outfile, spec, n_times, grid_vars, compute_std;
-                                 window_bounds, time_long_name, command, filters, output_options)
+                                 window_bounds, time_long_name, command, filters, output_options,
+                                 spherical_ka_std)
     storage = _storage_kwargs(output_options, spec)
     _with_output_setup(outfile) do ds
         write_coordinates!(ds, spec)
@@ -297,9 +299,15 @@ function _create_output_dataset(outfile, spec, n_times, grid_vars, compute_std;
 
         dims = (payload_dims(spec)..., "time")
         attributes = _payload_attributes(spec)
+        rolling_comment = spherical_ka_std ?
+            "Rolling windows combine centered daily moments. A non-finite variance or variance input in accumulator precision is written as fill." :
+            "Rolling windows reconstruct variance from raw moments, where Float32 cancellation can produce a small nonzero value."
+        single_comment = spherical_ka_std ?
+            "Zero for a cell touched by a single footprint in tiled mode when its moments are finite. " :
+            "Zero for a cell touched by a single footprint in tiled mode. "
         std_attributes = vcat(attributes, [
             "long_name" => "Weighted population standard deviation",
-            "comment" => "sqrt(M2/n), where M2 is the weighted sum of squared deviations and n is the sum of weights. Computed without Bessel correction. Zero for a cell touched by a single footprint in tiled mode. Rolling windows reconstruct variance from raw moments, where Float32 cancellation can produce a small nonzero value.",
+            "comment" => "sqrt(M2/n), where M2 is the weighted sum of squared deviations and n is the sum of weights. Computed without Bessel correction. " * single_comment * rolling_comment,
         ])
         nc_vars = Dict{String,Any}()
         for key in keys(grid_vars)

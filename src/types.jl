@@ -132,10 +132,13 @@ Use [`SubpixelGridding`](@ref) for footprint-aware oversampling,
 """
 abstract type AbstractGriddingMethod end
 
+"""Largest explicit footprint oversampling factor per side (1024)."""
+const N_OVERRIDE_MAX = 1024
+
 _validate_n_oversample(::Nothing) = nothing
 function _validate_n_oversample(n)
-    n isa Integer && !(n isa Bool) && 0 < n <= typemax(Int) ||
-        throw(ArgumentError("n_oversample must be a positive integer or nothing"))
+    n isa Integer && !(n isa Bool) && 0 < n <= N_OVERRIDE_MAX ||
+        throw(ArgumentError("n_oversample must be an integer in 1:$N_OVERRIDE_MAX or nothing"))
     return Int(n)
 end
 
@@ -143,7 +146,7 @@ end
     SubpixelGridding(; n_oversample=nothing)
 
 Footprint-aware gridding by sampling an `n × n` grid of subpoints inside each
-quadrilateral footprint. Set `n_oversample` to a positive integer to use a fixed
+quadrilateral footprint. Set `n_oversample` to an integer in `1:1024` to use a fixed
 sample count, or leave it as `nothing` to use the grid's default.
 """
 struct SubpixelGridding <: AbstractGriddingMethod
@@ -161,13 +164,16 @@ SubpixelGridding(; n_oversample=nothing) =
 Footprint-aware gridding for circular or near-circular footprints described by
 a center coordinate and four bounding coordinates. The implementation samples an
 `n × n` grid over the footprint bounding box and keeps points inside the inferred
-circle or ellipse. `nothing` keeps the existing automatic oversampling heuristic.
+circle or ellipse. An explicit count must be in `1:1024`. `nothing` keeps the
+existing automatic oversampling heuristic.
 """
 struct CircularFootprintGridding <: AbstractGriddingMethod
     n_oversample::Union{Nothing,Int}
+
+    CircularFootprintGridding(n_oversample) = new(_validate_n_oversample(n_oversample))
 end
 
-CircularFootprintGridding(; n_oversample::Union{Nothing,Int}=nothing) =
+CircularFootprintGridding(; n_oversample=nothing) =
     CircularFootprintGridding(n_oversample)
 
 """

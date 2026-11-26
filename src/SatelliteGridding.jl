@@ -66,6 +66,7 @@ include("filters.jl")
 include("oversampling.jl")
 include("geometry.jl")
 include("averaging.jl")
+include("spherical_ka.jl")
 include("vegetation.jl")
 include("l2_input.jl")
 include("l2_processing.jl")
@@ -84,7 +85,7 @@ export CubedSphereGridSpec, CubedSphereDefinition,
        EquiangularGnomonic, GMAOEqualDistanceGnomonic,
        AngularMidpointCenter, FourCornerNormalizedCenter,
        lonlat_to_panel_xy, grid_shape, accumulator_shape
-export HEALPixGridSpec, ang2pix_nest, pix2ang_nest, healpix_corners, nside2npix, healpix_parent
+export HEALPixGridSpec, ang2pix_nest, vec2pix_nest, pix2ang_nest, healpix_corners, nside2npix, healpix_parent
 export AbstractGriddingMethod, SubpixelGridding, CircularFootprintGridding,
        CenterPointGridding, ExactIntersectionGridding
 export supported_backend_names, backend_help_lines, resolve_backend,

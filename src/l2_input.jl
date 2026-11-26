@@ -173,8 +173,9 @@ function _validate_l2_geolocation!(valid, ::AbstractSphericalGridSpec, lat, lon,
 end
 
 # Use the same input preparation for rectangular and spherical grids and KA backends.
-function _with_l2_observations(f, filepath, config, spec, method,
-                               nc_vars, fill_attrib, progress; metadata=nothing)
+function _with_l2_observations(f, filepath, config, spec::AbstractGridSpec{T}, method,
+                               nc_vars, fill_attrib, progress;
+                               metadata=nothing, value_type=T) where {T}
     Dataset(filepath) do fin
         _capture_input_metadata!(metadata, fin)
         if fill_attrib && nc_vars !== nothing
@@ -182,7 +183,7 @@ function _with_l2_observations(f, filepath, config, spec, method,
                              "variable_attributes", DEFAULT_VARIABLE_ATTRIBUTES)
             copy_variable_attributes!(nc_vars, fin, config.grid_vars; attributes)
         end
-        observations = _prepare_l2_observations(fin, config, spec, method, progress, filepath)
+        observations = _prepare_l2_observations(fin, config, spec, method, progress, filepath; value_type)
         observations === nothing || f(observations)
     end
     nothing
@@ -193,7 +194,7 @@ _l2_file_in_bounds(spec::RectangularGridSpec, lat, lon) =
     any(i -> in_bounds(spec, lat[i], lon[i]), eachindex(lat, lon))
 
 function _prepare_l2_observations(fin, config, spec::AbstractGridSpec{T}, method,
-                                  progress, filepath) where {T}
+                                  progress, filepath; value_type=T) where {T}
     lat_center, lon_center, lat_bounds, lon_bounds = _read_l2_geometry(fin, config, method, spec)
     if !_l2_file_in_bounds(spec, lat_center, lon_center)
         ProgressMeter.next!(progress; showvalues=[(:File, filepath), (:N_pixels, 0)])
@@ -205,9 +206,9 @@ function _prepare_l2_observations(fin, config, spec::AbstractGridSpec{T}, method
 
     # Materialize only selected rows in the shared matrix, rather than an
     # all-soundings × all-variables matrix followed by another full copy.
-    values = Matrix{T}(undef, length(idx), length(config.grid_vars))
+    values = Matrix{value_type}(undef, length(idx), length(config.grid_vars))
     for (column, path) in enumerate(Base.values(config.grid_vars))
-        data = _read_l2_values(fin, path, T)
+        data = _read_l2_values(fin, path, value_type)
         length(data) == size(lat_bounds, 1) ||
             throw(DimensionMismatch("Variable '$path' has $(length(data)) values; expected $(size(lat_bounds, 1)) soundings"))
         values[:, column] = data[idx]

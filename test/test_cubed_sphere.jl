@@ -243,8 +243,10 @@ end
                                   "X_YYYY-MM-DD.nc", "/tmp/")
         time_spec = TimeSpec(DateTime("2020-01-01"), DateTime("2020-01-01"), Dates.Day(1))
         # GPU/KA backend not supported on the cube yet.
-        @test_throws ErrorException grid(config, spec, time_spec, SubpixelGridding();
-                                         backend=CPU())
+        @test_throws "sequential CPU" grid(config, spec, time_spec, SubpixelGridding();
+                                          backend=CPU())
+        @test_throws "sequential CPU" resolve_backend("cuda"; grid_spec=spec)
+        @test_throws "sequential CPU" resolve_backend("metal"; grid_spec=spec)
         # Circular footprints not supported on the cube yet.
         @test_throws ErrorException grid(config, spec, time_spec,
                                          CircularFootprintGridding())

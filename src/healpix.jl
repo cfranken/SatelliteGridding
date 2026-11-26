@@ -4,7 +4,9 @@ const _HEALPIX_RING_OFFSETS = (2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4)
 const _HEALPIX_LONGITUDE_OFFSETS = (1, 3, 5, 7, 0, 2, 4, 6, 1, 3, 5, 7)
 const _HEALPIX_FACE_COUNT = length(_HEALPIX_RING_OFFSETS)
 const _HEALPIX_TRANSITION_Z = 2 / 3
-const _HEALPIX_POLAR_COLATITUDE = 0.01  # radians, threshold for stable polar distance
+const _HEALPIX_POLAR_COLATITUDE = 0.01  # healpy's angular projection crossover, in radians
+# The legacy angular projection loses precision near its polar crossover.
+const _HEALPIX_TIE_TOLERANCE = 128eps(Float64)
 # Largest power of two for which the cell count fits in Int64.
 const _HEALPIX_MAX_NSIDE = Int64(1) << 29
 const _HEALPIX_EARTH_RADIUS = 6.371e6  # metres
@@ -47,7 +49,7 @@ const _HEALPIX_MORTON_MASKS = (0x5555555555555555, 0x3333333333333333,
 
 @inline function _healpix_spread_bits(x::Int64)
     m1, m2, m4, m8, m16, _ = _HEALPIX_MORTON_MASKS
-    bits = UInt64(x)
+    bits = reinterpret(UInt64, x)
     bits = (bits | (bits << 16)) & m16
     bits = (bits | (bits << 8)) & m8
     bits = (bits | (bits << 4)) & m4
@@ -81,22 +83,127 @@ end
 @inline function _ang2pix_nest(nside::Int64, level::Int, lon::Float64, lat::Float64)
     isfinite(lon) && -90 <= lat <= 90 ||
         throw(ArgumentError("HEALPix requires finite longitude and latitude in [-90, 90]"))
+    return _vec2pix_nest(nside, level, _healpix_angular_projection(nside, lon, lat)...)
+end
 
-    # Compute z from colatitude and longitude in quadrants using healpy's
-    # angular convention. Keep the operation order at exact pixel edges.
+@inline function _healpix_angular_projection(nside, lon, lat)
+    # Preserve healpy's operation order at exact angular pixel edges, including
+    # the longitude-dependent face at an angular pole.
     theta = (pi / 2) - deg2rad(lat)
     z = cos(theta)
     za = abs(z)
     quadrant = deg2rad(_canonical_longitude(lon)) * (2 / pi)
     quadrant = quadrant == 4.0 ? 0.0 : quadrant
+    scale = if za <= _HEALPIX_TRANSITION_Z
+        0.0
+    elseif theta < _HEALPIX_POLAR_COLATITUDE || theta > pi - _HEALPIX_POLAR_COLATITUDE
+        nside * sin(theta) / _spherical_sqrt((1 + za) / 3)
+    else
+        nside * _spherical_sqrt(3 * (1 - za))
+    end
+    return z, quadrant, scale
+end
 
+"""
+    vec2pix_nest(nside, x, y, z) -> Int64
+
+Locate a finite unit vector in zero-based HEALPix NESTED order.
+The components share a precision of Float32 or Float64. At an exact pole
+with zero transverse components the vector convention uses longitude zero.
+Use Float64 for very fine grids. Above roughly `nside = 2^21`, Float32
+pixel errors can exceed one cell.
+"""
+@inline function vec2pix_nest(nside::Integer, x::F, y::F, z::F) where {F<:Union{Float32,Float64}}
+    side = _healpix_nside(nside)
+    return _vec2pix_nest(side, trailing_zeros(side), x, y, z, Val(false))
+end
+
+@inline function _vec2pix_nest(nside::Int64, level::Int, x::Float64, y::Float64,
+                              z::Float64, ::Val{P}) where {P}
+    q = (iszero(x) && iszero(y)) ? 0.0 : atan(y, x) * (2 / pi)
+    quadrant = q < 0.0 ? q + 4.0 : q
+    quadrant = quadrant == 4.0 ? 0.0 : quadrant
+    za = abs(z)
+    scale = za <= _HEALPIX_TRANSITION_Z ? 0.0 :
+        nside * _spherical_sqrt(3.0 * ((x * x + y * y) / (1.0 + za)))
+    if P && _healpix_near_edge(nside, z, quadrant, scale)
+        # The sequential footprint path historically round-tripped through
+        # angular coordinates. Retain its decisions on numerically tied edges.
+        horizontal = hypot(x, y)
+        lon = iszero(horizontal) ? 0.0 : atand(y, x)
+        lat = atand(z, horizontal)
+        return _vec2pix_nest(nside, level, _healpix_angular_projection(nside, lon, lat)...)
+    end
+    return _vec2pix_nest(nside, level, z, quadrant, scale)
+end
+
+@inline function _healpix_quadrant_fraction(x::Float32, y::Float32)
+    # Rotate to the first quadrant using only coordinate swaps and sign flips.
+    if y > 0 && x <= 0
+        quadrant, u, v = 1, y, -x
+    elseif x < 0 && y <= 0
+        quadrant, u, v = 2, -x, -y
+    elseif y < 0
+        quadrant, u, v = 3, -y, x
+    else
+        quadrant, u, v = 0, x, y
+    end
+    fraction = iszero(v) ? 0f0 : min(prevfloat(1f0), atan(v, u) * Float32(2 / pi))
+    return quadrant, fraction
+end
+
+@inline function _vec2pix_nest(nside::Int64, level::Int, x::Float32, y::Float32,
+                              z::Float32, ::Val)
+    quadrant, fraction = _healpix_quadrant_fraction(x, y)
+    za = abs(z)
+    equatorial = za <= Float32(_HEALPIX_TRANSITION_Z)
+    if equatorial
+        # Add whole quadrants and nside/2 in integer space so their magnitude
+        # cannot round away the low bits of the fractional longitude.
+        offset = (quadrant << level) + (nside >> 1)
+        along_lon = Float32(nside) * fraction + Float32(nside & 1) * 0.5f0
+        along_lat = Float32(nside) * (z * 0.75f0)
+        ascending = offset + Base.unsafe_trunc(Int64, floor(along_lon - along_lat))
+        descending = offset + Base.unsafe_trunc(Int64, floor(along_lon + along_lat))
+    else
+        # Resolve polar rings even if Float32 rounds abs(z) to one.
+        scale = Float32(nside) * _spherical_sqrt(3f0 * ((x * x + y * y) / (1f0 + za)))
+        ascending = Base.unsafe_trunc(Int64, fraction * scale)
+        descending = Base.unsafe_trunc(Int64, (1f0 - fraction) * scale)
+    end
+    return _healpix_nest_from_edges(nside, level, z, equatorial, quadrant, ascending, descending)
+end
+
+@inline function _healpix_edges(nside, z::F, quadrant::F, scale::F) where {F}
+    if abs(z) <= F(_HEALPIX_TRANSITION_Z)
+        along_lon = F(nside) * (F(0.5) + quadrant)
+        along_lat = F(nside) * (z * F(0.75))
+        return along_lon - along_lat, along_lon + along_lat
+    end
+    fraction = quadrant - F(min(3, Base.unsafe_trunc(Int64, quadrant)))
+    return fraction * scale, (one(F) - fraction) * scale
+end
+
+@inline function _healpix_near_edge(nside, z, quadrant, scale)
+    tolerance = _HEALPIX_TIE_TOLERANCE * nside
+    abs(abs(z) - _HEALPIX_TRANSITION_Z) <= _HEALPIX_TIE_TOLERANCE && return true
+    a, b = _healpix_edges(nside, z, quadrant, scale)
+    return abs(a - round(a)) <= tolerance || abs(b - round(b)) <= tolerance
+end
+
+@inline function _vec2pix_nest(nside::Int64, level::Int, z::F, quadrant::F, scale::F) where {F}
+    a, b = _healpix_edges(nside, z, quadrant, scale)
+    ascending = Base.unsafe_trunc(Int64, a)
+    descending = Base.unsafe_trunc(Int64, b)
+    face = min(3, Base.unsafe_trunc(Int64, quadrant))
+    return _healpix_nest_from_edges(nside, level, z, abs(z) <= F(_HEALPIX_TRANSITION_Z),
+                                  face, ascending, descending)
+end
+
+@inline function _healpix_nest_from_edges(nside, level, z, equatorial, face, ascending, descending)
     last = nside - 1
-    if za <= _HEALPIX_TRANSITION_Z
+    if equatorial
         # The ascending and descending edge lines form a square grid.
-        along_lon = nside * (0.5 + quadrant)
-        along_lat = nside * (z * 0.75)
-        ascending = trunc(Int64, along_lon - along_lat)
-        descending = trunc(Int64, along_lon + along_lat)
         asc_face = ascending >> level
         desc_face = descending >> level
         # At the longitude wrap, rounding can put an edge on sector 4.
@@ -111,15 +218,8 @@ end
         x = descending & last
         y = last - (ascending & last)
     else
-        face = min(3, trunc(Int64, quadrant))
-        fraction = quadrant - face
-        # Near a pole, sin(theta) avoids cancellation in 1 - abs(z).
-        near_pole = theta < _HEALPIX_POLAR_COLATITUDE ||
-                    theta > pi - _HEALPIX_POLAR_COLATITUDE
-        scale = near_pole ? nside * sin(theta) / sqrt((1 + za) / 3) :
-                           nside * sqrt(3 * (1 - za))
-        ascending = min(last, trunc(Int64, fraction * scale))
-        descending = min(last, trunc(Int64, (1 - fraction) * scale))
+        ascending = min(last, ascending)
+        descending = min(last, descending)
         if z >= 0
             x, y = last - descending, last - ascending
         else
@@ -128,7 +228,7 @@ end
         end
     end
     local_id = _healpix_spread_bits(x) | (_healpix_spread_bits(y) << 1)
-    return (face << (2 * level)) + Int64(local_id)
+    return (face << (2 * level)) + reinterpret(Int64, local_id)
 end
 
 @inline function _healpix_face_xy(level::Int, pix::Int64)
@@ -207,10 +307,18 @@ end
 
 Whole-sphere HEALPix grid in NESTED order with equal solid angle per cell.
 The resolution is
-`nside = 2^level`. Accumulators use `T` and fold the cells into
-`(nside^2, 12)` so linear index `pix + 1` addresses NESTED cell `pix`.
-Coordinates and projections use Float64. Cell centres and optional vertex
-bounds are computed when writing NetCDF.
+`nside = 2^level`. Accumulators fold the cells into `(nside^2, 12)` so linear
+index `pix + 1` addresses NESTED cell `pix`. Sequential accumulators and
+finalized slices use `T`. Select KA geometry and accumulator precision with
+`grid_l2`. Float32 accumulators (used on Metal) can report standard deviations
+below roughly one ulp of the cell mean (`σ/|mean| ≲ 1e-7`) as zero. Use
+Float64 accumulators (the CUDA and KA CPU default) for small relative variability.
+Mean-only KA runs skip refinement. In either accumulator precision `A`, values
+with magnitude below about `eps(A) * abs(reference - value)` can round away
+when shifted by the per-variable reference (`eps(Float64)` ≈ `2e-16`,
+`eps(Float32)` ≈ `1e-7`). Enable `compute_std` to recover those values.
+Sequential projections and output coordinates use Float64.
+Cell centres and optional vertex bounds are computed when writing NetCDF.
 
 The grid uses input geodetic latitude directly as spherical latitude,
 consistent with the cubed sphere. True WGS84 cell areas vary by about
@@ -234,18 +342,33 @@ _spherical_subdivision(::HEALPixGridSpec) = Val(:unit_vectors)
 
 # Angular form of sqrt(4πR²/npix). The common radius also scales the
 # angular footprint span, so it cancels in the oversampling ratio.
-_healpix_cell_spacing(spec::HEALPixGridSpec) = sqrt(4pi / nside2npix(spec.nside))
+_healpix_cell_spacing(spec::HEALPixGridSpec) = _device_cell_spacing(_device_locator(spec), Float64)
 
-@inline function _unit_vector_samples(corners, cell_spacing::Float64)
-    max_chord_squared = 0.0
-    for i in 1:_HEALPIX_VERTICES, j in (i + 1):_HEALPIX_VERTICES
+struct _HEALPixLocator
+    nside::Int64
+    level::Int
+end
+
+_device_locator(spec::HEALPixGridSpec) = _HEALPixLocator(spec.nside, spec.level)
+
+@inline function locate(locator::_HEALPixLocator, x, y, z)
+    return 1 + _vec2pix_nest(locator.nside, locator.level, x, y, z, Val(true))
+end
+
+@inline function _device_cell_spacing(locator::_HEALPixLocator, ::Type{F}) where {F}
+    return sqrt(F(4pi) / F(_HEALPIX_FACE_COUNT * locator.nside^2))
+end
+
+@inline function _unit_vector_samples(corners, cell_spacing::F) where {F}
+    max_chord_squared = zero(F)
+    @inbounds for i in 1:_HEALPIX_VERTICES, j in (i + 1):_HEALPIX_VERTICES
         a, b = corners[i], corners[j]
         chord_squared = abs2(a[1] - b[1]) + abs2(a[2] - b[2]) + abs2(a[3] - b[3])
         max_chord_squared = max(max_chord_squared, chord_squared)
     end
-    span = 2asin(min(1.0, sqrt(max_chord_squared) / 2))
-    return clamp(ceil(Int, _HEALPIX_SAMPLES_PER_CELL * span / cell_spacing),
-                 _HEALPIX_MIN_OVERSAMPLE, _HEALPIX_MAX_OVERSAMPLE)
+    span = F(2) * asin(min(one(F), _spherical_sqrt(max_chord_squared) / F(2)))
+    samples = Base.unsafe_trunc(Int, ceil(F(_HEALPIX_SAMPLES_PER_CELL) * span / cell_spacing))
+    return clamp(samples, _HEALPIX_MIN_OVERSAMPLE, _HEALPIX_MAX_OVERSAMPLE)
 end
 
 @inline in_bounds(::HEALPixGridSpec, lat::Real, lon::Real) =

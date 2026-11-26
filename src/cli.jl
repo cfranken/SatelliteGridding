@@ -87,9 +87,8 @@ function parse_l2_args(args=ARGS)
             arg_type = Int64
             default = 0
         "--nOversample"
-            help = "Sub-pixel factor for footprint oversampling (default: auto-compute)"
+            help = "Sub-pixel factor for footprint oversampling (1–$N_OVERRIDE_MAX, default: automatic)"
             arg_type = Int64
-            default = 0
         "--footprint"
             help = "Footprint geometry: quad for corner quadrilaterals, circle for circular footprints"
             arg_type = String
@@ -98,6 +97,14 @@ function parse_l2_args(args=ARGS)
             help = "Compute backend: sequential, cpu, cuda, or metal"
             arg_type = String
             default = "sequential"
+        "--geometry-precision"
+            help = "Spherical KA geometry precision: float32 or float64 (default: float32 on Metal, float64 elsewhere)"
+            arg_type = String
+            range_tester = x -> lowercase(x) in ("float32", "float64")
+        "--accumulator-precision"
+            help = "Spherical KA accumulator precision: float32 or float64 (default: float32 on Metal, float64 elsewhere)"
+            arg_type = String
+            range_tester = x -> lowercase(x) in ("float32", "float64")
         "--keepGoing"
             help = "Continue after per-file processing errors and report failures at the end"
             action = :store_true

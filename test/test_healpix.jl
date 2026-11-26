@@ -52,14 +52,20 @@ function _healpix_hot_loop_allocations(::Type{T}, n_override=nothing) where {T}
     lon = Matrix{T}(repeat(Int16[177 179 -179 179], 3, 1))
     lat = Matrix{T}(repeat(Int16[-4 -4 4 4], 3, 1))
     capacity = something(n_override, 24)
-    values, points = ones(Float32, 3, 1), zeros(capacity, capacity, 2)
+    values = ones(Float32, 3, 1)
     cells = Vector{Tuple{Int,Int}}(undef, capacity^2)
-    args = (data, m2, weights, true, spec, lat, lon, values, n_override, points, cells)
+    args = (data, m2, weights, true, spec, lat, lon, values, n_override, cells)
     SatelliteGridding._accumulate_unit_vector_footprints!(args...)
     return @allocated SatelliteGridding._accumulate_unit_vector_footprints!(args...)
 end
 
 struct _HemisphereTestGrid <: AbstractSphericalGridSpec{Float32} end
+struct _LonLatDeviceTestGrid <: AbstractSphericalGridSpec{Float32} end
+struct _HemisphereTestLocator end
+SatelliteGridding._device_locator(::_HemisphereTestGrid) = _HemisphereTestLocator()
+SatelliteGridding._device_locator(::_LonLatDeviceTestGrid) = _HemisphereTestLocator()
+SatelliteGridding._spherical_subdivision(::_HemisphereTestGrid) = Val(:unit_vectors)
+@inline SatelliteGridding.locate(::_HemisphereTestLocator, x, y, z) = z < 0 ? Int32(1) : Int32(2)
 SatelliteGridding._spherical_cell(::_HemisphereTestGrid, lat, lon) = (1, lat < 0 ? 1 : 2)
 SatelliteGridding.grid_shape(::_HemisphereTestGrid) = (1, 2)
 SatelliteGridding._output_spatial_shape(::_HemisphereTestGrid) = (2,)
@@ -188,11 +194,10 @@ end
 
         # An odd number of samples lands exactly on the enclosed pole. Its
         # longitude is defined as 0° and all other samples split symmetrically.
-        points = zeros(9, 9, 2)
         corners, normal = SatelliteGridding._sphere_ordered_corners(
             map(SatelliteGridding._sphere_unit_vector, lat, lon)...)
-        SatelliteGridding._sphere_subpoints!(points, corners, normal, 9)
-        @test points[5, 5, :] == [90.0, 0.0]
+        left, right = SatelliteGridding._sphere_subpoint_edges(corners, 5, 9)
+        @test SatelliteGridding._sphere_subpoint(left, right, normal, 5, 9) == (0.0, 0.0, 1.0)
         polar = _healpix_footprint_weights(nside, lon, lat, 9)
         polar[ang2pix_nest(nside, 0, 90) + 1] -= 1/81
         @test [sum(polar[face*nside^2 .+ (1:nside^2)]) for face in 0:3] ≈ fill(20/81, 4)
@@ -255,8 +260,7 @@ end
         @test spec.level == 6
         @test !spec.cell_bounds
         @test resolve_backend("sequential"; grid_spec=spec) === nothing
-        @test_throws "sequential CPU" resolve_backend("cuda"; grid_spec=spec)
-        @test_throws "sequential CPU" resolve_backend("metal"; grid_spec=spec)
+        @test resolve_backend("cpu"; grid_spec=spec) isa KernelAbstractions.CPU
         for invalid in (0, -8, 3, 96, 1 << 30)
             args["nside"] = invalid
             @test_throws ArgumentError args_to_grid_spec(args)
@@ -278,11 +282,14 @@ end
             times = TimeSpec(date, date, Day(1))
             output = joinpath(dir, "invalid_oversampling.nc")
             @test SubpixelGridding(Int32(7)).n_oversample === 7
-            for invalid in (0, -1, 4.0, 4.5, true, "4")
+            for invalid in (0, -1, 4.0, 4.5, true, "4", 2^32, 1025)
                 @test_throws ArgumentError SubpixelGridding(invalid)
                 @test_throws ArgumentError SubpixelGridding(n_oversample=invalid)
-                @test_throws ArgumentError grid_l2(config, HEALPixGridSpec(nside=8), times;
-                                                   n_oversample=invalid, outfile=output)
+                @test_throws ArgumentError CircularFootprintGridding(invalid)
+                for backend in (nothing, CPU())
+                    @test_throws ArgumentError grid_l2(config, HEALPixGridSpec(nside=8), times;
+                                                       n_oversample=invalid, outfile=output, backend)
+                end
                 @test_throws ArgumentError grid_l2(config, HEALPixGridSpec(nside=8), times;
                     n_oversample=invalid, footprint_method=SubpixelGridding(8), outfile=output)
                 @test !ispath(output)
@@ -446,6 +453,10 @@ end
     end
 
     @testset "Minimal spherical grid can write NetCDF" begin
+        for backend in ("cpu", "cuda", "metal")
+            @test_throws "requires _spherical_subdivision(spec) = Val(:unit_vectors)" resolve_backend(
+                backend; grid_spec=_LonLatDeviceTestGrid())
+        end
         mktempdir() do dir
             _accuracy_input(joinpath(dir, "demo_2020-01-01.nc"), [(15.0, 16.0, -2.0, 2.0)], Float32[10])
             config = DataSourceConfig(Dict("lat" => "lat", "lon" => "lon",
@@ -455,15 +466,19 @@ end
             date = DateTime(2020, 1, 1)
             times = TimeSpec(date, date, Day(1))
             output = joinpath(dir, "demo.nc")
-            grid(config, _HemisphereTestGrid(), times; outfile=output, progress=false)
-            Dataset(output) do ds
-                @test ds.attrib["title"] == "Gridded satellite data"
-                @test dimnames(ds["signal"]) == ("hemisphere", "time")
-                @test !haskey(ds["signal"].attrib, "grid_mapping")
-                @test !haskey(ds["signal"].attrib, "coordinates")
-                @test ds["hemisphere"][:] == [-1, 1]
-                @test ds["signal"][:, 1] == [10, 10]
-                @test ds["n"][:, 1] == [0.5, 0.5]
+            @test_throws "requires _spherical_subdivision(spec) = Val(:unit_vectors)" grid_l2(
+                config, _LonLatDeviceTestGrid(), times; backend=CPU(), outfile=output)
+            for backend in (nothing, resolve_backend("cpu"))
+                grid(config, _HemisphereTestGrid(), times; backend, outfile=output, progress=false)
+                Dataset(output) do ds
+                    @test ds.attrib["title"] == "Gridded satellite data"
+                    @test dimnames(ds["signal"]) == ("hemisphere", "time")
+                    @test !haskey(ds["signal"].attrib, "grid_mapping")
+                    @test !haskey(ds["signal"].attrib, "coordinates")
+                    @test ds["hemisphere"][:] == [-1, 1]
+                    @test ds["signal"][:, 1] == [10, 10]
+                    @test ds["n"][:, 1] == [0.5, 0.5]
+                end
             end
         end
     end
@@ -602,8 +617,6 @@ end
                 @test !haskey(ds["lon"].attrib, "bounds")
             end
 
-            @test_throws "sequential CPU" grid_l2(config, spec, times;
-                                                   backend=SatelliteGridding.CPU(), outfile=output)
             @test_throws "CircularFootprintGridding" grid(config, spec, times, CircularFootprintGridding())
             @test_throws "rectangular" grid_center(config, spec, times)
             @test_throws "rectangular" grid(config, spec, times, CenterPointGridding())

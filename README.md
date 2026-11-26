@@ -194,7 +194,7 @@ Run `julia --project=. bin/grid.jl l2 --help` for all options.
 | `--startDate` / `--stopDate` | `2018-03-07` / `2018-10-31` | Date range (YYYY-MM-DD) |
 | `--dDays` | 8 | Time step in days (or months with `--monthly`) |
 | `--monthly` | false | Use months instead of days |
-| `--nOversample` | 0 (auto) | Sub-pixel factor (0 = auto-compute) |
+| `--nOversample` | Automatic | Fixed sub-pixel factor from 1 to 1024 |
 | `--footprint` | `quad` | Footprint geometry: `quad` or `circle` |
 | `--compSTD` | false | Compute standard deviation |
 | `--backend` | `sequential` | `sequential`, `cpu`, `cuda`, or `metal` |

@@ -46,8 +46,11 @@ function main()
         config = load_config(args["config"])
         grid_spec = args_to_grid_spec(args)
         time_spec = args_to_time_spec(args)
-        n_over = args["nOversample"] > 0 ? args["nOversample"] : nothing
-        backend = resolve_backend(args["backend"]; grid_spec)
+        n_over = args["nOversample"]
+        parse_precision(arg) = arg === nothing ? nothing :
+                               lowercase(arg) == "float32" ? Float32 : Float64
+        geometry_precision = parse_precision(args["geometry-precision"])
+        accumulator_precision = parse_precision(args["accumulator-precision"])
         footprint = lowercase(args["footprint"])
         method = if footprint in ("quad", "quadrilateral", "subpixel")
             SubpixelGridding(n_over)
@@ -56,6 +59,7 @@ function main()
         else
             error("Unknown footprint geometry: $(args["footprint"]). Use quad or circle.")
         end
+        backend = resolve_backend(args["backend"]; grid_spec, geometry_precision, accumulator_precision)
 
         zarr_out = isempty(args["zarrOut"]) ? nothing : args["zarrOut"]
         zarr_meta = isempty(args["zarrMeta"]) ? nothing : args["zarrMeta"]
@@ -73,6 +77,8 @@ function main()
              zarr_meta=zarr_meta,
              zarr_epoch=Date(args["zarrEpoch"]),
              backend=backend,
+             geometry_precision=geometry_precision,
+             accumulator_precision=accumulator_precision,
              keep_going=args["keepGoing"],
              progress=!args["noProgress"] && SatelliteGridding._default_progress(),
              command=command_line)

@@ -40,6 +40,10 @@ STOP_DATE="${STOP_DATE:-2025-12-31}"
 DDAYS="${DDAYS:-16}"
 JOBS="${JOBS:-8}"
 N_OVERSAMPLE="${N_OVERSAMPLE:-0}"
+oversampling_args=()
+if [[ "$N_OVERSAMPLE" != 0 ]]; then
+    oversampling_args=(--nOversample "$N_OVERSAMPLE")
+fi
 CHUNK_DIR="${CHUNK_DIR:-${OUTFILE%.nc}_chunks}"
 KEEP_CHUNKS="${KEEP_CHUNKS:-0}"
 
@@ -87,7 +91,7 @@ for ((j=0; j<JOBS; j++)); do
             --gridType cs --Nc "$NC" --csConvention "$CS_CONVENTION" \
             --startDate "$job_start" --stopDate "$job_stop" \
             --dDays "$DDAYS" \
-            --nOversample "$N_OVERSAMPLE" \
+            "${oversampling_args[@]}" \
             --keepGoing \
             -o "$chunk_file" \
             >"$log_file" 2>&1

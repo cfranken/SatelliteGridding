@@ -55,17 +55,18 @@ end
 function _accumulate_l2_spherical!(::Val{:unit_vectors}, data, m2, weights, compute_std,
                                    spec, observations, n_override)
     capacity = n_override === nothing ? _HEALPIX_MAX_OVERSAMPLE : n_override
-    points = Array{Float64}(undef, capacity, capacity, 2)
     cells = Vector{Tuple{Int,Int}}(undef, capacity^2)
     _accumulate_unit_vector_footprints!(data, m2, weights, compute_std, spec,
                                        observations.lat_bounds, observations.lon_bounds,
-                                       observations.values, n_override, points, cells)
+                                       observations.values, n_override, cells)
 end
 
 function _process_l2_file_ka!(filepath::String, config::DataSourceConfig,
                               spec::GridSpec{T}, backend, grid_sum, grid_weights,
                               n_override, method::AbstractGriddingMethod,
-                              nc_vars, fill_attrib, progress; metadata=nothing) where {T}
+                              nc_vars, fill_attrib, progress;
+                              metadata=nothing, spherical_ka=nothing, reference=nothing,
+                              pass=nothing) where {T}
     _with_l2_observations(filepath, config, spec, method, nc_vars, fill_attrib,
                           progress; metadata=metadata) do observations
         ilat, ilon, ilat_center, ilon_center =
@@ -83,4 +84,54 @@ function _process_l2_file_ka!(filepath::String, config::DataSourceConfig,
         end
     end
     nothing
+end
+
+function _process_l2_file_ka!(filepath::String, config::DataSourceConfig,
+                              spec::AbstractSphericalGridSpec, backend, grid_sum, grid_weights,
+                              n_override, method::SubpixelGridding,
+                              nc_vars, fill_attrib, progress;
+                              spherical_ka, reference, metadata=nothing, pass=nothing)
+    # Screen native Float32/Float64 science values before narrowing for a
+    # Float32 accumulator. Finite values outside its range must reach the
+    # kernel so their cells get fill for the non-finite moments.
+    _with_l2_observations(filepath, config, spec, method, nc_vars, fill_attrib,
+                          progress; metadata, value_type=Float64) do observations
+        _accumulate_spherical_batch!(backend, grid_sum, grid_weights, pass,
+            spherical_ka.locator, spherical_ka.geometry_precision, observations.lat_bounds,
+            observations.lon_bounds, observations.values, n_override, reference)
+    end
+    return nothing
+end
+
+"""
+    _accumulate_l2_std_pass!(files, config, spec, backend, m2, residual, weights,
+                            mean, n_override, method, spherical_ka;
+                            reference, bounds, progress, keep_shifted=false)
+
+Replay the first-pass files around each cell mean, then correct the mean
+and central M2 using the accumulated linear and squared deviations. A replay
+error invalidates the window because that file already contributed to the mean.
+With `keep_shifted=true`, return the reference-shifted mean in `mean` and its
+low-order correction in `residual` for a later rolling-window merge.
+"""
+function _accumulate_l2_std_pass!(files, config, spec, backend, m2, residual, weights,
+                                  mean, n_override, method, spherical_ka;
+                                  reference, bounds, progress, keep_shifted=false)
+    _finalize_spherical_mean!(backend, mean, weights, reference, bounds)
+    fill!(m2, zero(eltype(m2)))
+    fill!(residual, zero(eltype(residual)))
+    p_files = _progress_bar(length(files), "  STD files: ", progress)
+    for filepath in files
+        try
+            _process_l2_file_ka!(filepath, config, spec, backend, m2, weights,
+                                 n_override, method, nothing, false, p_files;
+                                 spherical_ka, reference, pass=(mean, residual))
+        catch e
+            error("Error replaying file $filepath for standard deviation: $(sprint(showerror, e))")
+        end
+    end
+    _correct_spherical_moments_ka!(backend, _SPHERICAL_WORKGROUP_SIZE)(
+        mean, m2, residual, weights, reference.device, Val(keep_shifted); ndrange=length(weights))
+    KernelAbstractions.synchronize(backend)
+    return nothing
 end

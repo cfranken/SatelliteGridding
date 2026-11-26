@@ -166,68 +166,84 @@ end
                                a[3] * b[1] - a[1] * b[3],
                                a[1] * b[2] - a[2] * b[1])
 
+# Inline the lexicographic comparison of finite, fixed-size sort keys.
+@inline function _sphere_isless(a::NTuple{3}, b::NTuple{3})
+    return isequal(a[1], b[1]) ?
+        (isequal(a[2], b[2]) ? isless(a[3], b[3]) : isless(a[2], b[2])) :
+        isless(a[1], b[1])
+end
+
+@inline _sphere_isless(a::Tuple{F,NTuple{3,F}}, b::Tuple{F,NTuple{3,F}}) where {F} =
+    isequal(a[1], b[1]) ? _sphere_isless(a[2], b[2]) : isless(a[1], b[1])
+
+@inline _sphere_minmax(a, b) = _sphere_isless(b, a) ? (b, a) : (a, b)
+
 @inline function _sort_four(a, b, c, d)
-    a, b = minmax(a, b)
-    c, d = minmax(c, d)
-    a, c = minmax(a, c)
-    b, d = minmax(b, d)
-    b, c = minmax(b, c)
+    a, b = _sphere_minmax(a, b)
+    c, d = _sphere_minmax(c, d)
+    a, c = _sphere_minmax(a, c)
+    b, d = _sphere_minmax(b, d)
+    b, c = _sphere_minmax(b, c)
     return a, b, c, d
 end
 
-@inline function _sphere_ordered_corners(a, b, c, d)
+@inline function _sphere_ordered_corners(a::NTuple{3,F}, b, c, d) where {F}
     # Summing in a canonical order makes the tangent frame independent of
     # the input permutation, including ties at the angular sort's branch cut.
     a, b, c, d = _sort_four(a, b, c, d)
     centre = a .+ b .+ c .+ d
-    norm = sqrt(_sphere_dot(centre, centre))
+    norm = _spherical_sqrt(_sphere_dot(centre, centre))
     normal = norm == 0 ? a : centre ./ norm
-    axis = abs(normal[3]) > abs(normal[1]) ? (1.0, 0.0, 0.0) : (0.0, 0.0, 1.0)
+    axis = abs(normal[3]) > abs(normal[1]) ? (one(F), zero(F), zero(F)) : (zero(F), zero(F), one(F))
     tangent = _sphere_cross(axis, normal)
-    tangent_x = tangent ./ sqrt(_sphere_dot(tangent, tangent))
+    tangent_x = tangent ./ _spherical_sqrt(_sphere_dot(tangent, tangent))
     tangent_y = _sphere_cross(normal, tangent_x)
     keyed(point) = (atan(_sphere_dot(point, tangent_y), _sphere_dot(point, tangent_x)), point)
     ordered = _sort_four(keyed(a), keyed(b), keyed(c), keyed(d))
     return map(last, ordered), normal
 end
 
-@inline function _sphere_subpoints!(points, corners, normal, n)
+@inline function _sphere_subpoint_edges(corners::NTuple{4,NTuple{3,F}}, j, n) where {F}
     a, b, c, d = corners
-    @inbounds for j in 1:n
-        v = (j - 0.5) / n
-        left = (1 - v) .* a .+ v .* d
-        right = (1 - v) .* b .+ v .* c
-        for i in 1:n
-            u = (i - 0.5) / n
-            point = (1 - u) .* left .+ u .* right
-            norm = sqrt(_sphere_dot(point, point))
-            x, y, z = norm == 0 ? normal : point ./ norm
-            horizontal = hypot(x, y)
-            points[i, j, 1] = atand(z, horizontal)
-            points[i, j, 2] = horizontal == 0 ? 0.0 : atand(y, x)
-        end
-    end
-    nothing
+    v = (F(j) - F(0.5)) / F(n)
+    return (one(F) - v) .* a .+ v .* d, (one(F) - v) .* b .+ v .* c
 end
 
-_unit_vector_cell_spacing(::AbstractSphericalGridSpec) = Inf
-_unit_vector_cell_spacing(spec::HEALPixGridSpec) = _healpix_cell_spacing(spec)
+@inline function _sphere_subpoint(left::NTuple{3,F}, right, normal, i, n) where {F}
+    u = (F(i) - F(0.5)) / F(n)
+    point = (one(F) - u) .* left .+ u .* right
+    norm = _spherical_sqrt(_sphere_dot(point, point))
+    return iszero(norm) ? normal : point ./ norm
+end
+
+@inline function _unit_vector_cell(spec, ::Nothing, x, y, z)
+    horizontal = hypot(x, y)
+    lat = atand(z, horizontal)
+    lon = iszero(horizontal) ? zero(x) : atand(y, x)
+    return _spherical_cell(spec, lat, lon)
+end
+
+@inline function _unit_vector_cell(spec, locator, x, y, z)
+    row, col = divrem(locate(locator, x, y, z) - 1, first(accumulator_shape(spec)))
+    return col + 1, row + 1
+end
 
 """
     _accumulate_unit_vector_footprints!(data, m2, weights, compute_std, spec,
-                                       lat_c, lon_c, values, n_override, points, cells)
+                                       lat_c, lon_c, values, n_override, cells)
 
 Sample every footprint on the sphere at the cell centres of its bilinear
 parameter grid. The four input corners are in degrees and may be unordered.
 Count sub-point hits in each cell and add one weight `k/n²` per cell. This
 gives an exact unit weight for a single-cell footprint and the per-footprint
-overlap needed for a future sum of squared weights. Reuse the Float64 buffer
-`points` and cell-index buffer `cells`, sized for the largest sample count.
+overlap needed for a future sum of squared weights. Reuse the cell-index
+buffer `cells`, sized for the largest sample count.
 """
 function _accumulate_unit_vector_footprints!(data::AbstractArray{T,3}, m2, weights,
                                              compute_std, spec::AbstractSphericalGridSpec{T},
-                                             lat_c, lon_c, values, n_override, points, cells) where {T}
-    cell_spacing = _unit_vector_cell_spacing(spec)
+                                             lat_c, lon_c, values, n_override, cells) where {T}
+    locator = _device_locator(spec)
+    cell_spacing = _device_cell_spacing(locator, Float64)
     n_pixels, n_vars = size(values)
     @inbounds for i in 1:n_pixels
         a = _sphere_unit_vector(lat_c[i, 1], lon_c[i, 1])
@@ -236,10 +252,13 @@ function _accumulate_unit_vector_footprints!(data::AbstractArray{T,3}, m2, weigh
         d = _sphere_unit_vector(lat_c[i, 4], lon_c[i, 4])
         corners, normal = _sphere_ordered_corners(a, b, c, d)
         n = n_override === nothing ? _unit_vector_samples(corners, cell_spacing) : n_override
-        _sphere_subpoints!(points, corners, normal, n)
         n_samples = n^2
-        for j in 1:n, k in 1:n
-            cells[k + (j - 1) * n] = _spherical_cell(spec, points[k, j, 1], points[k, j, 2])
+        for j in 1:n
+            left, right = _sphere_subpoint_edges(corners, j, n)
+            for k in 1:n
+                x, y, z = _sphere_subpoint(left, right, normal, k, n)
+                cells[k + (j - 1) * n] = _unit_vector_cell(spec, locator, x, y, z)
+            end
         end
         # Sort just this footprint's cell indices in place so repeats are
         # contiguous, with a deterministic order of cell updates.
@@ -357,8 +376,7 @@ end
 
 """
     accumulate_batch!(backend, grid_sum, grid_weights,
-                      lat_corners, lon_corners, values, n;
-                      compute_std=false, grid_std=nothing, grid_mean=nothing)
+                      lat_corners, lon_corners, values, n, n_vars)
 
 Accumulate observations into the grid using the KA kernel pipeline.
 This function works identically on CPU and GPU backends.
@@ -370,10 +388,10 @@ The pipeline:
 
 After processing all files, call `finalize_mean!` to convert sums to means.
 
-For `compute_std=true`, a two-pass approach is used:
-1. First call `accumulate_batch!` without std to accumulate sums
-2. Call `finalize_mean!` to get the mean
-3. Call `accumulate_std_pass!` with the computed mean to accumulate variance
+For spherical KA gridding with `compute_std=true`, the fused spherical
+kernel provides two passes. The first accumulates shifted sums and weights
+to compute cell means. The second uses the cell means to accumulate weighted
+linear and squared deviations.
 
 # Arguments
 - `backend`: KernelAbstractions backend (`CPU()`, `CUDABackend()`, `MetalBackend()`, etc.)
@@ -495,16 +513,21 @@ Convert weighted-sum accumulator to mean: `mean = sum / weight`.
 Cells with near-zero weight are left as zero.
 """
 function finalize_mean!(grid_data::AbstractArray{T,3}, grid_weights::AbstractMatrix{T}) where {T}
-    nlon, nlat, nvars = size(grid_data)
-    @inbounds for j in 1:nlat, i in 1:nlon
-        w = grid_weights[i, j]
-        if w > eps(T)
-            for z in 1:nvars
-                grid_data[i, j, z] /= w
-            end
-        end
+    n_cells = length(grid_weights)
+    @inbounds for cell in 1:n_cells
+        _finalize_mean_cell!(grid_data, grid_weights, cell, n_cells, size(grid_data, 3), eps(T))
     end
     nothing
+end
+
+@inline function _finalize_mean_cell!(sums, weights, cell, stride, n_vars, min_weight)
+    @inbounds w = weights[cell]
+    if w > min_weight
+        @inbounds for v in 1:n_vars
+            sums[cell + (v - 1) * stride] /= w
+        end
+    end
+    return nothing
 end
 
 """
@@ -605,20 +628,20 @@ function welford_to_moments!(S1::AbstractArray{T,3}, S2,
 end
 
 """
-    finalize_moments!(S1, S2, S0, compute_std)
+    finalize_moments!(S1, S2, S0, compute_std; min_weight=eps(T))
 
 Finalize summed window moments in place. `S1` (`Σw·x`) becomes the weighted mean
 `Σw·x / Σw`; when `compute_std`, `S2` (`Σw·x²`) becomes the population standard
 deviation `sqrt(M2/Σw)` with `M2 = Σw·x² − (Σw·x)²/Σw` (matching [`finalize_std!`](@ref)).
-Cells with near-zero weight are left untouched. The combined `M2` must be computed from
+Cells with weight at or below `min_weight` are left untouched. The combined `M2` must be computed from
 the summed `S1` *before* `S1` is overwritten with the mean, so this is done in one pass.
 """
 function finalize_moments!(S1::AbstractArray{T,3}, S2, S0::AbstractMatrix{T},
-                           compute_std::Bool) where {T}
+                           compute_std::Bool; min_weight=eps(T)) where {T}
     nlon, nlat, nvars = size(S1)
     @inbounds for j in 1:nlat, i in 1:nlon
         w = S0[i, j]
-        if w > eps(T)
+        if w > min_weight
             for z in 1:nvars
                 s1 = S1[i, j, z]
                 if compute_std
