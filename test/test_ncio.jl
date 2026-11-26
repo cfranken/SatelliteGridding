@@ -301,7 +301,7 @@
                         @test lev == level
                         @test shuf == shuffled
                         @test deflated == (level > 0)
-                        @test isequal(v.attrib["_FillValue"], options.fill_value)
+                        @test isequal(v.attrib["_FillValue"], key == "n" ? -1f0 : options.fill_value)
                         expected_chunks = options.chunksizes === nothing ? (3, 2, 1) : options.chunksizes
                         @test Tuple(NCDatasets.chunking(v.var)[2]) == expected_chunks
                         @test NCDatasets.checksum(v.var) == options.checksum
@@ -309,6 +309,7 @@
                     @test reopened["value"][1, 1, 1] == 1
                     @test ismissing(reopened["value"][2, 1, 1])
                     @test all(ismissing, reopened["value"][:, :, 2])
+                    @test all(ismissing, reopened["n"][:, :, 2])
                 end
             end
 
@@ -322,6 +323,12 @@
             @test_throws ArgumentError create_output_dataset(joinpath(dir, "invalid.nc"), gs, 1, gv, false;
                 output_options=NetCDFOptions(chunksizes=[3, 2]))
             @test !isfile(joinpath(dir, "invalid.nc"))
+
+            # These chunks take 2 GiB as Float32 and 4 GiB as Float64.
+            kwargs = (; chunksizes=[2, 2, 2^27])
+            @test SatelliteGridding._storage_kwargs(NetCDFOptions(; kwargs...), gs).chunksizes == [2, 2, 2^27]
+            @test_throws ArgumentError SatelliteGridding._storage_kwargs(
+                NetCDFOptions(; kwargs..., precision="float64"), gs)
         end
     end
 

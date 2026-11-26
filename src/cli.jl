@@ -87,7 +87,7 @@ function parse_l2_args(args=ARGS)
             arg_type = Int64
             default = 0
         "--nOversample"
-            help = "Sub-pixel factor for footprint oversampling (1–$N_OVERRIDE_MAX, default: automatic)"
+            help = "Sub-pixel factor for footprint oversampling (0 or omitted: automatic; 1–$N_OVERRIDE_MAX: fixed)"
             arg_type = Int64
         "--footprint"
             help = "Footprint geometry: quad for corner quadrilaterals, circle for circular footprints"
@@ -124,7 +124,14 @@ function parse_l2_args(args=ARGS)
             arg_type = String
             default = "2021-01-01"
     end
-    parse_args(args, s)
+    parsed = parse_args(args, s)
+    n = parsed["nOversample"]
+    if n == 0
+        parsed["nOversample"] = nothing
+    elseif n !== nothing && !(1 <= n <= N_OVERRIDE_MAX)
+        throw(ArgumentError("--nOversample must be 0 (automatic) or an integer in 1:$N_OVERRIDE_MAX"))
+    end
+    parsed
 end
 
 """

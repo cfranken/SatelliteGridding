@@ -4,6 +4,12 @@
 Grid data using center coordinates only (no footprint bounds), suitable for
 MODIS-style data where each pixel maps to exactly one rectangular grid cell.
 
+To archive Float64 center results exactly, construct `GridSpec` with Float64
+bounds and spacings for Float64 accumulation and set `[output]`
+`precision = "float64"` and `significant_digits_center = "none"`.
+The center CLI uses a Float32 grid. A cell below `min_count` can have `n > 0`
+alongside missing science values.
+
 # Keyword Arguments
 - `geo_table::Union{Nothing,String}=nothing`: Path to a legacy monolithic geolocation lookup table (NetCDF)
 - `geo_cache::Union{Nothing,String}=nothing`: Directory for generated per-tile MODIS geolocation cache
@@ -70,7 +76,8 @@ function grid_center(config::DataSourceConfig, grid_spec::AbstractGridSpec{T}, t
         if veg_indices
             storage = _storage_kwargs(output_options, grid_spec)
             for name in ("EVI", "NDVI", "NIRv", "NDWI")
-                nc_vars[name] = defVar(ds_out, name, Float32, ("lon", "lat", "time"); storage...)
+                nc_vars[name] = defVar(ds_out, name, typeof(output_options.fill_value),
+                                      ("lon", "lat", "time"); storage...)
             end
         end
 
@@ -171,7 +178,7 @@ function grid_center(config::DataSourceConfig, grid_spec::AbstractGridSpec{T}, t
 
             # Write output for this time step
             min_count = T(get(config.options, "min_count", 5))
-            _write_center_time_slice!(ds_out, nc_vars, config, grid_data,
+            _write_center_time_slice!(ds_out, nc_vars, config, output_options, grid_data,
                                       grid_weights, veg_indices, ct, d, min_count)
 
             fill!(grid_data, zero(T))

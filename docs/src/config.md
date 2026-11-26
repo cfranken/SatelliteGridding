@@ -27,7 +27,7 @@ sif_735 = "PRODUCT/SIF_735"
 
 ## NetCDF storage and provenance
 
-Optional `[output]` settings control lossless Float32 NetCDF storage:
+Optional `[output]` settings control NetCDF precision, rounding, and lossless compression.
 
 ```toml
 [output]
@@ -35,17 +35,52 @@ compression = "deflate"  # or "none"
 deflate_level = 4         # 0–9; 0 disables compression
 shuffle = false          # compare true on representative data
 fill_value = -999.0       # or nan
+precision = "float32"    # or "float64"
+significant_digits_mean = 8   # L2 means; or "none"
+significant_digits_std = 6    # L2 standard deviations; or "none"
+significant_digits_center = 5 # center means and vegetation indices; or "none"
 checksum = "none"        # or "fletcher32"
 # chunksizes = [256, 256, 1]  # lon, lat, time; must fit spatial dimensions
 ```
 
 Default chunks are at most 1024 × 1024 spatial cells and one time slice. Cube
 chunks use one face; custom cube chunks follow `[Xdim, Ydim, nf, time]` order.
-Counts stay Float32 because footprint weights can be fractional, with zero
-meaning no observations. The fill value applies to empty science cells and
-entirely empty time slices. `[center] fill_value` describes input values;
-`[output] fill_value` describes output storage. Zarr retains its existing Zstd
-compression and NaN fill.
+Chunks must be smaller than 4 GiB at the selected precision. NetCDF precision
+applies to science variables, standard deviations, vegetation indices, and
+`n`. The science fill must be finite in that precision or NaN. It applies to
+empty science cells, including entirely empty time slices. `[center] fill_value`
+describes input values and `[output] fill_value` describes output storage.
+NetCDF stores zero in `n` for cells without observations and reserves its
+independent `_FillValue` of `-1` for unwritten values. Entirely empty time
+slices also store `n = 0`. A positive `n` can accompany missing science data,
+for example in center cells below `min_count` or when a standard deviation
+overflows. When aggregating a variable, mask its weights where it is missing.
+
+Each significant-digit setting accepts a positive integer or `"none"`.
+Requests above 9 digits for Float32 or 17 for Float64 leave the output value
+unrounded. Rounding uses the output type, with the default Float32 digit
+settings retaining the historical rounding in grid precision. NetCDF writes
+the science fill when a value is non-finite or overflows during decimal
+rounding or conversion to the output type.
+
+To archive Float64 results exactly, accumulate in Float64, set
+`precision = "float64"`, and set `significant_digits_mean` and
+`significant_digits_std` to `"none"` for L2 or `significant_digits_center`
+to `"none"` for center mode. In Julia, use Float64 bounds and spacings in
+`GridSpec` (`RectangularGridSpec`), or pass `T=Float64` to
+`CubedSphereGridSpec` or `HEALPixGridSpec` for sequential gridding.
+The CLI creates Float32 grids. With `--gridType healpix --backend cpu` or
+`--backend cuda`, the backend accumulates in Float64 by default. Other CLI
+modes accumulate in Float32, including sequential HEALPix and HEALPix on Metal.
+Use this Float64 configuration for outputs that feed aggregation, including
+HEALPix 4:1 coarsening and regridding. Quantization of nearly equal child
+means can dominate a small parent standard deviation at fine `nside`.
+
+Zarr output requires `precision = "float32"` and ignores
+`significant_digits_*`. It narrows science values and standard errors to
+Float32 and rounds weights to Int16 counts. Its science fill is NaN and
+its count fill is `-1` for unobserved cells. A small positive weight can
+round to a count of zero.
 
 NetCDF outputs always record the package version, nearest Git tag, commit,
 tracked dirty state, Julia version, command (when supplied), and filters.

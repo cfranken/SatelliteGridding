@@ -194,7 +194,7 @@ Run `julia --project=. bin/grid.jl l2 --help` for all options.
 | `--startDate` / `--stopDate` | `2018-03-07` / `2018-10-31` | Date range (YYYY-MM-DD) |
 | `--dDays` | 8 | Time step in days (or months with `--monthly`) |
 | `--monthly` | false | Use months instead of days |
-| `--nOversample` | Automatic | Fixed sub-pixel factor from 1 to 1024 |
+| `--nOversample` | Automatic | Use `0` or omit for automatic sampling. Use 1 to 1024 for a fixed sub-pixel factor. |
 | `--footprint` | `quad` | Footprint geometry: `quad` or `circle` |
 | `--compSTD` | false | Compute standard deviation |
 | `--backend` | `sequential` | `sequential`, `cpu`, `cuda`, or `metal` |
@@ -231,18 +231,19 @@ sif_735 = "PRODUCT/SIF_735"
 | `[filter]` | no | Quality filters using string expressions (see below) |
 | `[center]` | no | Scale/fill options, MODIS pixel count, and explicit vegetation-index band roles for center gridding |
 | `[circle]` | no | Circular-footprint options: scalar `radius` and `radius_unit` (`degrees`, `km`, or `m`) |
-| `[output]` | no | NetCDF compression, chunking, checksum, and output missing value |
+| `[output]` | no | NetCDF precision, rounding, compression, chunking, checksum, and science fill value |
 | `[metadata]` | no | Source version selectors and input metadata to retain |
 | `filePattern` | yes | Glob pattern with `YYYY`/`MM`/`DD`/`DOY`/`YYMMDD` placeholders |
 | `folder` | yes | Root directory for input files (also supports date placeholders) |
 
 ### Output size and missing values
 
-NetCDF science variables, standard deviations, counts, and vegetation indices use
-Float32 with **lossless DEFLATE level 4** by default. Spatial
-chunks are at most 1024 × 1024 cells, with one time slice per chunk (and one face
-for cubed-sphere output). This keeps slice writes local and avoids rewriting
-chunks that span multiple times. All these settings can be changed:
+By default, NetCDF stores science variables, standard deviations, counts, and
+vegetation indices in Float32. The writer applies decimal rounding to science
+data and then uses lossless DEFLATE level 4 to compress the stored values.
+Spatial chunks are at most 1024 × 1024 cells, with one time slice per chunk
+and one face for cubed-sphere output. This keeps slice writes local and avoids
+rewriting chunks that span multiple times. The settings below can be changed.
 
 ```toml
 [output]
@@ -250,28 +251,49 @@ compression = "deflate"    # "deflate" or "none"
 deflate_level = 4           # 0–9; 0 disables compression
 shuffle = false            # optional byte shuffling; compare on your data
 fill_value = -999.0         # default; use nan for a NaN sentinel
+precision = "float32"       # or "float64"
+significant_digits_mean = 8 # L2 means; use "none" to disable rounding
+significant_digits_std = 6  # L2 standard deviations; use "none" to disable rounding
+significant_digits_center = 5 # center means and vegetation indices; or "none"
 checksum = "none"          # or "fletcher32"
 # chunksizes = [256, 256, 1]  # optional: lon, lat, time in Julia order
 # Cubed sphere: [Xdim, Ydim, nf, time], e.g. [48, 48, 1, 1]
 ```
 
-Explicit spatial chunk lengths must fit the grid. `n` remains floating point
-because footprint weights can be fractional; zero means no observations.
-Science cells without observations use `_FillValue`, including entirely empty
-time slices. NCDatasets and CF-aware readers decode that sentinel as missing.
+Explicit chunks must fit the grid's spatial dimensions and be smaller than 4 GiB
+at the selected precision. `n` is floating point because footprint weights
+can be fractional. Cells without observations store `n = 0`, including
+entirely empty time slices. `n` has its own `_FillValue` of `-1` for unwritten
+values. A positive `n` can accompany missing science data, for example below
+`min_count` in center mode or when a standard deviation overflows.
+NCDatasets and CF-aware readers decode science `_FillValue` as missing.
 `[center] fill_value` still describes **input** values; `[output] fill_value`
 controls the gridded file. Input netCDF packing and missing-value attributes are
 decoded before L2 science values and quality filters are used.
 
-Start with level 4, then compare level 1 for write speed and level 9 for smallest
-lossless files on representative data. Byte shuffling is optional: it can help
+To archive Float64 results exactly, accumulate in Float64, set
+`precision = "float64"`, and set `significant_digits_mean` and
+`significant_digits_std` to `"none"` for L2 or `significant_digits_center`
+to `"none"` for center mode. In Julia, pass Float64 bounds and spacings to
+`GridSpec` or use `T=Float64` with `CubedSphereGridSpec` or sequential
+`HEALPixGridSpec`. The CLI creates Float32 grids. HEALPix L2 on `--backend cpu`
+or `--backend cuda` accumulates in Float64 by default. Other CLI modes
+accumulate in Float32. Use the Float64 configuration for aggregation inputs,
+including HEALPix 4:1 coarsening and regridding. At fine `nside`, quantization
+of nearly equal child means can dominate a small parent standard deviation.
+
+Zarr output requires `precision = "float32"` and ignores `significant_digits_*`.
+It narrows science values and standard errors to Float32 and rounds weights
+to Int16 counts, with NaN science fill and a `-1` count for unobserved cells.
+
+Start with level 4, then compare level 1 for write speed and level 9 for smaller
+compressed files on representative data. Byte shuffling is optional. It can help
 dense fields but made a sparse OCO SIF sample larger, so it is off by default.
 Repeated NaNs and numeric sentinels both compress well; changing the sentinel alone does not guarantee a
 smaller file. Integer packing or quantization could reduce size further, but
 needs a variable-specific accuracy budget and is not enabled here. The
 [NCDatasets storage documentation](https://juliageo.org/NCDatasets.jl/stable/variables/)
-describes the lossless filters. These storage options apply to NetCDF; Zarr
-retains its existing Zstd compression and NaN fill.
+describes the lossless filters. Zarr uses Zstd compression.
 
 For a local comparison on a gridded Float32 variable, run:
 

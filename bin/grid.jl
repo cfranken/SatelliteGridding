@@ -66,7 +66,8 @@ function main()
         # Loading Zarr triggers the SatelliteGriddingZarrExt extension that backs
         # init_zarr_store / write_zarr_day!. Only load it when a Zarr store is requested.
         if zarr_out !== nothing
-            SatelliteGridding._validate_zarr_grid(grid_spec)
+            SatelliteGridding._validate_zarr_output(grid_spec,
+                SatelliteGridding._output_options(config.options))
             @eval using Zarr
         end
 

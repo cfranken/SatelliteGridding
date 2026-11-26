@@ -41,7 +41,7 @@ julia --project=. bin/grid.jl l2 [options]
 | `--oversample_temporal` | Float32 | 1.0 | Temporal oversampling factor |
 | `--sample_step` | Int | 0 | Rolling mean: snapshot spacing in days (>0 enables rolling mode) |
 | `--window_days` | Int | 0 | Rolling mean: averaging half-width N in days (window = center ± N) |
-| `--nOversample` | Int | Automatic | Fixed sub-pixel factor from 1 to 1024 |
+| `--nOversample` | Int | Automatic | Use `0` or omit for automatic sampling. Use 1 to 1024 for a fixed sub-pixel factor. |
 | `--footprint` | String | `quad` | Footprint geometry: `quad` or `circle` |
 | `--compSTD` | Flag | false | Compute standard deviation |
 | `--backend` | String | `sequential` | Compute backend: `sequential`, `cpu`, `cuda`, or `metal` |

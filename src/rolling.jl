@@ -1,6 +1,6 @@
 # Centered temporal windows and reusable daily moments.
 """
-    _grid_l2_rolling!(ds_out, nc_vars, config, grid_spec, time_spec, snapshots,
+    _grid_l2_rolling!(ds_out, nc_vars, config, grid_spec, output_options, time_spec, snapshots,
                       acc1, acc2, n_vars, use_ka, backend, compute_std,
                       effective_n_oversample, footprint_method, keep_going)
         -> (total_files, successful_files, failed_files)
@@ -15,7 +15,7 @@ advance monotonically, a day leaving the trailing edge is evicted and never need
 so each calendar day is gridded exactly once regardless of window overlap.
 """
 function _grid_l2_rolling!(ds_out, nc_vars, config, grid_spec::AbstractGridSpec{T},
-                           time_spec::TimeSpec, snapshots,
+                           output_options, time_spec::TimeSpec, snapshots,
                            acc1, acc2, n_vars, use_ka, backend, compute_std,
                            effective_n_oversample, footprint_method, keep_going;
                            zg=nothing, zarr_epoch::Date=ZARR_EPOCH, metadata=nothing,
@@ -93,9 +93,8 @@ function _grid_l2_rolling!(ds_out, nc_vars, config, grid_spec::AbstractGridSpec{
             finalize_moments!(win_S1, nothing, win_S0, false; min_weight=zero(A))
             _restore_spherical_reference!(win_S1, win_S0, reference)
         end
-        _emit_l2_snapshot!(ds_out, nc_vars, zg, config, grid_spec,
-                            _spherical_output(T, win_S1), _spherical_output(T, win_S2),
-                            _spherical_output(T, win_S0), compute_std, ct, c;
+        _emit_l2_snapshot!(ds_out, nc_vars, zg, config, grid_spec, output_options,
+                            win_S1, win_S2, win_S0, compute_std, ct, c;
                             window_start=ws, window_end=we, zarr_epoch=zarr_epoch)
 
         # Evict days the next (later) snapshot will no longer touch.

@@ -281,8 +281,8 @@ _weight_long_name(::AbstractGridSpec) = "Number of pixels in average"
 _weight_long_name(::HEALPixGridSpec) = "Sum of fractional footprint overlap weights"
 
 function _create_output_dataset(outfile, spec, n_times, grid_vars, compute_std;
-                                 window_bounds, time_long_name, command, filters, output_options,
-                                 spherical_ka_std)
+                                 window_bounds, time_long_name, command, filters,
+                                 output_options::NetCDFOptions{T}, spherical_ka_std) where {T}
     storage = _storage_kwargs(output_options, spec)
     _with_output_setup(outfile) do ds
         write_coordinates!(ds, spec)
@@ -311,13 +311,13 @@ function _create_output_dataset(outfile, spec, n_times, grid_vars, compute_std;
         ])
         nc_vars = Dict{String,Any}()
         for key in keys(grid_vars)
-            nc_vars[key] = defVar(ds, key, Float32, dims; storage..., attrib=attributes)
+            nc_vars[key] = defVar(ds, key, T, dims; storage..., attrib=attributes)
             if compute_std
-                nc_vars[key * "_std"] = defVar(ds, key * "_std", Float32, dims;
+                nc_vars[key * "_std"] = defVar(ds, key * "_std", T, dims;
                                                storage..., attrib=std_attributes)
             end
         end
-        nc_vars["n"] = defVar(ds, "n", Float32, dims; storage...,
+        nc_vars["n"] = defVar(ds, "n", T, dims; storage..., fillvalue=T(_NETCDF_WEIGHT_FILL),
             attrib=vcat(["units" => "1", "long_name" => _weight_long_name(spec)], attributes))
         ds, nc_vars
     end

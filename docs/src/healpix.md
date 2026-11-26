@@ -80,7 +80,7 @@ to use single precision. Set `accumulator_precision`
 (`--accumulator-precision float32` or `float64`) independently for weights,
 shifted sums, deviations, and rolling moments. Accumulators default to
 Float64 on CUDA and KA CPU. Metal uses Float32 for both settings and
-rejects Float64. The grid's `T` applies to finalized slices.
+rejects Float64.
 Float32 geometry quantizes the input corner vectors and orders them in the tangent
 plane in the same precision. It can move samples across cell edges or
 change the adaptive sample count near its rounding thresholds.
@@ -125,6 +125,21 @@ roughly one ulp of the cell mean (`σ/|mean| ≲ 1e-7`) can be reported as zero.
 Use Float64 accumulators (the CUDA and KA CPU default) when such small
 relative variability matters.
 
+NetCDF stores `n = 0` for unobserved cells, including entirely empty time
+slices, and reserves `-1` for unwritten weights. A cell with `n > 0` can
+still contain science fill, for example when its standard deviation overflows.
+
+To archive Float64 results exactly, accumulate in Float64 and set
+`[output] precision = "float64"`, `significant_digits_mean = "none"`, and
+`significant_digits_std = "none"`. In Julia, use
+`HEALPixGridSpec(; nside=..., T=Float64)` for sequential gridding. The CLI
+creates Float32 grids.
+HEALPix on `--backend cpu` or `--backend cuda` accumulates in Float64 by
+default. Other CLI modes accumulate in Float32. Use this Float64 configuration
+for outputs that feed HEALPix 4:1 coarsening or regridding. At fine `nside`,
+quantization of nearly equal child means can dominate a small parent standard
+deviation.
+
 Spherical KA rolling windows combine centered daily moments using corrected
 means relative to the run reference. Sequential
 rolling windows reconstruct variance from unshifted raw moments, which
@@ -154,9 +169,6 @@ export, and coarsening or aggregation helpers are outside this support.
 
 - In sequential rolling windows, Float32 raw moment cancellation can
   erase variance or introduce spurious variance for high-offset tracers.
-- The output fill value configured for science data also applies to `n`.
-- NetCDF payloads are Float32 and the writer rounds means and standard
-  deviations to set numbers of significant digits.
 - Outputs contain neither per-cell `sum_w2` nor counts of contributing soundings.
 - Per-cell WGS84 ellipsoidal areas are planned separately.
 - Cubed-sphere seam corner ordering, pole-enclosing footprints, and

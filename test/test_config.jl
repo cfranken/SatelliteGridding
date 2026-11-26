@@ -3,7 +3,10 @@
     @testset "Output and metadata validation" begin
         for kwargs in ((; compression="zstd"), (; deflate_level=10), (; deflate_level=1.5),
                        (; shuffle="yes"), (; fill_value=Inf), (; fill_value=1e100),
-                       (; chunksizes=[0, 2, 1]), (; checksum="invalid"))
+                       (; chunksizes=[0, 2, 1]), (; checksum="invalid"),
+                       (; precision="float16"), (; significant_digits_mean=0),
+                       (; significant_digits_std=2.5), (; significant_digits_center=true),
+                       (; significant_digits_mean="off"), (; significant_digits_std=-1))
             @test_throws ArgumentError NetCDFOptions(; kwargs...)
         end
         mktempdir() do dir
@@ -32,6 +35,15 @@
                 @test_throws ArgumentError load_config(file)
             end
         end
+    end
+
+    @testset "CLI oversampling override" begin
+        args = ["--config", "config.toml"]
+        @test parse_l2_args(args)["nOversample"] === nothing
+        @test parse_l2_args([args; "--nOversample"; "0"])["nOversample"] === nothing
+        @test parse_l2_args([args; "--nOversample"; "7"])["nOversample"] == 7
+        @test_throws ArgumentError parse_l2_args([args; "--nOversample"; "1025"])
+        @test_throws ArgumentError SubpixelGridding(0)
     end
 
     @testset "load_config — TOML with string filter expressions" begin

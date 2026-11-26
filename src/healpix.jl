@@ -308,9 +308,9 @@ end
 Whole-sphere HEALPix grid in NESTED order with equal solid angle per cell.
 The resolution is
 `nside = 2^level`. Accumulators fold the cells into `(nside^2, 12)` so linear
-index `pix + 1` addresses NESTED cell `pix`. Sequential accumulators and
-finalized slices use `T`. Select KA geometry and accumulator precision with
-`grid_l2`. Float32 accumulators (used on Metal) can report standard deviations
+index `pix + 1` addresses NESTED cell `pix`. Sequential accumulators use `T`.
+Select KA geometry and accumulator precision with `grid_l2`. Float32
+accumulators (used on Metal) can report standard deviations
 below roughly one ulp of the cell mean (`σ/|mean| ≲ 1e-7`) as zero. Use
 Float64 accumulators (the CUDA and KA CPU default) for small relative variability.
 Mean-only KA runs skip refinement. In either accumulator precision `A`, values
@@ -319,6 +319,14 @@ when shifted by the per-variable reference (`eps(Float64)` ≈ `2e-16`,
 `eps(Float32)` ≈ `1e-7`). Enable `compute_std` to recover those values.
 Sequential projections and output coordinates use Float64.
 Cell centres and optional vertex bounds are computed when writing NetCDF.
+
+To archive Float64 results exactly, use `T=Float64` for sequential gridding
+or Float64 KA accumulators, and set `[output]` `precision = "float64"`,
+`significant_digits_mean = "none"`, and `significant_digits_std = "none"`.
+The CLI creates Float32 grids. For HEALPix, only `--backend cpu` and
+`--backend cuda` accumulate in Float64 by default. Use this configuration for
+HEALPix 4:1 coarsening and regridding because quantization of nearly equal
+child means can dominate a small parent standard deviation at fine `nside`.
 
 The grid uses input geodetic latitude directly as spherical latitude,
 consistent with the cubed sphere. True WGS84 cell areas vary by about

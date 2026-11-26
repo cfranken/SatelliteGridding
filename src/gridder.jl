@@ -10,6 +10,16 @@ are used by default; pass `footprint_method=CircularFootprintGridding(...)` for
 circular products such as GOSAT. Circular footprints can be read from
 `lat_bnd`/`lon_bnd` or from center `lat`/`lon` plus `radius`.
 
+To archive Float64 results exactly, use Float64 accumulators and set `[output]`
+`precision = "float64"`, `significant_digits_mean = "none"`, and
+`significant_digits_std = "none"`. Use Float64 bounds and spacings for
+`GridSpec`, or `T=Float64` for `CubedSphereGridSpec` and sequential
+`HEALPixGridSpec`. The CLI creates Float32 grids. Only HEALPix on `--backend cpu`
+or `--backend cuda` accumulates in Float64 by default. Use this configuration
+for aggregation inputs such as HEALPix 4:1 coarsening or regridding. At fine
+`nside`, quantization of nearly equal child means can dominate a small parent
+standard deviation.
+
 # Arguments
 - `config::DataSourceConfig`: Data source configuration (from TOML/JSON)
 - `grid_spec::AbstractGridSpec`: Output grid geometry
@@ -34,7 +44,6 @@ circular products such as GOSAT. Circular footprints can be read from
   CUDA and KA CPU and `Float32` on Metal. With `Float32`, a standard deviation
   below roughly one ulp of the cell mean (`σ/|mean| ≲ 1e-7`) can be reported
   as zero. Use `Float64` when such small relative variability matters.
-  The grid element type is used for finalized slices.
 - `keep_going::Bool=false`: Continue after per-file errors. By default, the
   first file error stops the run.
 - `progress::Bool=stderr isa Base.TTY`: Draw progress bars (on stderr). By default they're
@@ -81,10 +90,10 @@ function _grid_l2(config::DataSourceConfig, grid_spec::AbstractGridSpec{T}, time
     spherical_std = spherical_ka !== nothing && compute_std
     grid_spec isa AbstractSphericalGridSpec && footprint_method isa CircularFootprintGridding &&
         error("CircularFootprintGridding is unsupported for $(typeof(grid_spec)). Use SubpixelGridding (quad footprints).")
-    zarr_out === nothing || _validate_zarr_grid(grid_spec)
+    output_options = _output_options(config.options)
+    zarr_out === nothing || _validate_zarr_output(grid_spec, output_options)
     _validate_l2_geometry_config(config, footprint_method)
     metadata = InputMetadata(config)
-    output_options = _output_options(config.options)
     rolling = is_rolling(time_spec)
     if rolling && backend !== nothing && compute_std && !spherical_std
         error("Rolling-mean standard deviation is not supported on the KA/GPU backend yet; use --backend sequential, or drop --compSTD for a mean-only KA rolling mean.")
@@ -131,7 +140,7 @@ function _grid_l2(config::DataSourceConfig, grid_spec::AbstractGridSpec{T}, time
         end
         if rolling
             total_files, successful_files, failed_files = _grid_l2_rolling!(
-                ds_out, nc_vars, config, grid_spec, time_spec, snapshots,
+                ds_out, nc_vars, config, grid_spec, output_options, time_spec, snapshots,
                 acc1, acc2, n_vars, use_ka, backend, compute_std,
                 effective_n_oversample, footprint_method, keep_going;
                 zg=zg, zarr_epoch=zarr_epoch, metadata=metadata, progress=progress, spherical_ka)
@@ -216,16 +225,15 @@ function _grid_l2(config::DataSourceConfig, grid_spec::AbstractGridSpec{T}, time
                         spherical_ka === nothing && finalize_mean!(grid_data_final, grid_w_cpu)
                         nothing
                     end
-                    _emit_l2_snapshot!(ds_out, nc_vars, zg, config, grid_spec,
-                        _spherical_output(T, grid_data_final), _spherical_output(T, std_final),
-                        _spherical_output(T, grid_w_cpu), spherical_std, ct, d;
+                    _emit_l2_snapshot!(ds_out, nc_vars, zg, config, grid_spec, output_options,
+                        grid_data_final, std_final, grid_w_cpu, spherical_std, ct, d;
                         window_start=d, window_end=end_date, zarr_epoch=zarr_epoch)
                     fill!(grid_sum, zero(A))
                 else
                     if compute_std
                         finalize_std!(grid_std_arr, grid_weights)
                     end
-                    _emit_l2_snapshot!(ds_out, nc_vars, zg, config, grid_spec,
+                    _emit_l2_snapshot!(ds_out, nc_vars, zg, config, grid_spec, output_options,
                         grid_data, grid_std_arr, grid_weights, compute_std, ct, d;
                         window_start=d, window_end=end_date, zarr_epoch=zarr_epoch)
                     fill!(grid_data, zero(T))

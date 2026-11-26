@@ -46,10 +46,6 @@ LON_MIN="${LON_MIN:--180}"
 LON_MAX="${LON_MAX:-180}"
 JOBS="${JOBS:-8}"
 N_OVERSAMPLE="${N_OVERSAMPLE:-0}"
-oversampling_args=()
-if [[ "$N_OVERSAMPLE" != 0 ]]; then
-    oversampling_args=(--nOversample "$N_OVERSAMPLE")
-fi
 FOOTPRINT="${FOOTPRINT:-quad}"
 CHUNK_DIR="${CHUNK_DIR:-${OUTFILE%.nc}_chunks}"
 KEEP_CHUNKS="${KEEP_CHUNKS:-0}"
@@ -100,7 +96,7 @@ for ((j=0; j<JOBS; j++)); do
             --dLat "$DLAT" --dLon "$DLON" \
             --startDate "$job_start" --stopDate "$job_stop" \
             --dDays "$DDAYS" \
-            "${oversampling_args[@]}" \
+            --nOversample "$N_OVERSAMPLE" \
             --footprint "$FOOTPRINT" \
             --keepGoing \
             -o "$chunk_file" \

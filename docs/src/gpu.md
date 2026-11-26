@@ -88,7 +88,17 @@ before upload and the kernel orders them in Float32. Set
 independently select the precision for weights, shifted sums, deviations,
 and rolling moments. CUDA and KA CPU default to Float64 for both settings.
 Metal requires Float32 for both and rejects an explicit Float64 setting.
-The grid's `T` is applied to finalized slices. NetCDF payloads use Float32.
+
+To archive Float64 results exactly, accumulate in Float64 and set
+`[output] precision = "float64"`, `significant_digits_mean = "none"`, and
+`significant_digits_std = "none"`. On the CLI, HEALPix with `--backend cpu`
+or `--backend cuda` uses Float64 accumulators by default. Other CLI modes
+accumulate in Float32. For sequential HEALPix in Julia, construct the grid
+with `HEALPixGridSpec(; nside=..., T=Float64)`. For other grids, use Float64
+bounds and spacings in `GridSpec` or `T=Float64` in `CubedSphereGridSpec`.
+Use this configuration for HEALPix 4:1 coarsening or regridding. At fine
+`nside`, quantization of nearly equal child means can dominate a small parent
+standard deviation.
 
 At `nside=2048`, Float32 shifts HEALPix cell edges by at most about 0.33 m.
 For representative OCO and TROPOMI footprints, the combined corner,
