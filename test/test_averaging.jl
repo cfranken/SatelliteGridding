@@ -265,4 +265,56 @@
         @test grid_std[1, 1, 1] ≈ 1.0f0  # sqrt(4/4)
         @test grid_std[1, 1, 2] ≈ sqrt(9.0f0 / 4.0f0)
     end
+
+    @testset "accumulate_footprint! bounds guard — prevfloat(90f0) through grid_l2" begin
+        spec = GridSpec(lat_min=-90f0, lat_max=90f0,
+                        lon_min=-180f0, lon_max=180f0,
+                        dlat=2f0, dlon=2f0)
+        edge_lat = prevfloat(90f0)  # passes apply_filters (< 90f0) but maps to row 91.0f0 in Float32
+        mktempdir() do dir
+            infile = joinpath(dir, "edge_seq_2020-01-01.nc")
+            Dataset(infile, "c") do ds
+                defDim(ds, "x", 3)
+                defDim(ds, "nv", 4)
+                # 1: fast-path all corners at prevfloat(90f0) -> row 91 (OOB, dropped)
+                # 2: oversample-path spanning [87.5f0, prevfloat(90f0)] -> partial in-grid
+                # 3: interior footprint in cell (91, 46)
+                defVar(ds, "lat", Float32, ("x",))[:] = Float32[edge_lat, 88.75f0, 0.5f0]
+                defVar(ds, "lon", Float32, ("x",))[:] = Float32[0.5f0, 4.5f0, 0.5f0]
+                defVar(ds, "lat_bnds", Float32, ("x", "nv"))[:, :] = Float32[
+                    edge_lat edge_lat edge_lat edge_lat;
+                    87.5f0   87.5f0   edge_lat edge_lat;
+                    0.2f0    0.2f0    0.8f0    0.8f0
+                ]
+                defVar(ds, "lon_bnds", Float32, ("x", "nv"))[:, :] = Float32[
+                    0.2f0 0.8f0 0.8f0 0.2f0;
+                    4.2f0 4.8f0 4.8f0 4.2f0;
+                    0.2f0 0.8f0 0.8f0 0.2f0
+                ]
+                defVar(ds, "val", Float32, ("x",))[:] = Float32[99.0f0, 20.0f0, 5.0f0]
+            end
+            cfg = DataSourceConfig(
+                Dict("lat" => "lat", "lon" => "lon",
+                     "lat_bnd" => "lat_bnds", "lon_bnd" => "lon_bnds"),
+                OrderedDict("val" => "val"), FilterRule[], "edge_seq_YYYY-MM-DD.nc", dir)
+            ts = TimeSpec(DateTime(2020, 1, 1), DateTime(2020, 1, 1), Dates.Day(1))
+            outfile = joinpath(dir, "out_seq.nc")
+
+            grid_l2(cfg, spec, ts; footprint_method=SubpixelGridding(4),
+                    outfile=outfile, backend=nothing, progress=false)
+
+            w, v = Dataset(outfile) do ds
+                Array(ds["n"][:, :, 1]), Array(ds["val"][:, :, 1])
+            end
+            # Fast-path prevfloat(90f0) footprint was dropped without OOB write
+            @test w[91, 90] == 0.0f0
+            # Interior footprint accumulated normally
+            @test w[91, 46] == 1.0f0
+            @test v[91, 46] ≈ 5.0f0
+            # Oversample footprint landed cleanly in column 93 (lon 4..6°), rows 89..90
+            @test w[93, 89] + w[93, 90] > 0.0f0
+            @test w[93, 89] + w[93, 90] <= 1.0f0
+            @test v[93, 90] ≈ 20.0f0
+        end
+    end
 end

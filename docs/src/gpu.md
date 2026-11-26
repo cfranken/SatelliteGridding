@@ -118,6 +118,70 @@ samples and uses per-footprint normalization.
 After processing all files for a time step, `finalize_mean!` divides sums by
 weights to compute the mean.
 
+## Boundary Behavior and Geometry Precision
+
+### Geometry Precision and Sequential Parity
+
+The rectangular KA paths mirror the sequential arithmetic — element types,
+subdivision formulas, and rounding steps — so that on KA CPU and CUDA the chosen
+oversampling factor `n` and the `(footprint, sample, cell)` assignments match
+the sequential path:
+
+- **Fractional indices and automatic `n` (before the kernels)**: Both sequential
+  and KA paths compute fractional grid indices directly from the input
+  coordinates and `GridSpec{T}` bounds in `promote_type(eltype(coords), T)`, and
+  select automatic `n` from those indices before any backend transfer. When both
+  the input coordinates and `GridSpec` are `Float32`, `Float32` rounding (such
+  as `prevfloat(90f0)` mapping to fractional row `91.0f0` on a `2°` global grid)
+  already occurs during this pre-kernel index calculation on both paths.
+- **Quadrilateral kernels (KA CPU and CUDA)**: Corner coordinates keep their
+  input element type; edge subdivisions are widened to `Float64` baseline points
+  and connecting lines are subdivided in `Float64`, then rounded to the grid
+  accumulator type `T` before `floor`, matching `compute_subpixels!` and
+  `floor_indices!`.
+- **Circular kernels (KA CPU and CUDA)**: Centers and corners are promoted
+  internally to `Float64` to compute symmetric radii and evaluate the sample
+  loop, matching `_circle_footprint_axes` and `accumulate_circular_footprint!`.
+  Single-cell circular footprints take a fast path that adds weight `1` once per
+  footprint, whereas the sequential path repeatedly adds the rounded per-sample
+  weight (`T(1 / inside_count)`) once per inside sample. Cell assignments remain
+  identical, while the sequential weight sum drifts with cell occupancy (for
+  example, 1,000 single-cell `Float32` footprints at `n = 20` accumulate
+  `1001.98` sequentially versus `1000` on KA). Remaining circular differences
+  stay within per-cell tolerance.
+- **Accumulators and means**: Grid accumulators (`grid_sum`, `grid_weights`)
+  remain in the `GridSpec` element type `T`. Finalized means can still differ at
+  floating-point rounding level because the sequential path uses Welford's
+  online update whereas KA accumulates weighted sums.
+- **Metal exception**: Metal does not support `Float64`. Any `Float64`
+  coordinate inputs are converted to `Float32` on transfer, and both
+  quadrilateral intermediate baseline interpolation and circular radius/sample
+  arithmetic execute in `Float32`. On Metal, footprints or sub-samples right on
+  cell boundaries may therefore be assigned to an adjacent cell relative to the
+  sequential path.
+
+### Out-of-Grid Sub-Samples and Global Boundaries
+
+- **Drop without renormalization**: On all rectangular paths (sequential and KA,
+  quadrilateral and circular), sub-samples that fall outside
+  `1..n_lon × 1..n_lat` are dropped without renormalizing the remaining in-grid
+  weights (`1/n²` for quadrilaterals, `1/inside_count` for circles). Dropping
+  without renormalization keeps regional boundary cells domain-invariant so
+  accumulated weights (`"n"`) reflect true fractional footprint overlap and a
+  grazing edge footprint cannot bias a boundary cell's mean relative to interior
+  footprints.
+- **Global edges (`±180°` and poles)**: On global rectangular grids, sub-samples
+  beyond `±180°` longitude or beyond `±90°` latitude are dropped rather than
+  wrapped across the antimeridian or folded across the poles.
+- **Spatial filtering in `grid_l2`**: `apply_filters` requires all four
+  footprint corners to lie strictly inside `(lat_min, lat_max) × (lon_min, lon_max)`
+  (and longitude span `< 50°`), excluding edge-straddling footprints before
+  accumulation.
+- **Circular footprint radius**: Circular footprints infer symmetric latitude
+  and longitude semi-axes from the farthest corner (`max |corner - center|`
+  along each axis), which introduces `≲ 0.1%` edge weight bias for physical
+  GOSAT-like viewing geometry.
+
 ## Performance Considerations
 
 ### Data Transfer

@@ -82,3 +82,33 @@ function metal_backend()
         error("Metal backend requested but Metal.jl is not loaded. Run `using Metal` or use `resolve_backend(\"metal\")`.")
     ext.metal_backend()
 end
+
+"""
+    _ka_float64_type(backend) -> Type{<:AbstractFloat}
+
+Return `Float64` when `backend` supports double precision (KA CPU, CUDA) and
+`Float32` otherwise (Metal). Used only where the sequential path performs
+`Float64` arithmetic internally (circular footprint geometry and intermediate
+quadrilateral baseline interpolation).
+"""
+_ka_float64_type(backend) =
+    KernelAbstractions.supports_float64(backend) ? Float64 : Float32
+
+"""
+    _ka_supported_float(backend, T) -> Type{<:AbstractFloat}
+
+Return `T` unchanged when `backend` supports it, falling back to `Float32` when
+`T === Float64` on a backend without double-precision support (Metal).
+"""
+_ka_supported_float(backend, ::Type{T}) where {T<:AbstractFloat} =
+    (T === Float64 && !KernelAbstractions.supports_float64(backend)) ? Float32 : T
+_ka_supported_float(backend, ::Type{<:Real}) = _ka_float64_type(backend)
+
+function _to_backend_array(backend, a::AbstractArray)
+    backend isa CPU && return a
+    E = _ka_supported_float(backend, eltype(a))
+    host = eltype(a) === E ? a : E.(a)
+    dev = KernelAbstractions.allocate(backend, E, size(host))
+    copyto!(dev, host)
+    return dev
+end

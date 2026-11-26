@@ -212,22 +212,39 @@ end
 
 """
     compute_footprint_indices_ka!(backend, ix_out, iy_out, skip_flag,
-                                  lat_corners, lon_corners, n)
+                                  lat_corners, lon_corners, n;
+                                  n_lon=typemax(Int32), n_lat=typemax(Int32))
 
-KA kernel that computes n×n sub-pixel grid indices for each footprint.
-Also sets `skip_flag[fp] = true` if the footprint's longitude extent >= n
-(too wide to oversample meaningfully).
+Compute `n×n` sub-pixel grid indices for each quadrilateral footprint on
+`backend`, mirroring the sequential [`compute_subpixels!`](@ref) and
+[`floor_indices!`](@ref) arithmetic.
 
-For footprints where all 4 corners fall in the same cell, the kernel
-stores the single cell index in position 1 and marks all other positions
-with ix=-1 (sentinel). The accumulation kernel handles these fast-path
-footprints by checking `skip_flag`.
+On backends that support double precision (KA CPU, CUDA), corners remain in
+their input element type, edge subdivisions are converted to `Float64`
+baseline coordinates, connecting-line subdivisions are evaluated in `Float64`,
+and sub-sample coordinates are rounded to the point storage type (matching
+`eltype(lat_corners)` here, or the grid accumulator type `T` when invoked from
+[`accumulate_batch!`](@ref)) before `floor`. On Metal, where `Float64` is
+unavailable, all steps execute in `Float32` and boundary cell assignments may
+differ from the sequential path.
 
-- `ix_out`: (n_fp, n²) Int32 — lat grid cell indices
-- `iy_out`: (n_fp, n²) Int32 — lon grid cell indices
-- `skip_flag`: (n_fp,) Int32 — 0=oversample, 1=fast-path (single cell), 2=skip (too wide)
-- `lat_corners`, `lon_corners`: (n_fp, 4) — fractional grid indices of corners
+Sets `skip_flag[fp] = 2` if the footprint's longitude extent `>= n` (too wide
+to oversample meaningfully) or if a single-cell fast-path footprint falls
+outside `1..n_lon × 1..n_lat`. For single-cell fast-path footprints inside the
+grid, stores the cell index in position 1 and marks all other positions `-1`.
+
+Sub-pixels outside `1..n_lon × 1..n_lat` are marked `-1` and dropped without
+renormalizing remaining sub-pixel weights (`1/n²`), keeping boundary-cell
+weights equal to true fractional footprint overlap so regional boundary means
+remain domain-invariant. On global rectangular grids, samples beyond `±180°`
+longitude or beyond the poles are dropped rather than wrapped.
+
+- `ix_out`: `(n_fp, n²)` `Int32` — lon grid cell indices (`-1` for masked/out-of-bounds)
+- `iy_out`: `(n_fp, n²)` `Int32` — lat grid cell indices (`-1` for masked/out-of-bounds)
+- `skip_flag`: `(n_fp,)` `Int32` — `0`=oversample, `1`=fast-path (single cell), `2`=skip (too wide or out of bounds)
+- `lat_corners`, `lon_corners`: `(n_fp, 4)` — fractional grid indices of corners
 - `n`: oversampling factor
+- `n_lon`, `n_lat`: grid dimensions for bounds clipping (default: `typemax(Int32)`)
 """
 function compute_footprint_indices_ka!(backend,
                                        ix_out::AbstractMatrix{Int32},
@@ -235,28 +252,63 @@ function compute_footprint_indices_ka!(backend,
                                        skip_flag::AbstractVector{Int32},
                                        lat_corners::AbstractMatrix,
                                        lon_corners::AbstractMatrix,
-                                       n::Int)
+                                       n::Int;
+                                       n_lon::Integer=typemax(Int32),
+                                       n_lat::Integer=typemax(Int32))
+    point_type = _ka_supported_float(backend,
+                                     promote_type(eltype(lat_corners), eltype(lon_corners)))
+    _compute_footprint_indices_ka!(backend, ix_out, iy_out, skip_flag,
+                                   lat_corners, lon_corners, n,
+                                   n_lon, n_lat, point_type)
+end
+
+function _compute_footprint_indices_ka!(backend,
+                                        ix_out::AbstractMatrix{Int32},
+                                        iy_out::AbstractMatrix{Int32},
+                                        skip_flag::AbstractVector{Int32},
+                                        lat_corners::AbstractMatrix,
+                                        lon_corners::AbstractMatrix,
+                                        n::Int,
+                                        n_lon::Integer,
+                                        n_lat::Integer,
+                                        ::Type{P}) where {P<:AbstractFloat}
     n_fp = size(lat_corners, 1)
+    baseline_zero = zero(_ka_float64_type(backend))
+    point_zero = zero(P)
     kernel! = _compute_indices_kernel!(backend)
-    kernel!(ix_out, iy_out, skip_flag, lat_corners, lon_corners, Int32(n), ndrange=n_fp)
+    kernel!(ix_out, iy_out, skip_flag, lat_corners, lon_corners,
+            Int32(n), Int32(n_lon), Int32(n_lat),
+            baseline_zero, point_zero, ndrange=n_fp)
     KernelAbstractions.synchronize(backend)
     nothing
 end
 
 @kernel function _compute_indices_kernel!(ix_out, iy_out, skip_flag,
-                                          lat_corners, lon_corners, n::Int32)
+                                          lat_corners, lon_corners,
+                                          n::Int32, n_lon::Int32, n_lat::Int32,
+                                          baseline_zero::B,
+                                          point_zero::P) where {B<:AbstractFloat,P<:AbstractFloat}
     fp = @index(Global)
 
     @inbounds begin
+        la1 = lat_corners[fp, 1]
+        la2 = lat_corners[fp, 2]
+        la3 = lat_corners[fp, 3]
+        la4 = lat_corners[fp, 4]
+        lo1 = lon_corners[fp, 1]
+        lo2 = lon_corners[fp, 2]
+        lo3 = lon_corners[fp, 3]
+        lo4 = lon_corners[fp, 4]
+
         # Compute grid-cell bounding box for this footprint
-        il1 = floor(Int32, lat_corners[fp, 1])
-        il2 = floor(Int32, lat_corners[fp, 2])
-        il3 = floor(Int32, lat_corners[fp, 3])
-        il4 = floor(Int32, lat_corners[fp, 4])
-        io1 = floor(Int32, lon_corners[fp, 1])
-        io2 = floor(Int32, lon_corners[fp, 2])
-        io3 = floor(Int32, lon_corners[fp, 3])
-        io4 = floor(Int32, lon_corners[fp, 4])
+        il1 = floor(Int32, la1)
+        il2 = floor(Int32, la2)
+        il3 = floor(Int32, la3)
+        il4 = floor(Int32, la4)
+        io1 = floor(Int32, lo1)
+        io2 = floor(Int32, lo2)
+        io3 = floor(Int32, lo3)
+        io4 = floor(Int32, lo4)
 
         min_lat = min(il1, il2, il3, il4)
         max_lat = max(il1, il2, il3, il4)
@@ -270,12 +322,20 @@ end
 
         if (dim_lat == Int32(0)) & (dim_lon == Int32(0))
             # Fast path: all corners in one cell
-            skip_flag[fp] = Int32(1)
-            ix_out[fp, 1] = io1
-            iy_out[fp, 1] = il1
-            for k in Int32(2):nsq
-                ix_out[fp, k] = Int32(-1)
-                iy_out[fp, k] = Int32(-1)
+            if (Int32(1) <= io1) & (io1 <= n_lon) & (Int32(1) <= il1) & (il1 <= n_lat)
+                skip_flag[fp] = Int32(1)
+                ix_out[fp, 1] = io1
+                iy_out[fp, 1] = il1
+                for k in Int32(2):nsq
+                    ix_out[fp, k] = Int32(-1)
+                    iy_out[fp, k] = Int32(-1)
+                end
+            else
+                skip_flag[fp] = Int32(2)
+                for k in Int32(1):nsq
+                    ix_out[fp, k] = Int32(-1)
+                    iy_out[fp, k] = Int32(-1)
+                end
             end
         elseif dim_lon >= n
             # Too wide: skip this footprint
@@ -285,27 +345,48 @@ end
                 iy_out[fp, k] = Int32(-1)
             end
         else
-            # Oversample: compute n×n subpixel indices
+            # Oversample: mirror subdivide_baseline! + subdivide_line! + floor_indices!
             skip_flag[fp] = Int32(0)
 
-            # Subdivide edge 1→2 and edge 4→3, then connect across
-            inv2n = one(eltype(lat_corners)) / (2 * n)
+            two_n = Int32(2) * n
+            dlat0 = (la2 - la1) / two_n
+            dlon0 = (lo2 - lo1) / two_n
+            start_lat0 = la1 + dlat0
+            start_lon0 = lo1 + dlon0
+
+            dlat1 = (la3 - la4) / two_n
+            dlon1 = (lo3 - lo4) / two_n
+            start_lat1 = la4 + dlat1
+            start_lon1 = lo4 + dlon1
+
             for i in Int32(1):n
-                # Points along edge 1→2
-                t0 = (2 * i - Int32(1)) * inv2n
-                lat0 = lat_corners[fp, 1] + t0 * (lat_corners[fp, 2] - lat_corners[fp, 1])
-                lon0 = lon_corners[fp, 1] + t0 * (lon_corners[fp, 2] - lon_corners[fp, 1])
-                # Points along edge 4→3
-                lat1 = lat_corners[fp, 4] + t0 * (lat_corners[fp, 3] - lat_corners[fp, 4])
-                lon1 = lon_corners[fp, 4] + t0 * (lon_corners[fp, 3] - lon_corners[fp, 4])
+                step_i = Int32(2) * (i - Int32(1))
+                # Points along edge 1→2 and edge 4→3 (stored in baseline buffer type B)
+                lat0 = convert(B, start_lat0 + step_i * dlat0)
+                lon0 = convert(B, start_lon0 + step_i * dlon0)
+                lat1 = convert(B, start_lat1 + step_i * dlat1)
+                lon1 = convert(B, start_lon1 + step_i * dlon1)
+
+                # Subdivide connecting line in type B, round to point type P before floor
+                dlat = (lat1 - lat0) / two_n
+                dlon = (lon1 - lon0) / two_n
+                start_lat = lat0 + dlat
+                start_lon = lon0 + dlon
 
                 for j in Int32(1):n
-                    t1 = (2 * j - Int32(1)) * inv2n
-                    sub_lat = lat0 + t1 * (lat1 - lat0)
-                    sub_lon = lon0 + t1 * (lon1 - lon0)
+                    step_j = Int32(2) * (j - Int32(1))
+                    sub_lat = convert(P, start_lat + step_j * dlat)
+                    sub_lon = convert(P, start_lon + step_j * dlon)
                     k = (i - Int32(1)) * n + j
-                    ix_out[fp, k] = floor(Int32, sub_lon)
-                    iy_out[fp, k] = floor(Int32, sub_lat)
+                    col = floor(Int32, sub_lon)
+                    row = floor(Int32, sub_lat)
+                    if (Int32(1) <= col) & (col <= n_lon) & (Int32(1) <= row) & (row <= n_lat)
+                        ix_out[fp, k] = col
+                        iy_out[fp, k] = row
+                    else
+                        ix_out[fp, k] = Int32(-1)
+                        iy_out[fp, k] = Int32(-1)
+                    end
                 end
             end
         end
@@ -315,13 +396,26 @@ end
 """
     compute_circular_footprint_indices_ka!(backend, ix_out, iy_out, inside_count,
                                            skip_flag, center_lat, center_lon,
-                                           lat_corners, lon_corners, n)
+                                           lat_corners, lon_corners, n;
+                                           n_lon=typemax(Int32), n_lat=typemax(Int32))
 
-KA kernel that computes sampled grid-cell indices for circular or near-circular
-footprints. The four coordinates define the footprint bounding box or edge
-points around the center coordinate. Points outside the inferred circle/ellipse
-are marked with `-1`; `inside_count[fp]` stores the number of valid samples used
-for normalizing the scatter weight.
+Compute sampled grid-cell indices for circular or near-circular footprints on
+`backend`, mirroring [`accumulate_circular_footprint!`](@ref). Symmetric
+latitude and longitude radii are inferred from the farthest corner
+(`max |corner - center|` along each axis; `≲ 0.1%` edge weight bias for
+GOSAT-like viewing geometry). On backends that support double precision
+(KA CPU, CUDA), centers and corners are promoted internally to `Float64` for
+radius calculation and sample-loop evaluation (matching `_circle_footprint_axes`
+and `accumulate_circular_footprint!`); on Metal, where `Float64` is
+unavailable, these steps execute in `Float32` and boundary cell assignments may
+differ from the sequential path.
+
+Points outside the inferred circle/ellipse or outside `1..n_lon × 1..n_lat` are
+marked `-1`; `inside_count[fp]` stores all samples inside the circle/ellipse so
+out-of-grid samples are dropped without renormalizing in-grid weights, keeping
+boundary-cell weights equal to true fractional footprint overlap and regional
+boundary means domain-invariant. On global rectangular grids, samples beyond
+`±180°` longitude or beyond the poles are dropped rather than wrapped.
 """
 function compute_circular_footprint_indices_ka!(backend,
                                                 ix_out::AbstractMatrix{Int32},
@@ -332,11 +426,15 @@ function compute_circular_footprint_indices_ka!(backend,
                                                 center_lon::AbstractVector,
                                                 lat_corners::AbstractMatrix,
                                                 lon_corners::AbstractMatrix,
-                                                n::Int)
+                                                n::Int;
+                                                n_lon::Integer=typemax(Int32),
+                                                n_lat::Integer=typemax(Int32))
     n_fp = size(lat_corners, 1)
+    geom_zero = zero(_ka_float64_type(backend))
     kernel! = _compute_circular_indices_kernel!(backend)
     kernel!(ix_out, iy_out, inside_count, skip_flag, center_lat, center_lon,
-            lat_corners, lon_corners, Int32(n), ndrange=n_fp)
+            lat_corners, lon_corners, Int32(n), Int32(n_lon), Int32(n_lat),
+            geom_zero, ndrange=n_fp)
     KernelAbstractions.synchronize(backend)
     nothing
 end
@@ -344,45 +442,35 @@ end
 @kernel function _compute_circular_indices_kernel!(ix_out, iy_out, inside_count,
                                                    skip_flag, center_lat, center_lon,
                                                    lat_corners, lon_corners,
-                                                   n::Int32)
+                                                   n::Int32, n_lon::Int32, n_lat::Int32,
+                                                   geom_zero::G) where {G<:AbstractFloat}
     fp = @index(Global)
 
     @inbounds begin
-        oneT = one(eltype(lat_corners))
-        twoT = oneT + oneT
-        halfT = oneT / twoT
-        zeroT = zero(eltype(lat_corners))
+        oneG = one(G)
+        twoG = oneG + oneG
+        halfG = oneG / twoG
+        zeroG = zero(G)
+        epsG = eps(G)
 
-        clat = center_lat[fp]
-        clon = center_lon[fp]
-        radius_lat = zeroT
-        radius_lon = zeroT
+        clat = convert(G, center_lat[fp])
+        clon = convert(G, center_lon[fp])
+        radius_lat = zeroG
+        radius_lon = zeroG
 
         for c in Int32(1):Int32(4)
-            radius_lat = max(radius_lat, abs(lat_corners[fp, c] - clat))
-            radius_lon = max(radius_lon, abs(lon_corners[fp, c] - clon))
+            radius_lat = max(radius_lat, abs(convert(G, lat_corners[fp, c]) - clat))
+            radius_lon = max(radius_lon, abs(convert(G, lon_corners[fp, c]) - clon))
         end
 
         nsq = n * n
         center_col = floor(Int32, clon)
         center_row = floor(Int32, clat)
+        center_in_bounds = (Int32(1) <= center_col) & (center_col <= n_lon) &
+                           (Int32(1) <= center_row) & (center_row <= n_lat)
 
-        if (radius_lat <= zeroT) | (radius_lon <= zeroT)
-            skip_flag[fp] = Int32(1)
-            inside_count[fp] = Int32(1)
-            ix_out[fp, 1] = center_col
-            iy_out[fp, 1] = center_row
-            for k in Int32(2):nsq
-                ix_out[fp, k] = Int32(-1)
-                iy_out[fp, k] = Int32(-1)
-            end
-        else
-            min_lat = floor(Int32, clat - radius_lat)
-            max_lat = floor(Int32, clat + radius_lat)
-            min_lon = floor(Int32, clon - radius_lon)
-            max_lon = floor(Int32, clon + radius_lon)
-
-            if (max_lat - min_lat == Int32(0)) & (max_lon - min_lon == Int32(0))
+        if (radius_lat <= epsG) | (radius_lon <= epsG)
+            if center_in_bounds
                 skip_flag[fp] = Int32(1)
                 inside_count[fp] = Int32(1)
                 ix_out[fp, 1] = center_col
@@ -392,24 +480,64 @@ end
                     iy_out[fp, k] = Int32(-1)
                 end
             else
+                skip_flag[fp] = Int32(2)
+                inside_count[fp] = Int32(0)
+                for k in Int32(1):nsq
+                    ix_out[fp, k] = Int32(-1)
+                    iy_out[fp, k] = Int32(-1)
+                end
+            end
+        else
+            min_lat = floor(Int32, clat - radius_lat)
+            max_lat = floor(Int32, clat + radius_lat)
+            min_lon = floor(Int32, clon - radius_lon)
+            max_lon = floor(Int32, clon + radius_lon)
+
+            if (max_lat - min_lat == Int32(0)) & (max_lon - min_lon == Int32(0))
+                if center_in_bounds
+                    skip_flag[fp] = Int32(1)
+                    inside_count[fp] = Int32(1)
+                    ix_out[fp, 1] = center_col
+                    iy_out[fp, 1] = center_row
+                    for k in Int32(2):nsq
+                        ix_out[fp, k] = Int32(-1)
+                        iy_out[fp, k] = Int32(-1)
+                    end
+                else
+                    skip_flag[fp] = Int32(2)
+                    inside_count[fp] = Int32(0)
+                    for k in Int32(1):nsq
+                        ix_out[fp, k] = Int32(-1)
+                        iy_out[fp, k] = Int32(-1)
+                    end
+                end
+            else
                 skip_flag[fp] = Int32(0)
                 count = Int32(0)
 
                 for iy in Int32(1):n
                     lat = clat - radius_lat +
-                          (convert(eltype(lat_corners), iy) - halfT) *
-                          (twoT * radius_lat / convert(eltype(lat_corners), n))
+                          (convert(G, iy) - halfG) *
+                          (twoG * radius_lat / convert(G, n))
                     lat_norm = (lat - clat) / radius_lat
                     for ix in Int32(1):n
                         lon = clon - radius_lon +
-                              (convert(eltype(lat_corners), ix) - halfT) *
-                              (twoT * radius_lon / convert(eltype(lat_corners), n))
+                              (convert(G, ix) - halfG) *
+                              (twoG * radius_lon / convert(G, n))
                         lon_norm = (lon - clon) / radius_lon
                         k = (iy - Int32(1)) * n + ix
-                        if lat_norm * lat_norm + lon_norm * lon_norm <= oneT
+                        if lon_norm * lon_norm + lat_norm * lat_norm <= oneG
                             count += Int32(1)
-                            ix_out[fp, k] = floor(Int32, lon)
-                            iy_out[fp, k] = floor(Int32, lat)
+                            col = floor(Int32, lon)
+                            row = floor(Int32, lat)
+                            if (Int32(1) <= col) & (col <= n_lon) &
+                               (Int32(1) <= row) & (row <= n_lat)
+                                ix_out[fp, k] = col
+                                iy_out[fp, k] = row
+                            else
+                                ix_out[fp, k] = Int32(-1)
+                                iy_out[fp, k] = Int32(-1)
+                            end
                         else
                             ix_out[fp, k] = Int32(-1)
                             iy_out[fp, k] = Int32(-1)
@@ -418,13 +546,22 @@ end
                 end
 
                 if count == Int32(0)
-                    skip_flag[fp] = Int32(1)
-                    inside_count[fp] = Int32(1)
-                    ix_out[fp, 1] = center_col
-                    iy_out[fp, 1] = center_row
-                    for k in Int32(2):nsq
-                        ix_out[fp, k] = Int32(-1)
-                        iy_out[fp, k] = Int32(-1)
+                    if center_in_bounds
+                        skip_flag[fp] = Int32(1)
+                        inside_count[fp] = Int32(1)
+                        ix_out[fp, 1] = center_col
+                        iy_out[fp, 1] = center_row
+                        for k in Int32(2):nsq
+                            ix_out[fp, k] = Int32(-1)
+                            iy_out[fp, k] = Int32(-1)
+                        end
+                    else
+                        skip_flag[fp] = Int32(2)
+                        inside_count[fp] = Int32(0)
+                        for k in Int32(1):nsq
+                            ix_out[fp, k] = Int32(-1)
+                            iy_out[fp, k] = Int32(-1)
+                        end
                     end
                 else
                     inside_count[fp] = count
@@ -445,6 +582,7 @@ For each footprint:
 - `skip_flag == 0` (oversample): add weight=1/n² to each subpixel's cell
 - `skip_flag == 2` (skip): do nothing
 
+Samples whose `(col, row)` falls outside `1..n_lon × 1..n_lat` are dropped.
 This function is sequential (no atomics needed) and works with any array type.
 For GPU backends, use the `@kernel` version with `@atomic` instead.
 
@@ -462,6 +600,7 @@ function scatter_accumulate!(grid_sum::AbstractArray{T,3},
                              values::AbstractMatrix,
                              n::Int, n_vars::Int) where {T}
     n_fp = size(ix, 1)
+    n_lon, n_lat = size(grid_weights)
     fac = T(1 / n^2)
     nsq = n * n
 
@@ -472,9 +611,11 @@ function scatter_accumulate!(grid_sum::AbstractArray{T,3},
             # Fast path: single cell, weight = 1
             col = Int(ix[fp, 1])
             row = Int(iy[fp, 1])
-            grid_weights[col, row] += one(T)
-            for z in 1:n_vars
-                grid_sum[col, row, z] += values[fp, z]
+            if 1 <= col <= n_lon && 1 <= row <= n_lat
+                grid_weights[col, row] += one(T)
+                for z in 1:n_vars
+                    grid_sum[col, row, z] += values[fp, z]
+                end
             end
 
         elseif flag == 0
@@ -482,9 +623,11 @@ function scatter_accumulate!(grid_sum::AbstractArray{T,3},
             for k in 1:nsq
                 col = Int(ix[fp, k])
                 row = Int(iy[fp, k])
-                grid_weights[col, row] += fac
-                for z in 1:n_vars
-                    grid_sum[col, row, z] += fac * values[fp, z]
+                if 1 <= col <= n_lon && 1 <= row <= n_lat
+                    grid_weights[col, row] += fac
+                    for z in 1:n_vars
+                        grid_sum[col, row, z] += fac * values[fp, z]
+                    end
                 end
             end
         end
@@ -499,7 +642,7 @@ end
 
 Sequential scatter-accumulate for circular footprints. Oversampled footprints
 use per-footprint weights `1 / inside_count[fp]` because samples outside the
-circle/ellipse are masked out.
+circle/ellipse are masked out. Samples outside `1..n_lon × 1..n_lat` are dropped.
 """
 function scatter_accumulate_circular!(grid_sum::AbstractArray{T,3},
                                       grid_weights::AbstractMatrix{T},
@@ -510,6 +653,7 @@ function scatter_accumulate_circular!(grid_sum::AbstractArray{T,3},
                                       values::AbstractMatrix,
                                       n::Int, n_vars::Int) where {T}
     n_fp = size(ix, 1)
+    n_lon, n_lat = size(grid_weights)
     nsq = n * n
 
     @inbounds for fp in 1:n_fp
@@ -518,9 +662,11 @@ function scatter_accumulate_circular!(grid_sum::AbstractArray{T,3},
         if flag == 1
             col = Int(ix[fp, 1])
             row = Int(iy[fp, 1])
-            grid_weights[col, row] += one(T)
-            for z in 1:n_vars
-                grid_sum[col, row, z] += values[fp, z]
+            if 1 <= col <= n_lon && 1 <= row <= n_lat
+                grid_weights[col, row] += one(T)
+                for z in 1:n_vars
+                    grid_sum[col, row, z] += values[fp, z]
+                end
             end
         elseif flag == 0
             count = inside_count[fp]
@@ -529,7 +675,7 @@ function scatter_accumulate_circular!(grid_sum::AbstractArray{T,3},
             for k in 1:nsq
                 col = Int(ix[fp, k])
                 row = Int(iy[fp, k])
-                if col > 0 && row > 0
+                if 1 <= col <= n_lon && 1 <= row <= n_lat
                     grid_weights[col, row] += fac
                     for z in 1:n_vars
                         grid_sum[col, row, z] += fac * values[fp, z]
@@ -548,6 +694,7 @@ end
 KA kernel version of scatter-accumulate using `@atomic` for thread safety.
 Required for GPU backends where multiple threads write to the same grid cells.
 For CPU backends, use `scatter_accumulate!` (sequential) instead.
+Samples outside `1..n_lon × 1..n_lat` are dropped.
 """
 function scatter_accumulate_ka!(backend,
                                 grid_sum::AbstractArray{T,3},
@@ -558,15 +705,17 @@ function scatter_accumulate_ka!(backend,
                                 values::AbstractMatrix,
                                 n::Int, n_vars::Int) where {T}
     n_fp = size(ix, 1)
+    n_lon, n_lat = size(grid_weights)
     kernel! = _scatter_kernel!(backend)
     kernel!(grid_sum, grid_weights, ix, iy, skip_flag, values,
-            Int32(n), Int32(n_vars), ndrange=n_fp)
+            Int32(n), Int32(n_vars), Int32(n_lon), Int32(n_lat), ndrange=n_fp)
     KernelAbstractions.synchronize(backend)
     nothing
 end
 
 @kernel function _scatter_kernel!(grid_sum, grid_weights, ix, iy, skip_flag,
-                                  values, n::Int32, n_vars::Int32)
+                                  values, n::Int32, n_vars::Int32,
+                                  n_lon::Int32, n_lat::Int32)
     fp = @index(Global)
 
     @inbounds begin
@@ -576,9 +725,11 @@ end
             # Fast path: single cell, weight = 1
             col = ix[fp, 1]
             row = iy[fp, 1]
-            @atomic grid_weights[col, row] += one(eltype(grid_weights))
-            for z in Int32(1):n_vars
-                @atomic grid_sum[col, row, z] += values[fp, z]
+            if (Int32(1) <= col) & (col <= n_lon) & (Int32(1) <= row) & (row <= n_lat)
+                @atomic grid_weights[col, row] += one(eltype(grid_weights))
+                for z in Int32(1):n_vars
+                    @atomic grid_sum[col, row, z] += values[fp, z]
+                end
             end
 
         elseif flag == Int32(0)
@@ -588,9 +739,11 @@ end
             for k in Int32(1):nsq
                 col = ix[fp, k]
                 row = iy[fp, k]
-                @atomic grid_weights[col, row] += fac
-                for z in Int32(1):n_vars
-                    @atomic grid_sum[col, row, z] += fac * values[fp, z]
+                if (Int32(1) <= col) & (col <= n_lon) & (Int32(1) <= row) & (row <= n_lat)
+                    @atomic grid_weights[col, row] += fac
+                    for z in Int32(1):n_vars
+                        @atomic grid_sum[col, row, z] += fac * values[fp, z]
+                    end
                 end
             end
         end
@@ -604,7 +757,7 @@ end
                                     values, n, n_vars)
 
 KA kernel version of circular-footprint scatter-accumulate using atomics for
-GPU backends.
+GPU backends. Samples outside `1..n_lon × 1..n_lat` are dropped.
 """
 function scatter_accumulate_circular_ka!(backend,
                                          grid_sum::AbstractArray{T,3},
@@ -616,16 +769,18 @@ function scatter_accumulate_circular_ka!(backend,
                                          values::AbstractMatrix,
                                          n::Int, n_vars::Int) where {T}
     n_fp = size(ix, 1)
+    n_lon, n_lat = size(grid_weights)
     kernel! = _scatter_circular_kernel!(backend)
     kernel!(grid_sum, grid_weights, ix, iy, inside_count, skip_flag, values,
-            Int32(n), Int32(n_vars), ndrange=n_fp)
+            Int32(n), Int32(n_vars), Int32(n_lon), Int32(n_lat), ndrange=n_fp)
     KernelAbstractions.synchronize(backend)
     nothing
 end
 
 @kernel function _scatter_circular_kernel!(grid_sum, grid_weights, ix, iy,
                                            inside_count, skip_flag, values,
-                                           n::Int32, n_vars::Int32)
+                                           n::Int32, n_vars::Int32,
+                                           n_lon::Int32, n_lat::Int32)
     fp = @index(Global)
 
     @inbounds begin
@@ -634,9 +789,11 @@ end
         if flag == Int32(1)
             col = ix[fp, 1]
             row = iy[fp, 1]
-            @atomic grid_weights[col, row] += one(eltype(grid_weights))
-            for z in Int32(1):n_vars
-                @atomic grid_sum[col, row, z] += values[fp, z]
+            if (Int32(1) <= col) & (col <= n_lon) & (Int32(1) <= row) & (row <= n_lat)
+                @atomic grid_weights[col, row] += one(eltype(grid_weights))
+                for z in Int32(1):n_vars
+                    @atomic grid_sum[col, row, z] += values[fp, z]
+                end
             end
         elseif flag == Int32(0)
             count = inside_count[fp]
@@ -646,7 +803,7 @@ end
                 for k in Int32(1):nsq
                     col = ix[fp, k]
                     row = iy[fp, k]
-                    if (col > Int32(0)) & (row > Int32(0))
+                    if (Int32(1) <= col) & (col <= n_lon) & (Int32(1) <= row) & (row <= n_lat)
                         @atomic grid_weights[col, row] += fac
                         for z in Int32(1):n_vars
                             @atomic grid_sum[col, row, z] += fac * values[fp, z]
