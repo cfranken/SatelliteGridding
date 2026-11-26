@@ -670,8 +670,8 @@ end
             obs_auto = (; lat=Float32[2.0000004f0], lon=Float32[2.0f0],
                           lat_bounds=Float32[4.0f-7 4.0f-7 4.0000005f0 4.0000005f0],
                           lon_bounds=Float32[1.5f0 2.5f0 2.5f0 1.5f0])
-            ilat_a, ilon_a, ilat_ca, ilon_ca =
-                SatelliteGridding._rectangular_indices(obs_auto, spec10)
+            ilat_a, ilon_a, _ =
+                SatelliteGridding._rectangular_indices(obs_auto, spec10, SubpixelGridding())
             @test ilat_a == Float32[1.0000004f0 1.0000004f0 5.0000005f0 5.0000005f0]
             auto_n_a = SatelliteGridding._l2_oversampling(ilat_a, ilon_a, nothing)
             @test auto_n_a == 12
@@ -782,8 +782,8 @@ end
                    ((vec(maximum(lon_bnd, dims=2)) .- vec(minimum(lon_bnd, dims=2))) .< 50.0)
             obs = (; lat=lat[keep], lon=lon[keep],
                    lat_bounds=lat_bnd[keep, :], lon_bounds=lon_bnd[keep, :])
-            ilat64, ilon64, ilat_c64, ilon_c64 =
-                SatelliteGridding._rectangular_indices(obs, spec)
+            ilat64, ilon64, (ilat_c64, ilon_c64) =
+                SatelliteGridding._rectangular_indices(obs, spec, CircularFootprintGridding())
             ilat32, ilon32, ilat_c32, ilon_c32 =
                 map(a -> Float32.(a), (ilat64, ilon64, ilat_c64, ilon_c64))
             n_fp = length(ilat_c64)

@@ -5,7 +5,8 @@
 Dispatch-based library entry point for gridding. The CLI still exposes explicit
 `l2` and `center` commands, while library callers can choose a gridding method
 with a first-class type such as `SubpixelGridding`,
-`CircularFootprintGridding`, or `CenterPointGridding`.
+`CircularFootprintGridding`, or `CenterPointGridding`. Pass `verbose=false`
+to suppress status messages.
 """
 function grid(config::DataSourceConfig, grid_spec::AbstractGridSpec,
               time_spec::TimeSpec; method::AbstractGriddingMethod=SubpixelGridding(),
@@ -14,17 +15,8 @@ function grid(config::DataSourceConfig, grid_spec::AbstractGridSpec,
 end
 
 function grid(config::DataSourceConfig, grid_spec::AbstractGridSpec,
-              time_spec::TimeSpec, method::SubpixelGridding; kwargs...)
-    grid_l2(config, grid_spec, time_spec;
-            footprint_method=method,
-            kwargs...)
-end
-
-function grid(config::DataSourceConfig, grid_spec::AbstractGridSpec,
-              time_spec::TimeSpec, method::CircularFootprintGridding; kwargs...)
-    grid_l2(config, grid_spec, time_spec;
-            footprint_method=method,
-            kwargs...)
+              time_spec::TimeSpec, method::_FootprintGridding; kwargs...)
+    grid_l2(config, grid_spec, time_spec; footprint_method=method, kwargs...)
 end
 
 function grid(config::DataSourceConfig, grid_spec::AbstractGridSpec,

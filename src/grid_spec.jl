@@ -225,7 +225,7 @@ const GridSpec = RectangularGridSpec
 # ---------------------------------------------------------------------------
 #
 # These mirror the original closed-form affine map in
-# `_process_l2_file!` / `_process_l2_file_ka!` and the dimension and
+# `_rectangular_indices` and the dimension and
 # coordinate-variable definitions in `create_output_dataset`. The
 # rectangular L2 paths use the affine map in bulk, while scalar callers
 # use this interface. The NetCDF writer dispatches through the methods below.
@@ -247,6 +247,7 @@ end
 grid_shape(spec::RectangularGridSpec) = (length(spec.lon), length(spec.lat))
 
 payload_dims(::RectangularGridSpec) = ("lon", "lat")
+_output_spatial_shape(spec::RectangularGridSpec) = grid_shape(spec)
 
 function write_coordinates!(ds, spec::RectangularGridSpec)
     defDim(ds, "lon", length(spec.lon))

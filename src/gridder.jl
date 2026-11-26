@@ -28,11 +28,12 @@ standard deviation.
 # Keyword Arguments
 - `n_oversample=nothing`: Sub-pixel factor in `1:1024`. `nothing` uses the grid's default.
 - `footprint_method::AbstractGriddingMethod=SubpixelGridding()`: Footprint geometry method.
-- `compute_std::Bool=false`: Also compute per-cell standard deviation. Mean-only
-  spherical KA runs skip mean refinement. For accumulator precision `A`, values
+- `compute_std::Bool=false`: Also compute per-cell standard deviation on
+  sequential and spherical KA paths. Mean-only spherical KA runs skip mean refinement. For accumulator precision `A`, values
   with magnitude below about `eps(A) * abs(reference - value)` can round away
   when shifted by the per-variable reference (`eps(Float64)` ≈ `2e-16`,
   `eps(Float32)` ≈ `1e-7`). Enable `compute_std` to recover those values.
+- `verbose::Bool=true`: Log run status with `@info`.
 - `outfile::String="gridded_output.nc"`: Output file path
 - `backend`: KernelAbstractions backend (default: `nothing` for sequential Welford path).
   Use `CPU()`, `CUDABackend()`, `MetalBackend()`, or another compatible KA backend.
@@ -63,202 +64,177 @@ function grid_l2(config::DataSourceConfig, grid_spec::AbstractGridSpec, time_spe
                  accumulator_precision=nothing,
                  keep_going::Bool=false,
                  progress::Bool=_default_progress(),
+                 verbose::Bool=true,
                  command::Union{Nothing,String}=nothing)
-    n_oversample = _validate_n_oversample(n_oversample)
-    footprint_method isa SubpixelGridding ||
-        footprint_method isa CircularFootprintGridding ||
-        error("grid_l2 supports SubpixelGridding and CircularFootprintGridding; use grid_center for center-coordinate gridding")
-    method_n_oversample = footprint_method.n_oversample
-    effective_n_oversample = method_n_oversample === nothing ? n_oversample : method_n_oversample
-    options = (; effective_n_oversample, footprint_method, compute_std, outfile, zarr_out,
-               zarr_meta, zarr_epoch, backend, geometry_precision, accumulator_precision,
-               keep_going, progress, command)
-    if backend === nothing || backend isa CPU
-        return _grid_l2(config, grid_spec, time_spec; options...)
-    end
-    # An optional backend can be loaded by resolve_backend in the calling expression.
-    return Base.invokelatest(_grid_l2, config, grid_spec, time_spec; options...)
+    method = _resolve_footprint_method(footprint_method, _validate_n_oversample(n_oversample))
+    run = L2Run(method, compute_std, outfile, zarr_out, zarr_meta, zarr_epoch,
+                keep_going, progress, verbose, command)
+    _start_l2(backend, config, grid_spec, time_spec, run, geometry_precision, accumulator_precision)
 end
 
-function _grid_l2(config::DataSourceConfig, grid_spec::AbstractGridSpec{T}, time_spec::TimeSpec;
-                  effective_n_oversample, footprint_method, compute_std, outfile, zarr_out, zarr_meta,
-                  zarr_epoch, backend, geometry_precision, accumulator_precision,
-                  keep_going, progress, command) where {T}
+const _FootprintGridding = Union{SubpixelGridding,CircularFootprintGridding}
 
-    spherical_ka = _spherical_ka_options(grid_spec, backend, geometry_precision, accumulator_precision)
-    A = spherical_ka === nothing ? T : spherical_ka.accumulator_precision
-    spherical_std = spherical_ka !== nothing && compute_std
-    grid_spec isa AbstractSphericalGridSpec && footprint_method isa CircularFootprintGridding &&
-        error("CircularFootprintGridding is unsupported for $(typeof(grid_spec)). Use SubpixelGridding (quad footprints).")
-    output_options = _output_options(config.options)
-    zarr_out === nothing || _validate_zarr_output(grid_spec, output_options)
-    _validate_l2_geometry_config(config, footprint_method)
-    metadata = InputMetadata(config)
-    rolling = is_rolling(time_spec)
-    if rolling && backend !== nothing && compute_std && !spherical_std
-        error("Rolling-mean standard deviation is not supported on the KA/GPU backend yet; use --backend sequential, or drop --compSTD for a mean-only KA rolling mean.")
+_resolve_footprint_method(method::M, n) where {M<:_FootprintGridding} =
+    method.n_oversample === nothing ? M(n) : method
+_resolve_footprint_method(method::AbstractGriddingMethod, n) =
+    error("grid_l2 supports SubpixelGridding and CircularFootprintGridding; use grid_center for center-coordinate gridding")
+
+"""Resolved footprint method, output destinations, and run controls for L2."""
+struct L2Run{M}
+    method::M
+    compute_std::Bool
+    outfile::String
+    zarr_out::Union{Nothing,String}
+    zarr_meta::Union{Nothing,String}
+    zarr_epoch::Date
+    keep_going::Bool
+    progress::Bool
+    verbose::Bool
+    command::Union{Nothing,String}
+end
+
+"""Input and output state shared for every file and snapshot in an L2 run."""
+struct L2Context{G,R,O,D,N,Z}
+    config::DataSourceConfig
+    spec::G
+    run::R
+    output_options::O
+    ds::D
+    nc_vars::N
+    zg::Z
+    metadata::InputMetadata
+    fill_attrib::Base.RefValue{Bool}
+end
+
+_start_l2(backend::Union{Nothing,CPU}, args...) = _grid_l2(backend, args...)
+
+# An optional backend can be loaded by resolve_backend in the calling expression.
+_start_l2(backend, args...) = Base.invokelatest(_grid_l2, backend, args...)
+
+function _validate_statistics(spec, backend, compute_std)
+    if backend !== nothing && compute_std
+        error("Rectangular KA gridding does not support compute_std=true; use --backend sequential or omit --compSTD.")
     end
+    nothing
+end
+_validate_statistics(::AbstractSphericalGridSpec, backend, compute_std) = nothing
 
-    # Snapshot schedule: spaced by `sample_step` (rolling) or `time_step` (tiled).
-    snapshots = rolling ?
-        collect(time_spec.start_date:time_spec.sample_step:time_spec.stop_date) :
-        collect(time_spec.start_date:time_spec.time_step:time_spec.stop_date)
+function _l2_schedule(time_spec)
+    step = time_spec.sample_step
+    if step === nothing
+        spacing = time_spec.time_step
+        time_long_name = "Time (UTC), start of interval"
+        status = nothing
+    else
+        spacing = step
+        time_long_name = "Time (UTC), center of averaging window"
+        status = "Rolling mean: step $step, window ±$(time_spec.window_halfwidth_days) day(s)"
+    end
+    snapshots = collect(time_spec.start_date:spacing:time_spec.stop_date)
+    (; snapshots, step, time_long_name, status)
+end
+
+function _grid_l2(backend, config, spec, time_spec, run, geometry_precision, accumulator_precision)
+    spherical_ka = _spherical_ka_options(spec, backend, geometry_precision, accumulator_precision)
+    _validate(spec, run.method)
+    output_options = _output_options(config.options)
+    run.zarr_out === nothing || _validate_zarr_output(spec, output_options)
+    _validate_l2_geometry_config(config, run.method)
+    metadata = InputMetadata(config)
+    _validate_statistics(spec, backend, run.compute_std)
+
+    (; snapshots, step, time_long_name, status) = _l2_schedule(time_spec)
     n_times = length(snapshots)
-    acc1, acc2 = accumulator_shape(grid_spec)
-    n_vars = length(config.grid_vars)
+    acc1, acc2 = accumulator_shape(spec)
 
-    use_ka = backend !== nothing
-
-    println("Output accumulator dimension (time/axis1/axis2): $n_times/$acc1/$acc2")
-    rolling && println("Rolling mean: step $(time_spec.sample_step), window ±$(time_spec.window_halfwidth_days) day(s)")
-    use_ka && println("Using KA backend: $backend")
+    if run.verbose
+        @info "Output accumulator dimension (time/axis1/axis2): $n_times/$acc1/$acc2"
+        status === nothing || @info status
+        backend === nothing || @info "Using KA backend: $backend"
+    end
 
     # NetCDF output is optional: an empty `outfile` means Zarr-only, which skips the
     # HDF5 write path entirely (no NetCDF byproduct, and no HDF5 failure surface).
-    write_nc = !isempty(outfile)
-    write_nc || zarr_out !== nothing ||
+    write_nc = !isempty(run.outfile)
+    write_nc || run.zarr_out !== nothing ||
         error("Nothing to write: pass a non-empty `outfile`, `zarr_out`, or both.")
 
-    time_long_name = rolling ? "Time (UTC), center of averaging window" :
-                               "Time (UTC), start of interval"
-    ds_out, nc_vars, zg = nothing, nothing, nothing
-
-    total_files = 0
-    successful_files = 0
-    failed_files = 0
-
+    ds, nc_vars, zg = nothing, nothing, nothing
     try
         if write_nc
-            ds_out, nc_vars = create_output_dataset(outfile, grid_spec, n_times,
-                config.grid_vars, compute_std; window_bounds=true,
-                time_long_name=time_long_name, command=command, filters=config.filters,
-                output_options=output_options, spherical_ka_std=spherical_std)
+            ds, nc_vars = create_output_dataset(run.outfile, spec, n_times, config.grid_vars,
+                run.compute_std; window_bounds=true, time_long_name, command=run.command,
+                filters=config.filters, output_options, spherical_ka_std=spherical_ka !== nothing && run.compute_std)
         end
-        if zarr_out !== nothing
-            zg = init_zarr_store(zarr_out, grid_spec, config.grid_vars;
-                                 epoch=zarr_epoch, compute_std=compute_std)
+        if run.zarr_out !== nothing
+            zg = init_zarr_store(run.zarr_out, spec, config.grid_vars;
+                                 epoch=run.zarr_epoch, compute_std=run.compute_std)
         end
-        if rolling
-            total_files, successful_files, failed_files = _grid_l2_rolling!(
-                ds_out, nc_vars, config, grid_spec, output_options, time_spec, snapshots,
-                acc1, acc2, n_vars, use_ka, backend, compute_std,
-                effective_n_oversample, footprint_method, keep_going;
-                zg=zg, zarr_epoch=zarr_epoch, metadata=metadata, progress=progress, spherical_ka)
-        else
-            # Allocate work arrays (on backend for GPU, regular Array for CPU)
-            if use_ka
-                grid_sum = KernelAbstractions.zeros(backend, A, acc1, acc2, n_vars)
-                grid_weights = KernelAbstractions.zeros(backend, A, acc1, acc2)
-                grid_m2 = spherical_std ? KernelAbstractions.allocate(backend, A, size(grid_sum)) : nothing
-                grid_residual = spherical_std ? KernelAbstractions.allocate(backend, A, size(grid_sum)) : nothing
-            else
-                # Welford running mean for sequential path
-                grid_data = zeros(T, acc1, acc2, n_vars)
-                grid_std_arr = compute_std ? zeros(T, acc1, acc2, n_vars) : nothing
-                grid_weights = zeros(T, acc1, acc2)
-            end
-
-            reference = spherical_ka === nothing ? nothing : _SphericalKAReference(backend, A, n_vars)
-            fill_attrib = true
-            p_time = _progress_bar(n_times, "Time steps: ", progress)
-
-            for (ct, d) in enumerate(snapshots)
-                ProgressMeter.next!(p_time; showvalues=[(:Time, d)])
-
-                # Find files for this time window
-                end_date = d + time_spec.time_step * time_spec.oversample_temporal - Dates.Day(1)
-                files = find_files_range(config.file_pattern, config.folder, d, end_date)
-                total_files += length(files)
-
-                p_files = _progress_bar(length(files), "  Files: ", progress)
-
-                reference === nothing || (reference.initialized = false)
-                bounds = spherical_std ? _spherical_mean_bounds!(grid_m2, grid_residual) : nothing
-                std_files = String[]
-                for filepath in files
-                    try
-                        if use_ka
-                            _process_l2_file_ka!(filepath, config, grid_spec, backend,
-                                                 grid_sum, grid_weights,
-                                                 effective_n_oversample,
-                                                 footprint_method,
-                                                 nc_vars, fill_attrib, p_files;
-                                                 metadata, spherical_ka, reference, pass=bounds)
-                            spherical_std && push!(std_files, filepath)
-                        else
-                            _process_l2_file!(filepath, config, grid_spec, grid_data, grid_std_arr,
-                                              grid_weights, compute_std,
-                                              effective_n_oversample,
-                                              footprint_method,
-                                              nc_vars, fill_attrib, p_files; metadata=metadata)
-                        end
-                        successful_files += 1
-                        if fill_attrib
-                            fill_attrib = false
-                        end
-                    catch e
-                        failed_files += 1
-                        if keep_going
-                            @warn "Error processing file; continuing" filepath error=sprint(showerror, e)
-                        else
-                            error("Error processing file $filepath: $(sprint(showerror, e))")
-                        end
-                    end
-                end
-
-                # Write time slice to output
-                if use_ka
-                    if spherical_std
-                        _accumulate_l2_std_pass!(std_files, config, grid_spec, backend,
-                            grid_m2, grid_residual, grid_weights, grid_sum, effective_n_oversample,
-                            footprint_method, spherical_ka; reference, bounds, progress)
-                    elseif spherical_ka !== nothing
-                        _finalize_spherical_mean!(backend, grid_sum, grid_weights, reference)
-                    end
-                    grid_data_final = Array(grid_sum)
-                    grid_w_cpu = Array(grid_weights)
-                    std_final = if spherical_std
-                        m2 = Array(grid_m2)
-                        _finalize_spherical_std!(m2, grid_w_cpu)
-                        m2
-                    else
-                        spherical_ka === nothing && finalize_mean!(grid_data_final, grid_w_cpu)
-                        nothing
-                    end
-                    _emit_l2_snapshot!(ds_out, nc_vars, zg, config, grid_spec, output_options,
-                        grid_data_final, std_final, grid_w_cpu, spherical_std, ct, d;
-                        window_start=d, window_end=end_date, zarr_epoch=zarr_epoch)
-                    fill!(grid_sum, zero(A))
-                else
-                    if compute_std
-                        finalize_std!(grid_std_arr, grid_weights)
-                    end
-                    _emit_l2_snapshot!(ds_out, nc_vars, zg, config, grid_spec, output_options,
-                        grid_data, grid_std_arr, grid_weights, compute_std, ct, d;
-                        window_start=d, window_end=end_date, zarr_epoch=zarr_epoch)
-                    fill!(grid_data, zero(T))
-                    compute_std && fill!(grid_std_arr, zero(T))
-                end
-
-                # Reset accumulators
-                fill!(grid_weights, zero(A))
-            end
-        end
-
-        total_files > 0 || error("No input files matched pattern '$(config.file_pattern)' in folder '$(config.folder)'")
-        successful_files > 0 || error("No input files were successfully processed; failed files: $failed_files")
+        acc = new_accumulator(spec, backend, spherical_ka, length(config.grid_vars), run.compute_std)
+        ctx = L2Context(config, spec, run, output_options, ds, nc_vars, zg, metadata, Ref(true))
+        total, successful = _run_l2_schedule!(acc, ctx, time_spec, snapshots, step)
+        total > 0 || error("No input files matched pattern '$(config.file_pattern)' in folder '$(config.folder)'")
+        successful > 0 || error("No input files were successfully processed; failed files: $(total - successful)")
     finally
-        _close_output_dataset!(ds_out, metadata)
+        _close_output_dataset!(ds, metadata)
     end
 
-    if zarr_out !== nothing
-        _write_zarr_provenance!(zarr_out, config, metadata, command)
-        consolidate_zarr!(zarr_out)
-        zarr_meta === nothing ||
-            write_zarr_meta_json(zarr_meta, grid_spec, config.grid_vars; epoch=zarr_epoch)
-        println("Zarr store updated: $zarr_out")
+    if run.zarr_out !== nothing
+        _write_zarr_provenance!(run.zarr_out, config, metadata, run.command)
+        consolidate_zarr!(run.zarr_out)
+        run.zarr_meta === nothing ||
+            write_zarr_meta_json(run.zarr_meta, spec, config.grid_vars; epoch=run.zarr_epoch)
+        run.verbose && @info "Zarr store updated: $(run.zarr_out)"
     end
 
-    write_nc && println("Output written to: $outfile")
+    run.verbose && write_nc && @info "Output written to: $(run.outfile)"
     nothing
+end
+
+function _run_l2_schedule!(acc, ctx, time_spec, snapshots, ::Nothing)
+    (; config, run) = ctx
+    total = successful = 0
+    p_time = _progress_bar(length(snapshots), "Time steps: ", run.progress)
+    for (ct, d) in enumerate(snapshots)
+        ProgressMeter.next!(p_time; showvalues=[(:Time, d)])
+        end_date = d + time_spec.time_step * time_spec.oversample_temporal - Dates.Day(1)
+        files = find_files_range(config.file_pattern, config.folder, d, end_date)
+        total += length(files)
+
+        p_files = _progress_bar(length(files), "  Files: ", run.progress)
+        _reset_reference!(acc)
+        successful += _accumulate_l2_files!(acc, ctx, files, p_files; keep_shifted=false)
+        _emit_l2_snapshot!(ctx, finish!(acc), ct, d, d, end_date)
+        reset!(acc)
+    end
+    total, successful
+end
+
+function _accumulate_l2_files!(acc, ctx, files, p_files; keep_shifted)
+    bounds = _start_pass!(acc)
+    replay_files = bounds === nothing ? nothing : String[]
+    successful = 0
+    for filepath in files
+        try
+            accumulate_file!(acc, ctx, filepath, p_files, bounds)
+            replay_files === nothing || push!(replay_files, filepath)
+            # A readable file with no selected observations still counts.
+            successful += 1
+            ctx.fill_attrib[] = false
+        catch e
+            if ctx.run.keep_going
+                @warn "Error processing file; continuing" filepath error=sprint(showerror, e)
+            else
+                error("Error processing file $filepath: $(sprint(showerror, e))")
+            end
+        end
+    end
+    finish_pass!(acc, ctx, replay_files, bounds, keep_shifted)
+    successful
+end
+
+function _emit_l2_snapshot!(ctx, arrays, ct, date, window_start, window_end)
+    data, std, weights = arrays
+    _emit_l2_snapshot!(ctx.ds, ctx.nc_vars, ctx.zg, ctx.config, ctx.spec, ctx.output_options,
+        data, std, weights, ctx.run.compute_std, ct, date; window_start, window_end, zarr_epoch=ctx.run.zarr_epoch)
 end

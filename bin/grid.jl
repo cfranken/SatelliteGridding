@@ -11,14 +11,16 @@
 #   julia --project=. bin/grid.jl l2 --help
 #   julia --project=. bin/grid.jl center --help
 
-using Pkg
-Pkg.activate(joinpath(@__DIR__, ".."))
+if abspath(PROGRAM_FILE) == abspath(@__FILE__)
+    using Pkg
+    Pkg.activate(joinpath(@__DIR__, ".."); io="--quiet" in ARGS ? devnull : stderr)
+end
 
 using Dates
 using SatelliteGridding
 
-function main()
-    if length(ARGS) < 1 || ARGS[1] in ["-h", "--help"]
+function main(argv=ARGS; default_progress=SatelliteGridding._default_progress())
+    if isempty(argv) || argv[1] in ["-h", "--help"]
         println("SatelliteGridding CLI v0.1.0")
         println()
         println("Usage:")
@@ -38,27 +40,26 @@ function main()
     end
 
     t_start = time()
-    command_line = join(["julia", PROGRAM_FILE, copy(ARGS)...], " ")
-    command = popfirst!(ARGS)
+    command_line = join(["julia", PROGRAM_FILE, argv...], " ")
+    command = first(argv)
+    args = if command == "l2"
+        parse_l2_args(argv[2:end])
+    elseif command == "center"
+        parse_center_args(argv[2:end])
+    else
+        error("Unknown command: $command. Use 'l2' or 'center'.")
+    end
+    config = load_config(args["config"])
+    grid_spec = args_to_grid_spec(args)
+    time_spec = args_to_time_spec(args)
+    run = (outfile=args["outFile"], keep_going=args["keepGoing"],
+           progress=!args["noProgress"] && default_progress, verbose=!args["quiet"],
+           command=command_line)
 
     if command == "l2"
-        args = parse_l2_args(ARGS)
-        config = load_config(args["config"])
-        grid_spec = args_to_grid_spec(args)
-        time_spec = args_to_time_spec(args)
-        n_over = args["nOversample"]
-        parse_precision(arg) = arg === nothing ? nothing :
-                               lowercase(arg) == "float32" ? Float32 : Float64
-        geometry_precision = parse_precision(args["geometry-precision"])
-        accumulator_precision = parse_precision(args["accumulator-precision"])
-        footprint = lowercase(args["footprint"])
-        method = if footprint in ("quad", "quadrilateral", "subpixel")
-            SubpixelGridding(n_over)
-        elseif footprint in ("circle", "circular")
-            CircularFootprintGridding(n_over)
-        else
-            error("Unknown footprint geometry: $(args["footprint"]). Use quad or circle.")
-        end
+        geometry_precision = SatelliteGridding._cli_precision(args["geometry-precision"])
+        accumulator_precision = SatelliteGridding._cli_precision(args["accumulator-precision"])
+        method = SatelliteGridding._cli_footprint(args)
         backend = resolve_backend(args["backend"]; grid_spec, geometry_precision, accumulator_precision)
 
         zarr_out = isempty(args["zarrOut"]) ? nothing : args["zarrOut"]
@@ -72,41 +73,25 @@ function main()
         end
 
         grid(config, grid_spec, time_spec, method;
-             compute_std=args["compSTD"],
-             outfile=args["outFile"],
-             zarr_out=zarr_out,
-             zarr_meta=zarr_meta,
-             zarr_epoch=Date(args["zarrEpoch"]),
-             backend=backend,
-             geometry_precision=geometry_precision,
-             accumulator_precision=accumulator_precision,
-             keep_going=args["keepGoing"],
-             progress=!args["noProgress"] && SatelliteGridding._default_progress(),
-             command=command_line)
-
-    elseif command == "center"
-        args = parse_center_args(ARGS)
-        config = load_config(args["config"])
-        grid_spec = args_to_grid_spec(args)
-        time_spec = args_to_time_spec(args)
+             compute_std=args["compSTD"], zarr_out, zarr_meta,
+             zarr_epoch=Date(args["zarrEpoch"]), backend, geometry_precision, accumulator_precision,
+             run...)
+    else
         geo = isempty(args["geoTable"]) ? nothing : args["geoTable"]
         geo_cache = isempty(args["geoCache"]) ? nothing : args["geoCache"]
 
         grid(config, grid_spec, time_spec, CenterPointGridding();
-             geo_table=geo,
-             geo_cache=geo_cache,
-             geo_provider=args["geoProvider"],
-             veg_indices=args["vegIndices"],
-             outfile=args["outFile"],
-             keep_going=args["keepGoing"],
-             progress=!args["noProgress"] && SatelliteGridding._default_progress(),
-             command=command_line)
-    else
-        error("Unknown command: $command. Use 'l2' or 'center'.")
+             geo_table=geo, geo_cache, geo_provider=args["geoProvider"],
+             veg_indices=args["vegIndices"], run...)
     end
 
-    elapsed = time() - t_start
-    println("Total time: $(round(elapsed, digits=1)) seconds")
+    if !args["quiet"]
+        elapsed = time() - t_start
+        println("Total time: $(round(elapsed, digits=1)) seconds")
+    end
+    nothing
 end
 
-main()
+if abspath(PROGRAM_FILE) == abspath(@__FILE__)
+    main()
+end

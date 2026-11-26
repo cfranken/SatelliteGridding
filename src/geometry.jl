@@ -135,6 +135,20 @@ function _assign_center_weight!(weights, center_lat, center_lon)
     weights
 end
 
+# Count all inside samples before the caller clips them to the output grid.
+@inline function _foreach_circle_sample(f::F, clat, clon, radius_lat, radius_lon, n) where {F}
+    inside_count = 0
+    for iy in 1:n, ix in 1:n
+        lat = clat - radius_lat + (iy - 0.5) * (2radius_lat / n)
+        lon = clon - radius_lon + (ix - 0.5) * (2radius_lon / n)
+        if _inside_bounded_circle(lat, lon, clat, clon, radius_lat, radius_lon)
+            inside_count += 1
+            f(lat, lon)
+        end
+    end
+    inside_count
+end
+
 """
     circle_footprint_weights(center_lat, center_lon, lat_corners, lon_corners;
                              n_lon, n_lat, n_oversample)
@@ -161,17 +175,11 @@ function circle_footprint_weights(center_lat, center_lon, lat_corners, lon_corne
         return _assign_center_weight!(weights, clat, clon)
     end
 
-    inside_count = 0
-    @inbounds for iy in 1:n_oversample, ix in 1:n_oversample
-        lat = clat - radius_lat + (iy - 0.5) * (2radius_lat / n_oversample)
-        lon = clon - radius_lon + (ix - 0.5) * (2radius_lon / n_oversample)
-        if _inside_bounded_circle(lat, lon, clat, clon, radius_lat, radius_lon)
-            inside_count += 1
-            row = floor(Int, lat)
-            col = floor(Int, lon)
-            if 1 <= col <= n_lon && 1 <= row <= n_lat
-                weights[col, row] += 1.0f0
-            end
+    inside_count = _foreach_circle_sample(clat, clon, radius_lat, radius_lon, n_oversample) do lat, lon
+        row = floor(Int, lat)
+        col = floor(Int, lon)
+        if 1 <= col <= n_lon && 1 <= row <= n_lat
+            @inbounds weights[col, row] += 1.0f0
         end
     end
 

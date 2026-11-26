@@ -439,6 +439,22 @@ function compute_circular_footprint_indices_ka!(backend,
     nothing
 end
 
+@inline function _set_circular_center!(ix, iy, inside_count, skip, fp, col, row, nsq, in_bounds)
+    @inbounds begin
+        skip[fp] = in_bounds ? Int32(1) : Int32(2)
+        inside_count[fp] = in_bounds ? Int32(1) : Int32(0)
+        if in_bounds
+            ix[fp, 1] = col
+            iy[fp, 1] = row
+        end
+        for k in (in_bounds ? Int32(2) : Int32(1)):nsq
+            ix[fp, k] = Int32(-1)
+            iy[fp, k] = Int32(-1)
+        end
+    end
+    nothing
+end
+
 @kernel function _compute_circular_indices_kernel!(ix_out, iy_out, inside_count,
                                                    skip_flag, center_lat, center_lon,
                                                    lat_corners, lon_corners,
@@ -470,23 +486,8 @@ end
                            (Int32(1) <= center_row) & (center_row <= n_lat)
 
         if (radius_lat <= epsG) | (radius_lon <= epsG)
-            if center_in_bounds
-                skip_flag[fp] = Int32(1)
-                inside_count[fp] = Int32(1)
-                ix_out[fp, 1] = center_col
-                iy_out[fp, 1] = center_row
-                for k in Int32(2):nsq
-                    ix_out[fp, k] = Int32(-1)
-                    iy_out[fp, k] = Int32(-1)
-                end
-            else
-                skip_flag[fp] = Int32(2)
-                inside_count[fp] = Int32(0)
-                for k in Int32(1):nsq
-                    ix_out[fp, k] = Int32(-1)
-                    iy_out[fp, k] = Int32(-1)
-                end
-            end
+            _set_circular_center!(ix_out, iy_out, inside_count, skip_flag, fp,
+                                  center_col, center_row, nsq, center_in_bounds)
         else
             min_lat = floor(Int32, clat - radius_lat)
             max_lat = floor(Int32, clat + radius_lat)
@@ -494,23 +495,8 @@ end
             max_lon = floor(Int32, clon + radius_lon)
 
             if (max_lat - min_lat == Int32(0)) & (max_lon - min_lon == Int32(0))
-                if center_in_bounds
-                    skip_flag[fp] = Int32(1)
-                    inside_count[fp] = Int32(1)
-                    ix_out[fp, 1] = center_col
-                    iy_out[fp, 1] = center_row
-                    for k in Int32(2):nsq
-                        ix_out[fp, k] = Int32(-1)
-                        iy_out[fp, k] = Int32(-1)
-                    end
-                else
-                    skip_flag[fp] = Int32(2)
-                    inside_count[fp] = Int32(0)
-                    for k in Int32(1):nsq
-                        ix_out[fp, k] = Int32(-1)
-                        iy_out[fp, k] = Int32(-1)
-                    end
-                end
+                _set_circular_center!(ix_out, iy_out, inside_count, skip_flag, fp,
+                                      center_col, center_row, nsq, center_in_bounds)
             else
                 skip_flag[fp] = Int32(0)
                 count = Int32(0)
@@ -546,23 +532,8 @@ end
                 end
 
                 if count == Int32(0)
-                    if center_in_bounds
-                        skip_flag[fp] = Int32(1)
-                        inside_count[fp] = Int32(1)
-                        ix_out[fp, 1] = center_col
-                        iy_out[fp, 1] = center_row
-                        for k in Int32(2):nsq
-                            ix_out[fp, k] = Int32(-1)
-                            iy_out[fp, k] = Int32(-1)
-                        end
-                    else
-                        skip_flag[fp] = Int32(2)
-                        inside_count[fp] = Int32(0)
-                        for k in Int32(1):nsq
-                            ix_out[fp, k] = Int32(-1)
-                            iy_out[fp, k] = Int32(-1)
-                        end
-                    end
+                    _set_circular_center!(ix_out, iy_out, inside_count, skip_flag, fp,
+                                          center_col, center_row, nsq, center_in_bounds)
                 else
                     inside_count[fp] = count
                 end
@@ -599,41 +570,7 @@ function scatter_accumulate!(grid_sum::AbstractArray{T,3},
                              skip_flag::AbstractVector{<:Integer},
                              values::AbstractMatrix,
                              n::Int, n_vars::Int) where {T}
-    n_fp = size(ix, 1)
-    n_lon, n_lat = size(grid_weights)
-    fac = T(1 / n^2)
-    nsq = n * n
-
-    @inbounds for fp in 1:n_fp
-        flag = skip_flag[fp]
-
-        if flag == 1
-            # Fast path: single cell, weight = 1
-            col = Int(ix[fp, 1])
-            row = Int(iy[fp, 1])
-            if 1 <= col <= n_lon && 1 <= row <= n_lat
-                grid_weights[col, row] += one(T)
-                for z in 1:n_vars
-                    grid_sum[col, row, z] += values[fp, z]
-                end
-            end
-
-        elseif flag == 0
-            # Oversample path: n² subpixels, weight = 1/n²
-            for k in 1:nsq
-                col = Int(ix[fp, k])
-                row = Int(iy[fp, k])
-                if 1 <= col <= n_lon && 1 <= row <= n_lat
-                    grid_weights[col, row] += fac
-                    for z in 1:n_vars
-                        grid_sum[col, row, z] += fac * values[fp, z]
-                    end
-                end
-            end
-        end
-        # flag == 2: skip (footprint too wide)
-    end
-    nothing
+    _scatter_serial!(grid_sum, grid_weights, ix, iy, nothing, skip_flag, values, n, n_vars)
 end
 
 """
@@ -652,39 +589,7 @@ function scatter_accumulate_circular!(grid_sum::AbstractArray{T,3},
                                       skip_flag::AbstractVector{<:Integer},
                                       values::AbstractMatrix,
                                       n::Int, n_vars::Int) where {T}
-    n_fp = size(ix, 1)
-    n_lon, n_lat = size(grid_weights)
-    nsq = n * n
-
-    @inbounds for fp in 1:n_fp
-        flag = skip_flag[fp]
-
-        if flag == 1
-            col = Int(ix[fp, 1])
-            row = Int(iy[fp, 1])
-            if 1 <= col <= n_lon && 1 <= row <= n_lat
-                grid_weights[col, row] += one(T)
-                for z in 1:n_vars
-                    grid_sum[col, row, z] += values[fp, z]
-                end
-            end
-        elseif flag == 0
-            count = inside_count[fp]
-            count <= 0 && continue
-            fac = T(1 / count)
-            for k in 1:nsq
-                col = Int(ix[fp, k])
-                row = Int(iy[fp, k])
-                if 1 <= col <= n_lon && 1 <= row <= n_lat
-                    grid_weights[col, row] += fac
-                    for z in 1:n_vars
-                        grid_sum[col, row, z] += fac * values[fp, z]
-                    end
-                end
-            end
-        end
-    end
-    nothing
+    _scatter_serial!(grid_sum, grid_weights, ix, iy, inside_count, skip_flag, values, n, n_vars)
 end
 
 """
@@ -704,51 +609,7 @@ function scatter_accumulate_ka!(backend,
                                 skip_flag::AbstractVector{Int32},
                                 values::AbstractMatrix,
                                 n::Int, n_vars::Int) where {T}
-    n_fp = size(ix, 1)
-    n_lon, n_lat = size(grid_weights)
-    kernel! = _scatter_kernel!(backend)
-    kernel!(grid_sum, grid_weights, ix, iy, skip_flag, values,
-            Int32(n), Int32(n_vars), Int32(n_lon), Int32(n_lat), ndrange=n_fp)
-    KernelAbstractions.synchronize(backend)
-    nothing
-end
-
-@kernel function _scatter_kernel!(grid_sum, grid_weights, ix, iy, skip_flag,
-                                  values, n::Int32, n_vars::Int32,
-                                  n_lon::Int32, n_lat::Int32)
-    fp = @index(Global)
-
-    @inbounds begin
-        flag = skip_flag[fp]
-
-        if flag == Int32(1)
-            # Fast path: single cell, weight = 1
-            col = ix[fp, 1]
-            row = iy[fp, 1]
-            if (Int32(1) <= col) & (col <= n_lon) & (Int32(1) <= row) & (row <= n_lat)
-                @atomic grid_weights[col, row] += one(eltype(grid_weights))
-                for z in Int32(1):n_vars
-                    @atomic grid_sum[col, row, z] += values[fp, z]
-                end
-            end
-
-        elseif flag == Int32(0)
-            # Oversample path: n² subpixels, weight = 1/n²
-            fac = one(eltype(grid_weights)) / (n * n)
-            nsq = n * n
-            for k in Int32(1):nsq
-                col = ix[fp, k]
-                row = iy[fp, k]
-                if (Int32(1) <= col) & (col <= n_lon) & (Int32(1) <= row) & (row <= n_lat)
-                    @atomic grid_weights[col, row] += fac
-                    for z in Int32(1):n_vars
-                        @atomic grid_sum[col, row, z] += fac * values[fp, z]
-                    end
-                end
-            end
-        end
-        # flag == 2: skip (footprint too wide)
-    end
+    _scatter_atomic!(backend, grid_sum, grid_weights, ix, iy, nothing, skip_flag, values, n, n_vars)
 end
 
 """
@@ -768,45 +629,98 @@ function scatter_accumulate_circular_ka!(backend,
                                          skip_flag::AbstractVector{Int32},
                                          values::AbstractMatrix,
                                          n::Int, n_vars::Int) where {T}
-    n_fp = size(ix, 1)
-    n_lon, n_lat = size(grid_weights)
-    kernel! = _scatter_circular_kernel!(backend)
-    kernel!(grid_sum, grid_weights, ix, iy, inside_count, skip_flag, values,
-            Int32(n), Int32(n_vars), Int32(n_lon), Int32(n_lat), ndrange=n_fp)
+    _scatter_atomic!(backend, grid_sum, grid_weights, ix, iy, inside_count, skip_flag, values, n, n_vars)
+end
+
+# Quads have a constant weight; circles use the number of inside samples,
+# including samples whose indices were masked at the grid boundary.
+_serial_weights(::Type{T}, ::Nothing, n) where {T} = T(1 / n^2)
+_serial_weights(::Type{T}, counts, n) where {T} = counts
+
+@inline _serial_weight(::Type{T}, weight, fp) where {T} = weight
+@inline function _serial_weight(::Type{T}, counts::AbstractVector, fp) where {T}
+    @inbounds count = counts[fp]
+    count > 0 ? T(1 / count) : nothing
+end
+
+function _scatter_serial!(sums, weights, ix, iy, counts, skip, values, n, n_vars)
+    T = eltype(weights)
+    n_lon, n_lat = size(weights)
+    sample_weights = _serial_weights(T, counts, n)
+    nsq = n * n
+    @inbounds for fp in 1:size(ix, 1)
+        flag = skip[fp]
+        if flag == 1
+            # Fast path: single cell, weight = 1
+            col = Int(ix[fp, 1])
+            row = Int(iy[fp, 1])
+            if 1 <= col <= n_lon && 1 <= row <= n_lat
+                weights[col, row] += one(T)
+                for v in 1:n_vars
+                    sums[col, row, v] += values[fp, v]
+                end
+            end
+        elseif flag == 0
+            fac = _serial_weight(T, sample_weights, fp)
+            fac === nothing && continue
+            for k in 1:nsq
+                col = Int(ix[fp, k])
+                row = Int(iy[fp, k])
+                if 1 <= col <= n_lon && 1 <= row <= n_lat
+                    weights[col, row] += fac
+                    for v in 1:n_vars
+                        sums[col, row, v] += fac * values[fp, v]
+                    end
+                end
+            end
+        end
+        # flag == 2: skip (footprint too wide or outside the grid)
+    end
+    nothing
+end
+
+function _scatter_atomic!(backend, sums, weights, ix, iy, counts, skip, values, n, n_vars)
+    n_lon, n_lat = size(weights)
+    _scatter_kernel!(backend)(sums, weights, ix, iy, counts, skip, values,
+        Int32(n), Int32(n_vars), Int32(n_lon), Int32(n_lat); ndrange=size(ix, 1))
     KernelAbstractions.synchronize(backend)
     nothing
 end
 
-@kernel function _scatter_circular_kernel!(grid_sum, grid_weights, ix, iy,
-                                           inside_count, skip_flag, values,
-                                           n::Int32, n_vars::Int32,
-                                           n_lon::Int32, n_lat::Int32)
+@inline _sample_count(::Nothing, fp, nsq) = nsq
+@inline _sample_count(counts, fp, nsq) = @inbounds counts[fp]
+@inline _has_samples(::Nothing, count) = true
+@inline _has_samples(counts, count) = count > Int32(0)
+
+@kernel function _scatter_kernel!(sums, weights, ix, iy, counts, skip,
+                                  values, n::Int32, n_vars::Int32,
+                                  n_lon::Int32, n_lat::Int32)
     fp = @index(Global)
 
     @inbounds begin
-        flag = skip_flag[fp]
-
+        flag = skip[fp]
         if flag == Int32(1)
+            # Fast path: single cell, weight = 1
             col = ix[fp, 1]
             row = iy[fp, 1]
             if (Int32(1) <= col) & (col <= n_lon) & (Int32(1) <= row) & (row <= n_lat)
-                @atomic grid_weights[col, row] += one(eltype(grid_weights))
-                for z in Int32(1):n_vars
-                    @atomic grid_sum[col, row, z] += values[fp, z]
+                @atomic weights[col, row] += one(eltype(weights))
+                for v in Int32(1):n_vars
+                    @atomic sums[col, row, v] += values[fp, v]
                 end
             end
         elseif flag == Int32(0)
-            count = inside_count[fp]
-            if count > Int32(0)
-                fac = one(eltype(grid_weights)) / count
-                nsq = n * n
+            nsq = n * n
+            count = _sample_count(counts, fp, nsq)
+            if _has_samples(counts, count)
+                fac = one(eltype(weights)) / count
                 for k in Int32(1):nsq
                     col = ix[fp, k]
                     row = iy[fp, k]
                     if (Int32(1) <= col) & (col <= n_lon) & (Int32(1) <= row) & (row <= n_lat)
-                        @atomic grid_weights[col, row] += fac
-                        for z in Int32(1):n_vars
-                            @atomic grid_sum[col, row, z] += fac * values[fp, z]
+                        @atomic weights[col, row] += fac
+                        for v in Int32(1):n_vars
+                            @atomic sums[col, row, v] += fac * values[fp, v]
                         end
                     end
                 end
@@ -814,3 +728,6 @@ end
         end
     end
 end
+
+_scatter_batch!(::CPU, args...) = _scatter_serial!(args...)
+_scatter_batch!(backend, args...) = _scatter_atomic!(backend, args...)

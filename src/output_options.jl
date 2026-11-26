@@ -111,7 +111,3 @@ function _storage_kwargs(options::NetCDFOptions{T}, spec::AbstractGridSpec) wher
     level == 0 && return storage
     return (; storage..., deflatelevel=level, shuffle=options.shuffle)
 end
-
-_output_spatial_shape(spec::RectangularGridSpec) = grid_shape(spec)
-_output_spatial_shape(spec::CubedSphereGridSpec) = (spec.Nc, spec.Nc, 6)
-_output_spatial_shape(spec::HEALPixGridSpec) = (nside2npix(spec.nside),)

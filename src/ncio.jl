@@ -42,8 +42,21 @@ function _read_bounds(var, raw=var.var[:])
     reshape(permutedims(data, order), :, 4)
 end
 
-_read_flat_variable(dataset, varname::String, bounds::Bool) =
-    bounds ? _read_bounds(dataset[varname]) : dataset[varname].var[:]
+function _read_with_fallback(read_nc, path, description, fallback)
+    if fallback !== nothing && _looks_like_hdf4(path)
+        return fallback()
+    end
+    try
+        return Dataset(read_nc, path)
+    catch e
+        fallback === nothing && rethrow()
+        try
+            return fallback()
+        catch fallback_error
+            error("Could not read $description from '$path' with NCDatasets ($(sprint(showerror, e))) or system libnetcdf fallback ($(sprint(showerror, fallback_error)))")
+        end
+    end
+end
 
 """
     read_variable_from_file(path, variable; bounds=false)
@@ -52,25 +65,9 @@ Read a variable from a NetCDF-like file. Falls back to the system `libnetcdf`
 for flat HDF4/HDF-EOS variables when the Julia NetCDF build cannot open them.
 """
 function read_variable_from_file(path::String, variable::String; bounds::Bool=false)
-    if _looks_like_hdf4(path) && !bounds
-        return read_system_netcdf_variable(path, variable)
-    end
-    try
-        ds = Dataset(path)
-        try
-            return read_nc_variable(ds, variable; bounds=bounds)
-        finally
-            close(ds)
-        end
-    catch e
-        if bounds
-            rethrow(e)
-        end
-        try
-            return read_system_netcdf_variable(path, variable)
-        catch fallback_error
-            error("Could not read variable '$variable' from '$path' with NCDatasets ($(sprint(showerror, e))) or system libnetcdf fallback ($(sprint(showerror, fallback_error)))")
-        end
+    fallback = bounds ? nothing : () -> read_system_netcdf_variable(path, variable)
+    _read_with_fallback(path, "variable '$variable'", fallback) do ds
+        read_nc_variable(ds, variable; bounds)
     end
 end
 
@@ -86,22 +83,8 @@ _looks_like_hdf4(path::AbstractString) = endswith(lowercase(path), ".hdf")
 Read a variable while preserving its native dimensionality.
 """
 function read_array_from_file(path::String, variable::String)
-    if _looks_like_hdf4(path)
-        return read_system_netcdf_variable(path, variable)
-    end
-    try
-        ds = Dataset(path)
-        try
-            return _read_nc_array(ds, variable)
-        finally
-            close(ds)
-        end
-    catch e
-        try
-            return read_system_netcdf_variable(path, variable)
-        catch fallback_error
-            error("Could not read variable '$variable' from '$path' with NCDatasets ($(sprint(showerror, e))) or system libnetcdf fallback ($(sprint(showerror, fallback_error)))")
-        end
+    _read_with_fallback(path, "variable '$variable'", () -> read_system_netcdf_variable(path, variable)) do ds
+        _read_nc_array(ds, variable)
     end
 end
 
@@ -109,27 +92,13 @@ end
     read_arrays_from_file(path, variables) -> Vector
 
 Read multiple variables from a single file open. Each variable is read in full
-(same semantics as `read_array_from_file`). Falls back to per-variable reads
-through the system libnetcdf path if NCDatasets cannot open the file.
+(same semantics as `read_array_from_file`). Falls back to the system libnetcdf
+path if NCDatasets cannot open or read the file.
 """
 function read_arrays_from_file(path::String,
                                variables::AbstractVector{<:AbstractString})
-    if _looks_like_hdf4(path)
-        return read_system_netcdf_variables(path, variables)
-    end
-    try
-        ds = Dataset(path)
-        try
-            return Any[_read_nc_array(ds, String(v)) for v in variables]
-        finally
-            close(ds)
-        end
-    catch e
-        try
-            return read_system_netcdf_variables(path, variables)
-        catch fallback_error
-            error("Could not read variables from '$path' with NCDatasets ($(sprint(showerror, e))) or system libnetcdf fallback ($(sprint(showerror, fallback_error)))")
-        end
+    _read_with_fallback(path, "variables", () -> read_system_netcdf_variables(path, variables)) do ds
+        Any[_read_nc_array(ds, String(v)) for v in variables]
     end
 end
 
@@ -143,9 +112,11 @@ end
 # Science inputs must honor CF packing and missing-value attributes. The public
 # read_nc_variable helper retains its raw-read semantics for existing callers.
 function _read_l2_values(dataset, path::String, ::Type{T}) where {T}
-    data = _read_nc_array(dataset, path)
-    map(x -> ismissing(x) ? T(NaN) : T(x), vec(data))
+    _convert_l2_values(vec(_read_nc_array(dataset, path)), T)
 end
+
+_convert_l2_values(data::AbstractVector{T}, ::Type{T}) where {T<:AbstractFloat} = data
+_convert_l2_values(data, ::Type{T}) where {T} = map(x -> ismissing(x) ? T(NaN) : T(x), data)
 
 # Preserve the original coordinate values and precision for unpacked data.
 function _mask_geolocation_missing(raw::Vector{T}, is_missing) where {T<:AbstractFloat}
@@ -254,7 +225,7 @@ definitions. Returns the dataset and a Dict mapping variable names to NCDatasets
 The global `command` and `filters` attributes record the invocation and configured
 quality-filter rules when provided.
 """
-function create_output_dataset(outfile::String, grid_spec::AbstractGridSpec,
+function create_output_dataset(outfile::String, spec::AbstractGridSpec,
                                n_times::Int, grid_vars::OrderedDict{String,String},
                                compute_std::Bool;
                                window_bounds::Bool=false,
@@ -262,27 +233,9 @@ function create_output_dataset(outfile::String, grid_spec::AbstractGridSpec,
                                command::Union{Nothing,String}=nothing,
                                filters::Vector{FilterRule}=FilterRule[],
                                output_options::NetCDFOptions=NetCDFOptions(),
-                               spherical_ka_std::Bool=false)
-    _create_output_dataset(outfile, grid_spec, n_times, grid_vars, compute_std;
-        window_bounds=window_bounds, time_long_name=time_long_name,
-        command=command, filters=filters, output_options=output_options, spherical_ka_std)
-end
-
-_output_title(::AbstractGridSpec) = "Gridded satellite data"
-_output_title(::CubedSphereGridSpec) = "Gridded satellite data (cubed sphere)"
-_output_title(::HEALPixGridSpec) = "Gridded satellite data (HEALPix)"
-_payload_attributes(::AbstractGridSpec) = Pair{String,String}[]
-_payload_attributes(::CubedSphereGridSpec) =
-    ["coordinates" => "lons lats", "grid_mapping" => "cubed_sphere"]
-_payload_attributes(::HEALPixGridSpec) =
-    ["coordinates" => "lat lon cell_ids", "grid_mapping" => "healpix"]
-
-_weight_long_name(::AbstractGridSpec) = "Number of pixels in average"
-_weight_long_name(::HEALPixGridSpec) = "Sum of fractional footprint overlap weights"
-
-function _create_output_dataset(outfile, spec, n_times, grid_vars, compute_std;
-                                 window_bounds, time_long_name, command, filters,
-                                 output_options::NetCDFOptions{T}, spherical_ka_std) where {T}
+                               spherical_ka_std::Bool=false,
+                               vegetation_names::Tuple{Vararg{String}}=())
+    T = typeof(output_options.fill_value)
     storage = _storage_kwargs(output_options, spec)
     _with_output_setup(outfile) do ds
         write_coordinates!(ds, spec)
@@ -319,9 +272,24 @@ function _create_output_dataset(outfile, spec, n_times, grid_vars, compute_std;
         end
         nc_vars["n"] = defVar(ds, "n", T, dims; storage..., fillvalue=T(_NETCDF_WEIGHT_FILL),
             attrib=vcat(["units" => "1", "long_name" => _weight_long_name(spec)], attributes))
+        for name in vegetation_names
+            nc_vars[name] = defVar(ds, name, T, dims; storage...)
+        end
         ds, nc_vars
     end
 end
+
+_output_title(::AbstractGridSpec) = "Gridded satellite data"
+_output_title(::CubedSphereGridSpec) = "Gridded satellite data (cubed sphere)"
+_output_title(::HEALPixGridSpec) = "Gridded satellite data (HEALPix)"
+_payload_attributes(::AbstractGridSpec) = Pair{String,String}[]
+_payload_attributes(::CubedSphereGridSpec) =
+    ["coordinates" => "lons lats", "grid_mapping" => "cubed_sphere"]
+_payload_attributes(::HEALPixGridSpec) =
+    ["coordinates" => "lat lon cell_ids", "grid_mapping" => "healpix"]
+
+_weight_long_name(::AbstractGridSpec) = "Number of pixels in average"
+_weight_long_name(::HEALPixGridSpec) = "Sum of fractional footprint overlap weights"
 
 function _set_provenance_attributes!(ds, command::Union{Nothing,String},
                                      filters::Vector{FilterRule})

@@ -17,13 +17,13 @@ Welford's online algorithm for numerical stability.
 
 # Example
 ```julia
-using SatelliteGridding
+using SatelliteGridding, Dates
 
 config = load_config("tropomi_sif.toml")
 grid_spec = GridSpec(lat_min=-90f0, lat_max=90f0, lon_min=-180f0, lon_max=180f0,
                      dlat=1f0, dlon=1f0)
 time_spec = TimeSpec(DateTime("2019-01-01"), DateTime("2019-12-31"),
-                     Dates.Day(8), 1.0f0)
+                     Day(8); oversample_temporal=1.0f0)
 grid_l2(config, grid_spec, time_spec; outfile="output.nc")
 ```
 """
@@ -38,7 +38,7 @@ using OrderedCollections
 using Glob
 using NCDatasets
 using ArgParse
-using ProgressMeter
+import ProgressMeter
 using KernelAbstractions
 using Atomix: @atomic
 using Libdl
@@ -47,7 +47,7 @@ using Libdl
 # is a terminal (the `progress` keyword of `grid_l2` and `grid_center`). Redirected to a file or
 # a pipe, every redraw would become new lines.
 _default_progress() = stderr isa Base.TTY
-_progress_bar(n, desc, progress::Bool) = Progress(n; desc=desc, enabled=progress)
+_progress_bar(n, desc, progress::Bool) = ProgressMeter.Progress(n; desc=desc, enabled=progress)
 
 include("types.jl")
 include("grid_spec.jl")

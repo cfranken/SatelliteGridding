@@ -34,14 +34,14 @@ end
 
 _nc_sym(name::Symbol) = Libdl.dlsym(_system_netcdf_handle(), name)
 
-function _nc_error(lib::String, code::Cint)
+function _nc_error(code::Cint)
     f = _nc_sym(:nc_strerror)
     msg = unsafe_string(ccall(f, Cstring, (Cint,), code))
     ErrorException("NetCDF C error $code: $msg")
 end
 
-function _nc_check(lib::String, code::Cint)
-    code == 0 || throw(_nc_error(lib, code))
+function _nc_check(code::Cint)
+    code == 0 || throw(_nc_error(code))
     nothing
 end
 
@@ -52,10 +52,8 @@ Read a flat variable through the system `libnetcdf`. This is primarily a fallbac
 for HDF4/HDF-EOS2 files when the Julia NetCDF_jll build lacks HDF4 support.
 """
 function read_system_netcdf_variable(path::String, varname::String)
-    lib = _system_netcdf_lib()
-    lib === nothing && error("No system libnetcdf found for HDF4 fallback")
-    _system_netcdf_with_open(lib, path) do ncid
-        _read_system_netcdf_var(lib, ncid, varname)
+    _system_netcdf_with_open(path) do ncid
+        _read_system_netcdf_var(ncid, varname)
     end
 end
 
@@ -67,17 +65,15 @@ Read multiple flat variables through the system `libnetcdf` with a single
 """
 function read_system_netcdf_variables(path::String,
                                       varnames::AbstractVector{<:AbstractString})
-    lib = _system_netcdf_lib()
-    lib === nothing && error("No system libnetcdf found for HDF4 fallback")
-    _system_netcdf_with_open(lib, path) do ncid
-        Any[_read_system_netcdf_var(lib, ncid, String(v)) for v in varnames]
+    _system_netcdf_with_open(path) do ncid
+        Any[_read_system_netcdf_var(ncid, String(v)) for v in varnames]
     end
 end
 
-function _system_netcdf_with_open(f, lib::String, path::String)
+function _system_netcdf_with_open(f, path::String)
     ncid = Ref{Cint}()
     f_open = _nc_sym(:nc_open)
-    _nc_check(lib, ccall(f_open, Cint,
+    _nc_check(ccall(f_open, Cint,
                          (Cstring, Cint, Ref{Cint}), path, _NC_NOWRITE, ncid))
     try
         return f(ncid[])
@@ -87,32 +83,32 @@ function _system_netcdf_with_open(f, lib::String, path::String)
     end
 end
 
-function _read_system_netcdf_var(lib::String, ncid::Cint, varname::String)
+function _read_system_netcdf_var(ncid::Cint, varname::String)
     occursin("/", varname) && error("System NetCDF fallback only supports flat variable names: $varname")
 
     varid = Ref{Cint}()
     f_inq_varid = _nc_sym(:nc_inq_varid)
-    _nc_check(lib, ccall(f_inq_varid, Cint,
+    _nc_check(ccall(f_inq_varid, Cint,
                          (Cint, Cstring, Ref{Cint}), ncid, varname, varid))
 
     xtype = Ref{Cint}()
     ndims = Ref{Cint}()
     f_inq_var = _nc_sym(:nc_inq_var)
-    _nc_check(lib, ccall(f_inq_var, Cint,
+    _nc_check(ccall(f_inq_var, Cint,
                          (Cint, Cint, Ptr{UInt8}, Ref{Cint}, Ref{Cint},
                           Ptr{Cint}, Ptr{Cint}),
                          ncid, varid[], C_NULL, xtype, ndims, C_NULL, C_NULL))
 
     dimids = Vector{Cint}(undef, ndims[])
     f_inq_vardimid = _nc_sym(:nc_inq_vardimid)
-    _nc_check(lib, ccall(f_inq_vardimid, Cint,
+    _nc_check(ccall(f_inq_vardimid, Cint,
                          (Cint, Cint, Ptr{Cint}), ncid, varid[], dimids))
 
     dims = Vector{Int}(undef, ndims[])
     f_inq_dimlen = _nc_sym(:nc_inq_dimlen)
     for i in eachindex(dimids)
         len = Ref{Csize_t}()
-        _nc_check(lib, ccall(f_inq_dimlen, Cint,
+        _nc_check(ccall(f_inq_dimlen, Cint,
                              (Cint, Cint, Ref{Csize_t}), ncid, dimids[i], len))
         dims[i] = Int(len[])
     end
@@ -139,7 +135,7 @@ function _read_system_netcdf_var(lib::String, ncid::Cint, varname::String)
 
     data = Vector{T}(undef, prod(dims))
     f_getter = _nc_sym(getter)
-    _nc_check(lib, ccall(f_getter, Cint,
+    _nc_check(ccall(f_getter, Cint,
                          (Cint, Cint, Ptr{Cvoid}), ncid, varid[], pointer(data)))
     return _reshape_c_order(data, dims)
 end

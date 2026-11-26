@@ -199,6 +199,11 @@ Run `julia --project=. bin/grid.jl l2 --help` for all options.
 | `--compSTD` | false | Compute standard deviation |
 | `--backend` | `sequential` | `sequential`, `cpu`, `cuda`, or `metal` |
 
+Both `l2` and `center` draw progress bars when stderr is a terminal. Pass
+`--noProgress` to hide the bars and keep run status messages, or `--quiet` to
+hide both. Library callers can pass `verbose=false` to suppress run status
+messages and `progress=false` to disable progress bars.
+
 ## Configuration Files
 
 Data sources are defined in TOML files. Each config tells the package where to find input files, which NetCDF variables to grid, and what quality filters to apply:

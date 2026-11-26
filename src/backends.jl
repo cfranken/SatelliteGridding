@@ -57,8 +57,9 @@ function resolve_backend(name::AbstractString; grid_spec=nothing,
     end
 end
 
-function _validate_ka_grid(spec)
-    spec isa AbstractSphericalGridSpec || return nothing
+_validate_ka_grid(spec) = nothing
+
+function _validate_ka_grid(spec::AbstractSphericalGridSpec)
     locator = _device_locator(spec)
     locator === nothing &&
         error("$(typeof(spec)) supports only the sequential CPU path. Omit `backend` or use --backend sequential.")
@@ -89,6 +90,13 @@ function _validate_metal_precision(F, A)
     return nothing
 end
 
+"""Validated locator and geometry and accumulator precisions for spherical KA."""
+struct _SphericalKAOptions{L,F,A}
+    locator::L
+    geometry_precision::Type{F}
+    accumulator_precision::Type{A}
+end
+
 function _spherical_ka_options(spec, backend, geometry_precision, accumulator_precision)
     locator = backend === nothing ? nothing : _validate_ka_grid(spec)
     if locator === nothing
@@ -101,7 +109,7 @@ function _spherical_ka_options(spec, backend, geometry_precision, accumulator_pr
     F = something(geometry_precision, default)
     A = something(accumulator_precision, default)
     _validate_spherical_ka_precision(backend, F, A)
-    return (; locator, geometry_precision=F, accumulator_precision=A)
+    return _SphericalKAOptions(locator, F, A)
 end
 
 function _load_optional_backend(pkg::Symbol, extname::Symbol, fn::Symbol,
@@ -163,11 +171,18 @@ _ka_supported_float(backend, ::Type{T}) where {T<:AbstractFloat} =
     (T === Float64 && !KernelAbstractions.supports_float64(backend)) ? Float32 : T
 _ka_supported_float(backend, ::Type{<:Real}) = _ka_float64_type(backend)
 
-function _to_backend_array(backend, a::AbstractArray)
-    backend isa CPU && return a
-    E = _ka_supported_float(backend, eltype(a))
-    host = eltype(a) === E ? a : E.(a)
-    dev = KernelAbstractions.allocate(backend, E, size(host))
-    copyto!(dev, host)
-    return dev
+_backend_input(::CPU, host) = host
+
+function _backend_input(backend, host)
+    device = KernelAbstractions.allocate(backend, eltype(host), size(host))
+    copyto!(device, host)
+    device
+end
+
+# Rectangular kernels preserve input precision where the backend supports it.
+_rect_backend_input(::CPU, host) = host
+
+function _rect_backend_input(backend, host)
+    T = _ka_supported_float(backend, eltype(host))
+    _backend_input(backend, eltype(host) === T ? host : T.(host))
 end

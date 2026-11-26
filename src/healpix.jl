@@ -346,6 +346,7 @@ end
 
 grid_shape(spec::HEALPixGridSpec) = (spec.nside^2, _HEALPIX_FACE_COUNT)
 payload_dims(::HEALPixGridSpec) = ("cell",)
+_output_spatial_shape(spec::HEALPixGridSpec) = (nside2npix(spec.nside),)
 _spherical_subdivision(::HEALPixGridSpec) = Val(:unit_vectors)
 
 # Angular form of sqrt(4πR²/npix). The common radius also scales the

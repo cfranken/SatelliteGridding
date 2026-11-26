@@ -158,7 +158,6 @@ coordinate_law(def::CubedSphereDefinition) = def.coordinate_law
 center_law(def::CubedSphereDefinition) = def.center_law
 panel_convention(def::CubedSphereDefinition) = def.panel_convention
 longitude_offset_deg(def::CubedSphereDefinition) = def.longitude_offset_deg
-cs_definition_tag(def::CubedSphereDefinition) = def.tag
 
 coordinate_law_tag(::EquiangularGnomonic) = "equiangular_gnomonic"
 coordinate_law_tag(::GMAOEqualDistanceGnomonic) = "gmao_equal_distance_gnomonic"
@@ -518,6 +517,7 @@ _spherical_subpixel_type(::CubedSphereGridSpec{T}) where {T} = T
 grid_shape(spec::CubedSphereGridSpec) = (spec.Nc, 6 * spec.Nc)
 
 payload_dims(::CubedSphereGridSpec) = ("Xdim", "Ydim", "nf")
+_output_spatial_shape(spec::CubedSphereGridSpec) = (spec.Nc, spec.Nc, 6)
 
 function write_coordinates!(ds, spec::CubedSphereGridSpec)
     Nc = spec.Nc

@@ -53,13 +53,12 @@ function accumulate_footprint!(grid_data::AbstractArray{T,3},
     # Compute grid-cell indices for all 4 corners
     ilon = floor.(Int32, lon_idx)
     ilat = floor.(Int32, lat_idx)
-    min_lat = minimum(Int32, floor.(lat_idx), dims=2)
-    max_lat = maximum(Int32, floor.(lat_idx), dims=2)
-    min_lon = minimum(Int32, floor.(lon_idx), dims=2)
-    max_lon = maximum(Int32, floor.(lon_idx), dims=2)
+    min_lat = minimum(ilat, dims=2)
+    max_lat = maximum(ilat, dims=2)
+    min_lon = minimum(ilon, dims=2)
+    max_lon = maximum(ilon, dims=2)
     dim_lat = max_lat .- min_lat
     dim_lon = max_lon .- min_lon
-    dist_lon = max_lon .- min_lon
 
     fac = T(1 / n_oversample^2)
 
@@ -72,9 +71,9 @@ function accumulate_footprint!(grid_data::AbstractArray{T,3},
                 _welford_update!(grid_data, grid_std, grid_weights, compute_std,
                                  col, row, values, i, n_vars, T(1))
             end
-        elseif dist_lon[i] < n_oversample
+        elseif dim_lon[i] < n_oversample
             # Oversample path: footprint spans multiple cells
-            compute_subpixels!(points_buf, lat_idx[i, :], lon_idx[i, :], n_oversample,
+            compute_subpixels!(points_buf, @view(lat_idx[i, :]), @view(lon_idx[i, :]), n_oversample,
                                lats0_buf, lons0_buf, lats1_buf, lons1_buf)
             floor_indices!(ix_buf, iy_buf, points_buf)
 
@@ -330,25 +329,11 @@ function accumulate_circular_footprint!(grid_data::AbstractArray{T,3},
             _circle_footprint_axes(center_lat_idx[i], center_lon_idx[i],
                                    @view(lat_idx[i, :]), @view(lon_idx[i, :]))
 
-        if radius_lat <= eps(Float64) || radius_lon <= eps(Float64)
-            row = floor(Int, clat)
-            col = floor(Int, clon)
-            if 1 <= col <= n_lon && 1 <= row <= n_lat
-                _welford_update!(grid_data, grid_std, grid_weights, compute_std,
-                                 col, row, values, i, n_vars, T(1))
-            end
-            continue
+        inside_count = if radius_lat <= eps(Float64) || radius_lon <= eps(Float64)
+            0
+        else
+            _foreach_circle_sample(Returns(nothing), clat, clon, radius_lat, radius_lon, n_oversample)
         end
-
-        inside_count = 0
-        for iy in 1:n_oversample, ix in 1:n_oversample
-            lat = clat - radius_lat + (iy - 0.5) * (2radius_lat / n_oversample)
-            lon = clon - radius_lon + (ix - 0.5) * (2radius_lon / n_oversample)
-            if _inside_bounded_circle(lat, lon, clat, clon, radius_lat, radius_lon)
-                inside_count += 1
-            end
-        end
-
         if inside_count == 0
             row = floor(Int, clat)
             col = floor(Int, clon)
@@ -360,16 +345,12 @@ function accumulate_circular_footprint!(grid_data::AbstractArray{T,3},
         end
 
         weight = T(1 / inside_count)
-        for iy in 1:n_oversample, ix in 1:n_oversample
-            lat = clat - radius_lat + (iy - 0.5) * (2radius_lat / n_oversample)
-            lon = clon - radius_lon + (ix - 0.5) * (2radius_lon / n_oversample)
-            if _inside_bounded_circle(lat, lon, clat, clon, radius_lat, radius_lon)
-                row = floor(Int, lat)
-                col = floor(Int, lon)
-                if 1 <= col <= n_lon && 1 <= row <= n_lat
-                    _welford_update!(grid_data, grid_std, grid_weights, compute_std,
-                                     col, row, values, i, n_vars, weight)
-                end
+        _foreach_circle_sample(clat, clon, radius_lat, radius_lon, n_oversample) do lat, lon
+            row = floor(Int, lat)
+            col = floor(Int, lon)
+            if 1 <= col <= n_lon && 1 <= row <= n_lat
+                @inbounds _welford_update!(grid_data, grid_std, grid_weights, compute_std,
+                                 col, row, values, i, n_vars, weight)
             end
         end
     end
@@ -441,66 +422,8 @@ function accumulate_batch!(backend,
                            lon_corners::AbstractMatrix,
                            values::AbstractMatrix,
                            n::Int, n_vars::Int) where {T}
-    _accumulate_batch!(backend, grid_sum, grid_weights,
-                       lat_corners, lon_corners, values, n, n_vars;
-                       sort_corners=true)
-end
-
-# Private entry for L2 callers whose corners are already CCW-sorted in degrees
-# (`_read_l2_geometry`). Skipping a second sort on fractional indices prevents
-# Float32 rounding from rotating the starting corner relative to sequential gridding.
-function _accumulate_sorted_batch!(backend,
-                                   grid_sum::AbstractArray{T,3},
-                                   grid_weights::AbstractMatrix{T},
-                                   lat_corners::AbstractMatrix,
-                                   lon_corners::AbstractMatrix,
-                                   values::AbstractMatrix,
-                                   n::Int, n_vars::Int) where {T}
-    _accumulate_batch!(backend, grid_sum, grid_weights,
-                       lat_corners, lon_corners, values, n, n_vars;
-                       sort_corners=false)
-end
-
-function _accumulate_batch!(backend,
-                            grid_sum::AbstractArray{T,3},
-                            grid_weights::AbstractMatrix{T},
-                            lat_corners::AbstractMatrix,
-                            lon_corners::AbstractMatrix,
-                            values::AbstractMatrix,
-                            n::Int, n_vars::Int;
-                            sort_corners::Bool) where {T}
-    n_fp = size(lat_corners, 1)
-    n_fp == 0 && return nothing
-
-    # Transfer inputs to backend (no-op for CPU — preserves element types)
-    lat_c = _to_backend_array(backend, lat_corners)
-    lon_c = _to_backend_array(backend, lon_corners)
-    val = _to_backend_array(backend, values)
-
-    # Step 1: Sort corners into CCW order (KA kernel — parallel)
-    if sort_corners
-        sort_corners_ccw_ka!(backend, lat_c, lon_c)
-    end
-
-    # Step 2: Compute subpixel indices (KA kernel — parallel)
-    n_lon, n_lat = size(grid_weights)
-    nsq = n * n
-    ix = KernelAbstractions.zeros(backend, Int32, n_fp, nsq)
-    iy = KernelAbstractions.zeros(backend, Int32, n_fp, nsq)
-    skip = KernelAbstractions.zeros(backend, Int32, n_fp)
-    _compute_footprint_indices_ka!(backend, ix, iy, skip, lat_c, lon_c, n,
-                                   n_lon, n_lat, _ka_supported_float(backend, T))
-
-    # Step 3: Scatter-accumulate
-    # CPU: sequential scatter (no atomics needed, better cache locality)
-    # GPU: use @atomic kernel for parallel scatter
-    if backend isa CPU
-        scatter_accumulate!(grid_sum, grid_weights, ix, iy, skip, val, n, n_vars)
-    else
-        scatter_accumulate_ka!(backend, grid_sum, grid_weights, ix, iy, skip, val, n, n_vars)
-    end
-
-    nothing
+    _accumulate_rectangular_batch!(backend, grid_sum, grid_weights, nothing,
+        lat_corners, lon_corners, values, n, n_vars, true)
 end
 
 """
@@ -533,34 +456,47 @@ function accumulate_circular_batch!(backend,
                                     lon_corners::AbstractMatrix,
                                     values::AbstractMatrix,
                                     n::Int, n_vars::Int) where {T}
+    _accumulate_rectangular_batch!(backend, grid_sum, grid_weights, (center_lat, center_lon),
+        lat_corners, lon_corners, values, n, n_vars, false)
+end
+
+_rect_backend_centers(backend, ::Nothing) = nothing
+_rect_backend_centers(backend, centers) = map(a -> _rect_backend_input(backend, a), centers)
+
+function _accumulate_rectangular_batch!(backend, grid_sum, grid_weights, centers,
+                                        lat_corners, lon_corners, values, n, n_vars, sort_corners)
     n_fp = size(lat_corners, 1)
     n_fp == 0 && return nothing
 
-    clat = _to_backend_array(backend, center_lat)
-    clon = _to_backend_array(backend, center_lon)
-    lat_c = _to_backend_array(backend, lat_corners)
-    lon_c = _to_backend_array(backend, lon_corners)
-    val = _to_backend_array(backend, values)
+    centers = _rect_backend_centers(backend, centers)
+    lat_c = _rect_backend_input(backend, lat_corners)
+    lon_c = _rect_backend_input(backend, lon_corners)
+    val = _rect_backend_input(backend, values)
+    sort_corners && sort_corners_ccw_ka!(backend, lat_c, lon_c)
 
-    n_lon, n_lat = size(grid_weights)
-    nsq = n * n
-    ix = KernelAbstractions.zeros(backend, Int32, n_fp, nsq)
-    iy = KernelAbstractions.zeros(backend, Int32, n_fp, nsq)
-    inside_count = KernelAbstractions.zeros(backend, Int32, n_fp)
+    # Both geometries use the same index and flag buffers. Circles also count
+    # all inside samples, even those outside the output grid.
+    ix = KernelAbstractions.zeros(backend, Int32, n_fp, n * n)
+    iy = KernelAbstractions.zeros(backend, Int32, n_fp, n * n)
     skip = KernelAbstractions.zeros(backend, Int32, n_fp)
-    compute_circular_footprint_indices_ka!(backend, ix, iy, inside_count, skip,
-                                           clat, clon, lat_c, lon_c, n;
-                                           n_lon=n_lon, n_lat=n_lat)
-
-    if backend isa CPU
-        scatter_accumulate_circular!(grid_sum, grid_weights, ix, iy, inside_count,
-                                     skip, val, n, n_vars)
-    else
-        scatter_accumulate_circular_ka!(backend, grid_sum, grid_weights, ix, iy,
-                                        inside_count, skip, val, n, n_vars)
-    end
-
+    counts = _rect_batch_indices!(backend, grid_weights, ix, iy, skip, centers, lat_c, lon_c, n)
+    _scatter_batch!(backend, grid_sum, grid_weights, ix, iy, counts, skip, val, n, n_vars)
     nothing
+end
+
+function _rect_batch_indices!(backend, grid_weights, ix, iy, skip, ::Nothing, lat, lon, n)
+    n_lon, n_lat = size(grid_weights)
+    _compute_footprint_indices_ka!(backend, ix, iy, skip, lat, lon, n,
+        n_lon, n_lat, _ka_supported_float(backend, eltype(grid_weights)))
+    nothing
+end
+
+function _rect_batch_indices!(backend, grid_weights, ix, iy, skip, centers, lat, lon, n)
+    n_lon, n_lat = size(grid_weights)
+    counts = KernelAbstractions.zeros(backend, Int32, size(lat, 1))
+    compute_circular_footprint_indices_ka!(backend, ix, iy, counts, skip,
+        centers..., lat, lon, n; n_lon, n_lat)
+    counts
 end
 
 """
@@ -600,15 +536,7 @@ function accumulate_center!(grid_data::AbstractArray{T,3},
                             lon_idx::AbstractVector{<:Integer},
                             values::AbstractMatrix{T},
                             n_pixels::Int, n_vars::Int) where {T}
-    @inbounds for i in 1:n_pixels
-        col = lon_idx[i]
-        row = lat_idx[i]
-        grid_weights[col, row] += one(T)
-        for z in 1:n_vars
-            grid_data[col, row, z] += values[i, z]
-        end
-    end
-    nothing
+    _accumulate_center!(grid_data, grid_weights, lat_idx, lon_idx, values, nothing, n_pixels, n_vars)
 end
 
 # Mask-aware variant: skip invalid rows in place rather than allocating
@@ -620,8 +548,16 @@ function accumulate_center!(grid_data::AbstractArray{T,3},
                             values::AbstractMatrix{T},
                             valid::BitVector,
                             n_pixels::Int, n_vars::Int) where {T}
+    _accumulate_center!(grid_data, grid_weights, lat_idx, lon_idx, values, valid, n_pixels, n_vars)
+end
+
+@inline _valid_center_row(::Nothing, i) = true
+@inline _valid_center_row(valid, i) = @inbounds valid[i]
+
+function _accumulate_center!(grid_data, grid_weights, lat_idx, lon_idx, values, valid, n_pixels, n_vars)
+    T = eltype(grid_weights)
     @inbounds for i in 1:n_pixels
-        valid[i] || continue
+        _valid_center_row(valid, i) || continue
         col = lon_idx[i]
         row = lat_idx[i]
         grid_weights[col, row] += one(T)
@@ -671,14 +607,12 @@ function welford_to_moments!(S1::AbstractArray{T,3}, S2,
                              mean::AbstractArray{T,3}, M2::Union{Nothing,AbstractArray{T,3}},
                              weights::AbstractMatrix{T}, compute_std::Bool) where {T}
     nlon, nlat, nvars = size(mean)
-    @inbounds for j in 1:nlat, i in 1:nlon
+    @inbounds for z in 1:nvars, j in 1:nlat, i in 1:nlon
         w = weights[i, j]
-        for z in 1:nvars
-            m = mean[i, j, z]
-            S1[i, j, z] = w * m
-            if compute_std
-                S2[i, j, z] = M2[i, j, z] + w * m * m
-            end
+        m = mean[i, j, z]
+        S1[i, j, z] = w * m
+        if compute_std
+            S2[i, j, z] = M2[i, j, z] + w * m * m
         end
     end
     nothing
@@ -696,17 +630,15 @@ the summed `S1` *before* `S1` is overwritten with the mean, so this is done in o
 function finalize_moments!(S1::AbstractArray{T,3}, S2, S0::AbstractMatrix{T},
                            compute_std::Bool; min_weight=eps(T)) where {T}
     nlon, nlat, nvars = size(S1)
-    @inbounds for j in 1:nlat, i in 1:nlon
+    @inbounds for z in 1:nvars, j in 1:nlat, i in 1:nlon
         w = S0[i, j]
         if w > min_weight
-            for z in 1:nvars
-                s1 = S1[i, j, z]
-                if compute_std
-                    M2 = S2[i, j, z] - s1 * s1 / w
-                    S2[i, j, z] = sqrt(max(M2, zero(T)) / w)
-                end
-                S1[i, j, z] = s1 / w
+            s1 = S1[i, j, z]
+            if compute_std
+                M2 = S2[i, j, z] - s1 * s1 / w
+                S2[i, j, z] = sqrt(max(M2, zero(T)) / w)
             end
+            S1[i, j, z] = s1 / w
         end
     end
     nothing

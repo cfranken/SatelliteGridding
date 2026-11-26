@@ -354,38 +354,38 @@ end
 
 function _test_healpix_tiny_weight(backend, accumulator_precision)
     S = SatelliteGridding
-    scratch = mkpath(joinpath(@__DIR__, "..", ".scratch"))
-    mktempdir(scratch) do dir
-        spec = HEALPixGridSpec(nside=8, T=Float32)
-        date = DateTime(2020, 1, 1)
-        tiled = TimeSpec(date, date, Day(1))
-        rolling = TimeSpec(date, date, Day(1); sample_step=Day(1), window_halfwidth_days=0)
-        output = joinpath(dir, "tiny.nc")
-        n = 4096
-        # Only one sample of this rectangle falls into linear cell 306.
-        grazing = (10.0, 10.1, 8.419654254143046, 8.519654254143045)
-        lon, lat = pix2ang_nest(8, 100)
-        distant = (lon - 0.01, lon + 0.01, lat - 0.01, lat + 0.01)
-        input = joinpath(dir, "grazing_2020-01-01.nc")
-        config = _healpix_ka_signal_config(dir, "grazing")
-        for (rectangles, values) in (([grazing], Float32[12]),
-                                     ([distant, grazing], Float32[9, 12]))
-            # The second case includes a separate value so the batch median
-            # differs from 12. A raw shifted sum is especially small here.
-            _write_healpix_ka_signal_input(input, rectangles, values)
-            for times in (tiled, rolling)
-                # Exercise the original reproduction above the new public cap.
-                Base.invokelatest(S._grid_l2, config, spec, times; backend,
-                    effective_n_oversample=n, footprint_method=SubpixelGridding(),
-                    compute_std=true, outfile=output, progress=false, geometry_precision=nothing,
-                    accumulator_precision, zarr_out=nothing, zarr_meta=nothing, zarr_epoch=S.ZARR_EPOCH,
-                    keep_going=false, command=nothing)
-                Dataset(output) do ds
-                    @test ds["n"][306, 1] == inv(Float32(n^2)) < eps(Float32)
-                    @test ds["signal"][306, 1] == 12f0
-                    @test ds["signal_std"][306, 1] == 0f0
-                end
+    spec = HEALPixGridSpec(nside=8, T=Float32)
+    options = S._spherical_ka_options(spec, backend, nothing, accumulator_precision)
+    # Only one sample of this rectangle falls into linear cell 306.
+    grazing = (10.0, 10.1, 8.419654254143046, 8.519654254143045)
+    lon, lat = pix2ang_nest(8, 100)
+    distant = (lon - 0.01, lon + 0.01, lat - 0.01, lat + 0.01)
+    n = 4096  # Above the public cap, to exercise sub-epsilon weights.
+    for (rectangles, values) in (([grazing], [12.0]),
+                                 ([distant, grazing], [9.0, 12.0]))
+        # The second case has a different batch median, leaving a small shifted sum.
+        west, east = first.(rectangles), getindex.(rectangles, 2)
+        south, north = getindex.(rectangles, 3), last.(rectangles)
+        obs = (lat_bounds=hcat(south, south, north, north),
+               lon_bounds=hcat(west, east, east, west), values=reshape(values, :, 1))
+        for rolling in (false, true)
+            acc = S.new_accumulator(spec, backend, options, 1, true)
+            bounds = S._start_pass!(acc)
+            S._accumulate_spherical_pass!(acc, obs, n, acc.data, bounds)
+            S._finish_spherical_pass!(acc, bounds, rolling) do replay
+                S._accumulate_spherical_pass!(acc, obs, n, acc.m2, replay)
             end
+            mean, std, weights = if rolling
+                window = S._window_moments(acc)
+                S.reset!(window)
+                S._merge_day!(window, S.day_moments(acc))
+                S.finish!(window, acc)
+            else
+                S.finish!(acc)
+            end
+            @test weights[306] == inv(Float32(n^2)) < eps(Float32)
+            @test mean[306] == 12f0
+            @test std[306] == 0f0
         end
     end
 end
@@ -451,7 +451,7 @@ function _healpix_test_precision(backend)
             end
         end
     end
-    inputs = S._spherical_device_input(backend, vertices)
+    inputs = S._backend_input(backend, vertices)
     ids = KernelAbstractions.allocate(backend, Int64, size(ref))
     counts = KernelAbstractions.allocate(backend, Int, size(ref_n))
     _healpix_test_sample_ids!(backend, 64)(ids, counts, inputs, locator,

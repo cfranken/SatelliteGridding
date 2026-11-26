@@ -1,5 +1,16 @@
 @testset "Filters" begin
 
+    @testset "Missing rectangular footprint corner" begin
+        gs = GridSpec(lat_min=0f0, lat_max=1f0, lon_min=0f0, lon_max=1f0, dlat=1f0, dlon=1f0)
+        cfg = DataSourceConfig(Dict{String,String}(), OrderedDict("a" => "a"),
+                               FilterRule[], "*.nc", "")
+        lat_bounds = Union{Missing,Float32}[missing 0.25 0.75 0.75; 0.25 0.25 0.75 0.75]
+        lon_bounds = Float32[1.25 1.75 1.75 1.25; 0.25 0.75 0.75 0.25]
+        @test_throws TypeError apply_filters(nothing, cfg, lat_bounds, lon_bounds, gs)
+        lat_bounds[1, 1] = 0.25f0
+        @test apply_filters(nothing, cfg, lat_bounds, lon_bounds, gs) == [2]
+    end
+
     @testset "Packed quality flags and missing values" begin
         mktempdir() do dir
             file = joinpath(dir, "quality.nc")

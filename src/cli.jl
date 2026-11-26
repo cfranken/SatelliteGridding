@@ -1,26 +1,15 @@
-"""
-    parse_l2_args(args=ARGS) -> Dict
-
-Parse command-line arguments for L2 gridding. Matches the interface of the
-original `gridL2_Dates.jl` script.
-"""
-function parse_l2_args(args=ARGS)
-    s = ArgParseSettings(description="Grid Level-2 satellite data with footprint oversampling")
-
+function _add_common_args!(s; spacing, start_date, stop_date, step_days, config_help, outfile_help)
     @add_arg_table! s begin
         "--config", "-c"
-            help = "TOML or JSON configuration file defining the data source"
+            help = config_help
             arg_type = String
             required = true
         "--outFile", "-o"
-            help = "Output NetCDF filename; empty string disables NetCDF (Zarr-only, needs --zarrOut)"
+            help = outfile_help
             arg_type = String
             default = "gridded_output.nc"
         "--monthly"
             help = "Use time-steps in months instead of days"
-            action = :store_true
-        "--compSTD"
-            help = "Compute standard deviation within each grid cell"
             action = :store_true
         "--latMin"
             help = "Lower latitude bound"
@@ -41,11 +30,58 @@ function parse_l2_args(args=ARGS)
         "--dLat"
             help = "Latitude resolution (degrees)"
             arg_type = Float32
-            default = 1.0f0
+            default = spacing
         "--dLon"
             help = "Longitude resolution (degrees)"
             arg_type = Float32
-            default = 1.0f0
+            default = spacing
+        "--startDate"
+            help = "Start date (YYYY-MM-DD)"
+            arg_type = String
+            default = start_date
+        "--stopDate"
+            help = "Stop date (YYYY-MM-DD)"
+            arg_type = String
+            default = stop_date
+        "--dDays"
+            help = "Time step in days (or months if --monthly is set)"
+            arg_type = Int64
+            default = step_days
+        "--keepGoing"
+            help = "Continue after per-file processing errors and report failures at the end"
+            action = :store_true
+        "--noProgress"
+            help = "Don't draw progress bars. By default they're drawn only when stderr is a terminal"
+            action = :store_true
+        "--quiet"
+            help = "Suppress progress bars and run status messages"
+            action = :store_true
+    end
+    s
+end
+
+function _parse_grid_args(args, settings)
+    parsed = parse_args(args, settings)
+    parsed["noProgress"] |= parsed["quiet"]
+    parsed
+end
+
+"""
+    parse_l2_args(args=ARGS) -> Dict
+
+Parse command-line arguments for L2 gridding. Matches the interface of the
+original `gridL2_Dates.jl` script.
+"""
+function parse_l2_args(args=ARGS)
+    s = ArgParseSettings(description="Grid Level-2 satellite data with footprint oversampling")
+    _add_common_args!(s; spacing=1.0f0, start_date="2018-03-07", stop_date="2018-10-31", step_days=8,
+                      config_help="TOML or JSON configuration file defining the data source",
+                      outfile_help="Output NetCDF filename; empty string disables NetCDF (Zarr-only, needs --zarrOut)")
+
+    @add_arg_table! s begin
+        "--compSTD"
+            help = "Compute standard deviation within each grid cell"
+            action = :store_true
         "--gridType"
             help = "Output grid geometry: rect (regular lat/lon), cs (GEOS/GCHP cubed sphere), or healpix (NESTED HEALPix)"
             arg_type = String
@@ -62,18 +98,6 @@ function parse_l2_args(args=ARGS)
             help = "Cubed-sphere convention: gmao (GEOS/GCHP, -10° offset) or equiangular"
             arg_type = String
             default = "gmao"
-        "--startDate"
-            help = "Start date (YYYY-MM-DD)"
-            arg_type = String
-            default = "2018-03-07"
-        "--stopDate"
-            help = "Stop date (YYYY-MM-DD)"
-            arg_type = String
-            default = "2018-10-31"
-        "--dDays"
-            help = "Time step in days (or months if --monthly is set)"
-            arg_type = Int64
-            default = 8
         "--oversample_temporal"
             help = "Temporal oversampling factor (averaging window = oversample_temporal × dDays)"
             arg_type = Float32
@@ -105,12 +129,6 @@ function parse_l2_args(args=ARGS)
             help = "Spherical KA accumulator precision: float32 or float64 (default: float32 on Metal, float64 elsewhere)"
             arg_type = String
             range_tester = x -> lowercase(x) in ("float32", "float64")
-        "--keepGoing"
-            help = "Continue after per-file processing errors and report failures at the end"
-            action = :store_true
-        "--noProgress"
-            help = "Don't draw progress bars. By default they're drawn only when stderr is a terminal"
-            action = :store_true
         "--zarrOut"
             help = "Also write a per-day Zarr v2 store at this path (additive; one chunk per variable per day, alongside the NetCDF). Requires Zarr.jl. Rectangular grids only."
             arg_type = String
@@ -124,13 +142,10 @@ function parse_l2_args(args=ARGS)
             arg_type = String
             default = "2021-01-01"
     end
-    parsed = parse_args(args, s)
+    parsed = _parse_grid_args(args, s)
     n = parsed["nOversample"]
-    if n == 0
-        parsed["nOversample"] = nothing
-    elseif n !== nothing && !(1 <= n <= N_OVERRIDE_MAX)
-        throw(ArgumentError("--nOversample must be 0 (automatic) or an integer in 1:$N_OVERRIDE_MAX"))
-    end
+    parsed["nOversample"] = _validate_n_oversample(n == 0 ? nothing : n,
+        "--nOversample must be 0 (automatic) or an integer in 1:$N_OVERRIDE_MAX")
     parsed
 end
 
@@ -141,55 +156,10 @@ Parse command-line arguments for center-coordinate gridding (MODIS-style).
 """
 function parse_center_args(args=ARGS)
     s = ArgParseSettings(description="Grid satellite data using center coordinates (no footprint bounds)")
+    _add_common_args!(s; spacing=0.5f0, start_date="2018-01-01", stop_date="2018-12-31", step_days=1,
+                      config_help="TOML or JSON configuration file", outfile_help="Output NetCDF filename")
 
     @add_arg_table! s begin
-        "--config", "-c"
-            help = "TOML or JSON configuration file"
-            arg_type = String
-            required = true
-        "--outFile", "-o"
-            help = "Output NetCDF filename"
-            arg_type = String
-            default = "gridded_output.nc"
-        "--monthly"
-            help = "Use time-steps in months instead of days"
-            action = :store_true
-        "--latMin"
-            help = "Lower latitude bound"
-            arg_type = Float32
-            default = -90.0f0
-        "--latMax"
-            help = "Upper latitude bound"
-            arg_type = Float32
-            default = 90.0f0
-        "--lonMin"
-            help = "Lower longitude bound"
-            arg_type = Float32
-            default = -180.0f0
-        "--lonMax"
-            help = "Upper longitude bound"
-            arg_type = Float32
-            default = 180.0f0
-        "--dLat"
-            help = "Latitude resolution (degrees)"
-            arg_type = Float32
-            default = 0.5f0
-        "--dLon"
-            help = "Longitude resolution (degrees)"
-            arg_type = Float32
-            default = 0.5f0
-        "--startDate"
-            help = "Start date (YYYY-MM-DD)"
-            arg_type = String
-            default = "2018-01-01"
-        "--stopDate"
-            help = "Stop date (YYYY-MM-DD)"
-            arg_type = String
-            default = "2018-12-31"
-        "--dDays"
-            help = "Time step in days (or months if --monthly is set)"
-            arg_type = Int64
-            default = 1
         "--geoTable"
             help = "Path to legacy monolithic geolocation lookup table (NetCDF)"
             arg_type = String
@@ -205,14 +175,8 @@ function parse_center_args(args=ARGS)
         "--vegIndices"
             help = "Compute vegetation indices (EVI, NDVI, NIRv, NDWI)"
             action = :store_true
-        "--keepGoing"
-            help = "Continue after per-file processing errors and report failures at the end"
-            action = :store_true
-        "--noProgress"
-            help = "Don't draw progress bars. By default they're drawn only when stderr is a terminal"
-            action = :store_true
     end
-    parse_args(args, s)
+    _parse_grid_args(args, s)
 end
 
 """
@@ -266,4 +230,16 @@ function args_to_time_spec(args::Dict)::TimeSpec
                         window_halfwidth_days=get(args, "window_days", 0))
     end
     TimeSpec(start_date, stop_date, time_step; oversample_temporal=oversample)
+end
+
+
+_cli_precision(::Nothing) = nothing
+_cli_precision(arg::AbstractString) = lowercase(arg) == "float32" ? Float32 : Float64
+
+function _cli_footprint(args)
+    footprint = lowercase(args["footprint"])
+    n = args["nOversample"]
+    footprint in ("quad", "quadrilateral", "subpixel") && return SubpixelGridding(n)
+    footprint in ("circle", "circular") && return CircularFootprintGridding(n)
+    error("Unknown footprint geometry: $(args["footprint"]). Use quad or circle.")
 end

@@ -8,49 +8,47 @@ _has_l2_centers(config::DataSourceConfig) =
 _has_l2_radius(config::DataSourceConfig) =
     haskey(config.basic, "radius") || haskey(config.options, "radius")
 
-function _use_radius_l2_geometry(config::DataSourceConfig,
-                                 footprint_method::AbstractGriddingMethod)
-    footprint_method isa CircularFootprintGridding &&
-        _has_l2_radius(config) && !_has_l2_bounds(config)
+_validate(spec, method::AbstractGriddingMethod) = nothing
+
+function _validate(spec::AbstractSphericalGridSpec, ::CircularFootprintGridding)
+    error("CircularFootprintGridding is unsupported for $(typeof(spec)). Use SubpixelGridding (quad footprints).")
 end
 
-function _validate_l2_geometry_config(config::DataSourceConfig,
-                                      footprint_method::AbstractGriddingMethod)
-    has_bounds = _has_l2_bounds(config)
-    has_centers = _has_l2_centers(config)
-    has_radius = _has_l2_radius(config)
+_use_radius_l2_geometry(config, ::AbstractGriddingMethod) = false
+_use_radius_l2_geometry(config, ::CircularFootprintGridding) =
+    _has_l2_radius(config) && !_has_l2_bounds(config)
 
+function _validate_l2_geometry_config(config::DataSourceConfig, method::AbstractGriddingMethod)
     has_lat = haskey(config.basic, "lat")
     has_lon = haskey(config.basic, "lon")
     has_lat == has_lon ||
         error("grid_l2 requires both basic.lat and basic.lon, or neither so centers can be derived from bounds")
-
-    if footprint_method isa CircularFootprintGridding
-        has_bounds || has_radius ||
-            error("CircularFootprintGridding requires either basic.lat_bnd/basic.lon_bnd or center basic.lat/basic.lon plus basic.radius or [circle] radius")
-        if !has_bounds
-            has_centers ||
-                error("Radius-based CircularFootprintGridding requires basic.lat and basic.lon center variables")
-        elseif !has_centers
-            @warn "basic.lat/basic.lon not configured; deriving footprint centers from corner coordinates"
-        end
-    else
-        has_bounds ||
-            error("grid_l2 requires basic.lat_bnd and basic.lon_bnd for quadrilateral footprint gridding")
-        if !has_centers
-            @warn "basic.lat/basic.lon not configured; deriving footprint centers from corner coordinates"
-        end
+    _validate_l2_coordinates(config, method)
+    if !has_lat
+        @warn "basic.lat/basic.lon not configured; deriving footprint centers from corner coordinates"
     end
+    nothing
+end
+
+function _validate_l2_coordinates(config, ::SubpixelGridding)
+    _has_l2_bounds(config) ||
+        error("grid_l2 requires basic.lat_bnd and basic.lon_bnd for quadrilateral footprint gridding")
+    nothing
+end
+
+function _validate_l2_coordinates(config, ::CircularFootprintGridding)
+    _has_l2_bounds(config) && return nothing
+    _has_l2_radius(config) ||
+        error("CircularFootprintGridding requires either basic.lat_bnd/basic.lon_bnd or center basic.lat/basic.lon plus basic.radius or [circle] radius")
+    _has_l2_centers(config) ||
+        error("Radius-based CircularFootprintGridding requires basic.lat and basic.lon center variables")
     nothing
 end
 
 function _read_or_derive_l2_centers(fin, config::DataSourceConfig,
                                     lat_bnd::AbstractMatrix,
                                     lon_bnd::AbstractMatrix)
-    if haskey(config.basic, "lat") && haskey(config.basic, "lon")
-        return vec(_read_l2_geolocation(fin, config.basic["lat"])),
-               vec(_read_l2_geolocation(fin, config.basic["lon"]))
-    end
+    _has_l2_centers(config) && return _read_l2_centers(fin, config)
 
     vec(mean(lat_bnd, dims=2)), vec(mean(lon_bnd, dims=2))
 end
@@ -211,7 +209,7 @@ function _prepare_l2_observations(fin, config, spec::AbstractGridSpec{T}, method
         data = _read_l2_values(fin, path, value_type)
         length(data) == size(lat_bounds, 1) ||
             throw(DimensionMismatch("Variable '$path' has $(length(data)) values; expected $(size(lat_bounds, 1)) soundings"))
-        values[:, column] = data[idx]
+        copyto!(view(values, :, column), view(data, idx))
     end
     lat = lat_center[idx]
     lon = lon_center[idx]
@@ -230,16 +228,21 @@ function _prepare_l2_observations(fin, config, spec::AbstractGridSpec{T}, method
     (; values, lat, lon, lat_bounds=lat_c, lon_bounds=lon_c)
 end
 
-function _rectangular_indices(observations, spec::RectangularGridSpec)
+function _rectangular_indices(observations, spec::RectangularGridSpec, method)
     n_lat, n_lon = length(spec.lat), length(spec.lon)
-    lat_scale = (spec.lat_max - spec.lat_min)
-    lon_scale = (spec.lon_max - spec.lon_min)
-    ilat = ((observations.lat_bounds .- spec.lat_min) / lat_scale * n_lat) .+ 1
-    ilon = ((observations.lon_bounds .- spec.lon_min) / lon_scale * n_lon) .+ 1
-    ilat_center = ((observations.lat .- spec.lat_min) / lat_scale * n_lat) .+ 1
-    ilon_center = ((observations.lon .- spec.lon_min) / lon_scale * n_lon) .+ 1
-    ilat, ilon, ilat_center, ilon_center
+    lat_scale = spec.lat_max - spec.lat_min
+    lon_scale = spec.lon_max - spec.lon_min
+    lat_index(lat) = ((lat .- spec.lat_min) / lat_scale * n_lat) .+ 1
+    lon_index(lon) = ((lon .- spec.lon_min) / lon_scale * n_lon) .+ 1
+    ilat = lat_index(observations.lat_bounds)
+    ilon = lon_index(observations.lon_bounds)
+    centers = _rectangular_centers(method, observations, lat_index, lon_index)
+    ilat, ilon, centers
 end
+
+_rectangular_centers(::SubpixelGridding, obs, lat_index, lon_index) = nothing
+_rectangular_centers(::CircularFootprintGridding, obs, lat_index, lon_index) =
+    (lat_index(obs.lat), lon_index(obs.lon))
 
 function _l2_oversampling(ilat, ilon, override)
     override === nothing || return override

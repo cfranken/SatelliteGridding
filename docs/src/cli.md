@@ -49,6 +49,7 @@ julia --project=. bin/grid.jl l2 [options]
 | `--accumulator-precision` | String | `float64` on CUDA and KA CPU, `float32` on Metal | HEALPix KA precision for weights, sums, deviations, and rolling moments. Metal rejects `float64`. |
 | `--keepGoing` | Flag | false | Continue after per-file processing errors |
 | `--noProgress` | Flag | false | Don't draw progress bars. By default they're drawn only when stderr is a terminal |
+| `--quiet` | Flag | false | Suppress progress bars and run status messages |
 
 #### Examples
 
@@ -171,6 +172,7 @@ julia --project=. bin/grid.jl center [options]
 | `--vegIndices` | Flag | false | Compute vegetation indices (EVI, NDVI, NIRv, NDWI) |
 | `--keepGoing` | Flag | false | Continue after per-file processing errors |
 | `--noProgress` | Flag | false | Don't draw progress bars. By default they're drawn only when stderr is a terminal |
+| `--quiet` | Flag | false | Suppress progress bars and run status messages |
 
 #### Example
 

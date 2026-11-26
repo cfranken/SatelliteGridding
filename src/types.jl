@@ -135,10 +135,12 @@ abstract type AbstractGriddingMethod end
 """Largest explicit footprint oversampling factor per side (1024)."""
 const N_OVERRIDE_MAX = 1024
 
-_validate_n_oversample(::Nothing) = nothing
-function _validate_n_oversample(n)
+const _N_OVERSAMPLE_ERROR = "n_oversample must be an integer in 1:$N_OVERRIDE_MAX or nothing"
+
+_validate_n_oversample(::Nothing, message=_N_OVERSAMPLE_ERROR) = nothing
+function _validate_n_oversample(n, message=_N_OVERSAMPLE_ERROR)
     n isa Integer && !(n isa Bool) && 0 < n <= N_OVERRIDE_MAX ||
-        throw(ArgumentError("n_oversample must be an integer in 1:$N_OVERRIDE_MAX or nothing"))
+        throw(ArgumentError(message))
     return Int(n)
 end
 

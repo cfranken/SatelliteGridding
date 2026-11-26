@@ -15,7 +15,7 @@ alongside missing science values.
 - `geo_cache::Union{Nothing,String}=nothing`: Directory for generated per-tile MODIS geolocation cache
 - `geo_provider::Union{Symbol,String}=:auto`: `:auto`, `:variables`, `:lut`, or `:modis`
 - `veg_indices::Bool=false`: Compute vegetation indices (EVI, NDVI, NIRv, NDWI)
-- `compute_std::Bool=false`: Compute per-cell standard deviation
+- `verbose::Bool=true`: Log run status with `@info`.
 - `outfile::String="gridded_output.nc"`: Output file path
 - `keep_going::Bool=false`: Continue after per-file errors. By default, the
   first file error stops the run.
@@ -32,10 +32,36 @@ function grid_center(config::DataSourceConfig, grid_spec::AbstractGridSpec{T}, t
                      outfile::String="gridded_output.nc",
                      keep_going::Bool=false,
                      progress::Bool=_default_progress(),
+                     verbose::Bool=true,
                      command::Union{Nothing,String}=nothing) where {T}
+    _grid_center(config, grid_spec, time_spec; geo_table, geo_cache, geo_provider, veg_indices,
+                 compute_std, outfile, keep_going, progress, verbose, command)
+end
 
-    grid_spec isa RectangularGridSpec ||
-        error("Center-coordinate gridding requires a rectangular lat/lon grid. Got $(typeof(grid_spec)).")
+function _grid_center(config, spec, time_spec; kwargs...)
+    error("Center-coordinate gridding requires a rectangular lat/lon grid. Got $(typeof(spec)).")
+end
+
+const _VEGETATION_NAMES = ("EVI", "NDVI", "NIRv", "NDWI")
+
+"""Coordinates and mapped indices for the last tile returned by a center provider."""
+struct _CenterIndexCache{I}
+    # Used only for identity checks. A provider can return CF-decoded arrays
+    # on a tile miss and its stored, converted arrays on a cache hit.
+    lat::AbstractArray
+    lon::AbstractArray
+    idx::I
+    lat_idx::Vector{Int32}
+    lon_idx::Vector{Int32}
+end
+
+_center_cache(provider) = Ref{Union{Nothing,_CenterIndexCache}}(nothing)
+_center_cache(::ModisSinusoidalGeolocation) =
+    Ref{Union{Nothing,_CenterIndexCache{Vector{CartesianIndex{2}}}}}(nothing)
+
+function _grid_center(config, grid_spec::RectangularGridSpec{T}, time_spec;
+                      geo_table, geo_cache, geo_provider, veg_indices, compute_std,
+                      outfile, keep_going, progress, verbose, command) where {T}
     output_options = _output_options(config.options)
     metadata = InputMetadata(config)
     dates = collect(time_spec.start_date:time_spec.time_step:time_spec.stop_date)
@@ -48,10 +74,10 @@ function grid_center(config::DataSourceConfig, grid_spec::AbstractGridSpec{T}, t
     is_rolling(time_spec) && error("Rolling-mean mode is not supported for center gridding yet; use the l2 command, or drop --sample_step.")
 
     # Extra variables for vegetation indices
-    n_veg = veg_indices ? 4 : 0
-    n_total = n_vars + n_veg
+    veg_names = veg_indices ? _VEGETATION_NAMES : ()
+    n_total = n_vars + length(veg_names)
 
-    println("Output file dimension (time/lon/lat): $n_times/$n_lon/$n_lat")
+    verbose && @info "Output file dimension (time/lon/lat): $n_times/$n_lon/$n_lat"
 
     provider = center_geolocation_provider(config;
                                            geo_table=geo_table,
@@ -61,9 +87,8 @@ function grid_center(config::DataSourceConfig, grid_spec::AbstractGridSpec{T}, t
     ds_out = nothing
 
     total_files = 0
-    successful_files = 0
+    successful_files = Ref(0)
     failed_files = 0
-    copy_attributes = true
 
     try
         open_geolocation!(provider)
@@ -71,15 +96,8 @@ function grid_center(config::DataSourceConfig, grid_spec::AbstractGridSpec{T}, t
                                                 config.grid_vars, compute_std;
                                                 command=command,
                                                 filters=config.filters,
-                                                output_options=output_options)
-
-        if veg_indices
-            storage = _storage_kwargs(output_options, grid_spec)
-            for name in ("EVI", "NDVI", "NIRv", "NDWI")
-                nc_vars[name] = defVar(ds_out, name, typeof(output_options.fill_value),
-                                      ("lon", "lat", "time"); storage...)
-            end
-        end
+                                                output_options=output_options,
+                                                vegetation_names=veg_names)
 
         grid_data = zeros(T, n_lon, n_lat, n_total)
         grid_weights = zeros(T, n_lon, n_lat)
@@ -93,11 +111,9 @@ function grid_center(config::DataSourceConfig, grid_spec::AbstractGridSpec{T}, t
         # the same ~150 ms of bbox filter and grid-index math for every tile
         # repeat. Identity (===) check works because only sinusoidal-MODIS
         # caches; basic providers always return fresh arrays.
-        cached_lat = nothing
-        cached_lon = nothing
-        cached_idx = nothing
-        cached_lat_idx = Int32[]
-        cached_lon_idx = Int32[]
+        cache = _center_cache(provider)
+        work = (; config, grid_spec, provider, cache, veg_indices, nc_vars, metadata,
+                copy_attributes=Ref(true), successful_files)
 
         for (ct, d) in enumerate(dates)
             ProgressMeter.next!(p_time; showvalues=[(:Time, d)])
@@ -111,61 +127,7 @@ function grid_center(config::DataSourceConfig, grid_spec::AbstractGridSpec{T}, t
 
             for filepath in files
                 try
-                    # Cheap rejection of tiles that can't intersect the grid
-                    # bbox. For MODIS sinusoidal we know each tile's geographic
-                    # extent analytically — skipping here avoids reading the
-                    # per-tile cache file and the granule's HDF entirely.
-                    if !provider_tile_intersects_grid(provider, filepath, grid_spec)
-                        ProgressMeter.next!(p_files; showvalues=[(:File, filepath), (:N_pixels, 0)])
-                        successful_files += 1
-                        continue
-                    end
-
-                    lat_in, lon_in = center_coordinates(provider, filepath, config)
-                    if lat_in === cached_lat && lon_in === cached_lon
-                        idx = cached_idx
-                        lat_idx = cached_lat_idx
-                        lon_idx = cached_lon_idx
-                    else
-                        idx = apply_center_filters(lat_in, lon_in, grid_spec)
-                        if isempty(idx)
-                            cached_lat = lat_in
-                            cached_lon = lon_in
-                            cached_idx = idx
-                            cached_lat_idx = Int32[]
-                            cached_lon_idx = Int32[]
-                            ProgressMeter.next!(p_files; showvalues=[(:File, filepath), (:N_pixels, 0)])
-                            successful_files += 1
-                            continue
-                        end
-                        lat_idx, lon_idx = _center_grid_indices(idx, lat_in, lon_in, grid_spec)
-                        cached_lat = lat_in
-                        cached_lon = lon_in
-                        cached_idx = idx
-                        cached_lat_idx = lat_idx
-                        cached_lon_idx = lon_idx
-                    end
-
-                    values, valid = _center_values(filepath, config, idx, veg_indices, T)
-                    n_valid = count(valid)
-                    if n_valid > 0
-                        accumulate_center!(grid_data, grid_weights, lat_idx, lon_idx,
-                                           values, valid, length(lat_idx), n_total)
-                    end
-                    if !_looks_like_hdf4(filepath)
-                        Dataset(filepath) do fin
-                            _capture_input_metadata!(metadata, fin)
-                            if copy_attributes
-                                copy_variable_attributes!(nc_vars, fin, config.grid_vars;
-                                    attributes=get(metadata.settings, "variable_attributes", DEFAULT_VARIABLE_ATTRIBUTES))
-                                copy_attributes = false
-                            end
-                        end
-                    end
-                    successful_files += 1
-                    ProgressMeter.next!(p_files; showvalues=[(:File, filepath),
-                                                              (:N_pixels, length(idx)),
-                                                              (:N_valid, n_valid)])
+                    _process_center_file!(grid_data, grid_weights, work, filepath, p_files)
                 catch e
                     failed_files += 1
                     if keep_going
@@ -178,15 +140,15 @@ function grid_center(config::DataSourceConfig, grid_spec::AbstractGridSpec{T}, t
 
             # Write output for this time step
             min_count = T(get(config.options, "min_count", 5))
-            _write_center_time_slice!(ds_out, nc_vars, config, output_options, grid_data,
-                                      grid_weights, veg_indices, ct, d, min_count)
+            _write_center_time_slice!(ds_out, nc_vars, config.grid_vars, veg_names, output_options,
+                                      grid_data, grid_weights, ct, d, min_count)
 
             fill!(grid_data, zero(T))
             fill!(grid_weights, zero(T))
         end
 
         total_files > 0 || error("No input files matched pattern '$(config.file_pattern)' in folder '$(config.folder)'")
-        successful_files > 0 || error("No input files were successfully processed; failed files: $failed_files")
+        successful_files[] > 0 || error("No input files were successfully processed; failed files: $failed_files")
     finally
         try
             close_geolocation!(provider)
@@ -195,11 +157,67 @@ function grid_center(config::DataSourceConfig, grid_spec::AbstractGridSpec{T}, t
         end
     end
 
-    println("Output written to: $outfile")
+    verbose && @info "Output written to: $outfile"
     nothing
 end
 
-function _center_grid_indices(idx, lat, lon, grid_spec::GridSpec)
+function _process_center_file!(grid_data, grid_weights, work, filepath, progress)
+    (; config, grid_spec, provider, cache, veg_indices, nc_vars, metadata,
+       copy_attributes, successful_files) = work
+
+    # Cheap rejection of tiles that can't intersect the grid bbox. For MODIS
+    # sinusoidal we know the extent analytically, so neither the per-tile cache
+    # file nor the granule's HDF has to be read.
+    if !provider_tile_intersects_grid(provider, filepath, grid_spec)
+        ProgressMeter.next!(progress; showvalues=[(:File, filepath), (:N_pixels, 0)])
+        successful_files[] += 1
+        return nothing
+    end
+
+    lat, lon = center_coordinates(provider, filepath, config)
+    entry = _center_indices!(cache, lat, lon, grid_spec)
+    if entry === nothing
+        ProgressMeter.next!(progress; showvalues=[(:File, filepath), (:N_pixels, 0)])
+        successful_files[] += 1
+        return nothing
+    end
+
+    values, valid = _center_values(filepath, config, entry.idx, veg_indices, eltype(grid_data))
+    n_valid = count(valid)
+    if n_valid > 0
+        accumulate_center!(grid_data, grid_weights, entry.lat_idx, entry.lon_idx,
+                           values, valid, length(entry.lat_idx), size(grid_data, 3))
+    end
+    if !_looks_like_hdf4(filepath)
+        Dataset(filepath) do fin
+            _capture_input_metadata!(metadata, fin)
+            if copy_attributes[]
+                copy_variable_attributes!(nc_vars, fin, config.grid_vars;
+                    attributes=get(metadata.settings, "variable_attributes", DEFAULT_VARIABLE_ATTRIBUTES))
+                copy_attributes[] = false
+            end
+        end
+    end
+    successful_files[] += 1
+    ProgressMeter.next!(progress; showvalues=[(:File, filepath), (:N_pixels, length(entry.idx)),
+                                              (:N_valid, n_valid)])
+    nothing
+end
+
+function _center_indices!(cache, lat, lon, spec)
+    entry = cache[]
+    if entry !== nothing && lat === entry.lat && lon === entry.lon
+        # A cached empty selection still reaches input and metadata handling.
+        return entry
+    end
+    idx = apply_center_filters(lat, lon, spec)
+    lat_idx, lon_idx = _center_grid_indices(idx, lat, lon, spec)
+    entry = _CenterIndexCache(lat, lon, idx, lat_idx, lon_idx)
+    cache[] = entry
+    isempty(idx) ? nothing : entry
+end
+
+function _center_grid_indices(idx, lat, lon, grid_spec::RectangularGridSpec)
     lat_idx = Vector{Int32}(undef, length(idx))
     lon_idx = Vector{Int32}(undef, length(idx))
     n_lat = Int32(length(grid_spec.lat))
@@ -217,7 +235,7 @@ function _center_values(filepath::String, config::DataSourceConfig,
                         idx, veg_indices::Bool, ::Type{T}) where {T}
     n_pixels = length(idx)
     n_vars = length(config.grid_vars)
-    n_veg = veg_indices ? 4 : 0
+    n_veg = veg_indices ? length(_VEGETATION_NAMES) : 0
     values = Matrix{T}(undef, n_pixels, n_vars + n_veg)
     valid = trues(n_pixels)
 

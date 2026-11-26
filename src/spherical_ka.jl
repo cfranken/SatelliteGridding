@@ -144,13 +144,6 @@ end
     end
 end
 
-function _spherical_device_input(backend, host)
-    backend isa CPU && return host
-    device = KernelAbstractions.allocate(backend, eltype(host), size(host))
-    copyto!(device, host)
-    return device
-end
-
 mutable struct _SphericalKAReference{A,D}
     host::Vector{A}
     device::D
@@ -163,9 +156,18 @@ function _SphericalKAReference(backend, ::Type{T}, n_vars) where {T}
     return _SphericalKAReference(host, device, false)
 end
 
+"""Reusable host buffers for Cartesian corners and any converted science values."""
+mutable struct _SphericalKAHostBatch{F,A}
+    vertices::Matrix{NTuple{3,F}}
+    values::Matrix{A}
+end
+
+_SphericalKAHostBatch(::Type{F}, ::Type{A}) where {F,A} =
+    _SphericalKAHostBatch(Matrix{NTuple{3,F}}(undef, 0, 0), Matrix{A}(undef, 0, 0))
+
 """
     _accumulate_spherical_batch!(backend, sums, weights, pass, locator, F,
-                                 lat, lon, values, n_override, reference)
+                                 lat, lon, values, n_override, reference, host_batch)
 
 Upload validated corners and values and scatter one contribution per
 footprint and cell. Convert degrees to Cartesian corners on the host so
@@ -178,17 +180,20 @@ accumulate squared deviations into `sums` and linear deviations into
 `residual`, both around the cell's first-pass mean.
 """
 function _accumulate_spherical_batch!(backend, sums, weights, pass, locator, ::Type{F},
-                                      lat, lon, values, n_override, reference) where {F}
+                                      lat, lon, values, n_override, reference,
+                                      host_batch::_SphericalKAHostBatch{F,A}) where {F,A}
     n_fp = size(values, 1)
     iszero(n_fp) && return nothing
-    vertices = Matrix{NTuple{3,F}}(undef, size(lat))
+    if size(host_batch.vertices) != size(lat)
+        host_batch.vertices = Matrix{NTuple{3,F}}(undef, size(lat))
+    end
+    vertices = host_batch.vertices
     @inbounds for j in axes(vertices, 2), i in axes(vertices, 1)
         vertices[i, j] = map(F, _sphere_unit_vector(lat[i, j], lon[i, j]))
     end
-    device_vertices = _spherical_device_input(backend, vertices)
-    A = eltype(weights)
-    host_values = eltype(values) === A ? values : A.(values)
-    device_values = _spherical_device_input(backend, host_values)
+    device_vertices = _backend_input(backend, vertices)
+    host_values = _spherical_host_values!(host_batch, values)
+    device_values = _backend_input(backend, host_values)
     if !reference.initialized
         for v in axes(host_values, 2)
             column = filter(isfinite, @view host_values[:, v])
@@ -204,6 +209,16 @@ function _accumulate_spherical_batch!(backend, sums, weights, pass, locator, ::T
         ndrange=n_fp)
     KernelAbstractions.synchronize(backend)
     return nothing
+end
+
+_spherical_host_values!(::_SphericalKAHostBatch{F,A}, values::AbstractMatrix{A}) where {F,A} = values
+
+function _spherical_host_values!(host_batch::_SphericalKAHostBatch{F,A}, values) where {F,A}
+    if size(host_batch.values) != size(values)
+        host_batch.values = Matrix{A}(undef, size(values))
+    end
+    host_batch.values .= A.(values)
+    host_batch.values
 end
 
 # Reuse the replay buffers for pass-one bounds. Before replay, the mean

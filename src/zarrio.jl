@@ -32,7 +32,6 @@
 # identical across every run that shares one store (they define the time axis).
 const ZARR_EPOCH = Date(2021, 1, 1)
 const ZARR_HORIZON = Date(2031, 1, 1)
-const ZARR_NT = Dates.value(ZARR_HORIZON - ZARR_EPOCH) + 1
 
 # Dashboard variable registry (label/units/vmin/vmax/cmap/mask) for meta.json.
 # Unknown vars fall back to `_default_registry_entry`.

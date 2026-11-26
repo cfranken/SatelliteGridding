@@ -78,7 +78,6 @@ function parse_modis_tile(path_or_tile::AbstractString)
 end
 
 modis_tile_width() = 2 * pi * MODIS_SINUSOIDAL_RADIUS / MODIS_HORIZONTAL_TILES
-modis_pixel_size(pixels::Integer=MODIS_DEFAULT_PIXELS) = modis_tile_width() / pixels
 
 """
     modis_sinusoidal_latlon(h, v, line, sample; pixels=2400)
@@ -284,8 +283,22 @@ function center_coordinates(provider::BasicVariableGeolocation,
                             filepath::String, config::DataSourceConfig)
     haskey(config.basic, "lat") && haskey(config.basic, "lon") ||
         error("center geolocation provider 'variables' requires basic.lat and basic.lon")
-    read_array_from_file(filepath, config.basic["lat"]),
-    read_array_from_file(filepath, config.basic["lon"])
+    lat, lon = config.basic["lat"], config.basic["lon"]
+    try
+        if !_looks_like_hdf4(filepath)
+            return Dataset(filepath) do ds
+                _read_nc_array(ds, lat), _read_nc_array(ds, lon)
+            end
+        else
+            return _system_netcdf_with_open(filepath) do ncid
+                _read_system_netcdf_var(ncid, lat), _read_system_netcdf_var(ncid, lon)
+            end
+        end
+    catch
+        # Retry independently to preserve CF decoding for any coordinate the
+        # Julia reader can read and report the first failing coordinate.
+        return read_array_from_file(filepath, lat), read_array_from_file(filepath, lon)
+    end
 end
 
 function center_coordinates(provider::ModisMonolithicLUTGeolocation,

@@ -159,8 +159,8 @@ end
             try
                 SatelliteGridding._write_time_slice!(ds, vars, config, spec, options,
                     data, data, weights, true, 1, date)
-                SatelliteGridding._write_center_time_slice!(ds, vars, config, options, data,
-                    weights, false, 2, date + Day(1), 1)
+                SatelliteGridding._write_center_time_slice!(ds, vars, config.grid_vars, (), options,
+                    data, weights, 2, date + Day(1), 1)
             finally
                 close(ds)
             end
