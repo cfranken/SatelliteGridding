@@ -44,16 +44,18 @@ end
 
 """
     apply_filters(dataset, config, lat_bounds, lon_bounds,
-                  grid_spec::CubedSphereGridSpec) -> Vector{Int}
+                  grid_spec::AbstractSphericalGridSpec) -> Vector{Int}
 
-Cubed-sphere variant: a cubed-sphere grid covers the whole sphere, so there is
-no spatial bounding box and no dateline span check (a valid high-latitude or
-near-pole footprint can legitimately span a large longitude range). Only the
-quality filters from `config.filters` are applied.
+Cubed-sphere and HEALPix grids cover the whole sphere, so this method applies
+only the quality filters from `config.filters`. A valid high-latitude or
+near-pole footprint can span a large longitude range, including across the
+dateline, so there is no spatial bounding box or dateline span check.
+Input preparation checks that the centre and all corners are valid before
+the sounding can contribute to the accumulator.
 """
 function apply_filters(dataset, config::DataSourceConfig,
                        lat_bounds::AbstractMatrix, lon_bounds::AbstractMatrix,
-                       grid_spec::CubedSphereGridSpec)::Vector{Int}
+                       grid_spec::AbstractSphericalGridSpec)::Vector{Int}
     n = size(lat_bounds, 1)
     bool_add = zeros(Int, n)
     n_criteria = 0

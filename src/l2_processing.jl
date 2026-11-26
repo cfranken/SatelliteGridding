@@ -25,25 +25,41 @@ function _process_l2_file!(filepath::String, config::DataSourceConfig,
     nothing
 end
 
-# Cubed-sphere accumulation subdivides in lon/lat space before projecting each
-# point; rectangular affine indices and their extent heuristic do not apply.
+# Spherical grids locate each subpoint independently. Their subdivision
+# trait selects the geometry and sampling buffers.
 function _process_l2_file!(filepath::String, config::DataSourceConfig,
-                           spec::CubedSphereGridSpec{T}, grid_data, grid_std, grid_weights,
+                           spec::AbstractSphericalGridSpec, grid_data, grid_std, grid_weights,
                            compute_std, n_override, method::AbstractGriddingMethod,
-                           nc_vars, fill_attrib, progress; metadata=nothing) where {T}
+                           nc_vars, fill_attrib, progress; metadata=nothing)
     _with_l2_observations(filepath, config, spec, method, nc_vars, fill_attrib,
                           progress; metadata=metadata) do observations
-        n = n_override === nothing ? 4 : n_override
-        points = zeros(T, n, n, 2)
-        lats0, lons0, lats1, lons1 = zeros(n), zeros(n), zeros(n), zeros(n)
-        values = observations.values
-        n_pixels, n_vars = size(values)
-        accumulate_footprint_cs!(grid_data, grid_std, grid_weights, compute_std,
-                                 spec, observations.lat_bounds, observations.lon_bounds,
-                                 values, n_pixels, n_vars, n,
-                                 points, lats0, lons0, lats1, lons1)
+        _accumulate_l2_spherical!(_spherical_subdivision(spec), grid_data, grid_std,
+                                  grid_weights, compute_std, spec, observations, n_override)
     end
     nothing
+end
+
+function _accumulate_l2_spherical!(::Val{:lonlat}, data, m2, weights, compute_std,
+                                   spec, observations, n_override)
+    n = n_override === nothing ? 4 : n_override
+    points = zeros(_spherical_subpixel_type(spec), n, n, 2)
+    lats0, lons0, lats1, lons1 = zeros(n), zeros(n), zeros(n), zeros(n)
+    values = observations.values
+    n_pixels, n_vars = size(values)
+    _accumulate_spherical_footprint!(data, m2, weights, compute_std, spec,
+                                     observations.lat_bounds, observations.lon_bounds,
+                                     values, n_pixels, n_vars, n,
+                                     points, lats0, lons0, lats1, lons1)
+end
+
+function _accumulate_l2_spherical!(::Val{:unit_vectors}, data, m2, weights, compute_std,
+                                   spec, observations, n_override)
+    capacity = n_override === nothing ? _HEALPIX_MAX_OVERSAMPLE : n_override
+    points = Array{Float64}(undef, capacity, capacity, 2)
+    cells = Vector{Tuple{Int,Int}}(undef, capacity^2)
+    _accumulate_unit_vector_footprints!(data, m2, weights, compute_std, spec,
+                                       observations.lat_bounds, observations.lon_bounds,
+                                       observations.values, n_override, points, cells)
 end
 
 function _process_l2_file_ka!(filepath::String, config::DataSourceConfig,

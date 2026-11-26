@@ -47,7 +47,7 @@ function main()
         grid_spec = args_to_grid_spec(args)
         time_spec = args_to_time_spec(args)
         n_over = args["nOversample"] > 0 ? args["nOversample"] : nothing
-        backend = resolve_backend(args["backend"])
+        backend = resolve_backend(args["backend"]; grid_spec)
         footprint = lowercase(args["footprint"])
         method = if footprint in ("quad", "quadrilateral", "subpixel")
             SubpixelGridding(n_over)
@@ -61,7 +61,10 @@ function main()
         zarr_meta = isempty(args["zarrMeta"]) ? nothing : args["zarrMeta"]
         # Loading Zarr triggers the SatelliteGriddingZarrExt extension that backs
         # init_zarr_store / write_zarr_day!. Only load it when a Zarr store is requested.
-        zarr_out === nothing || @eval using Zarr
+        if zarr_out !== nothing
+            SatelliteGridding._validate_zarr_grid(grid_spec)
+            @eval using Zarr
+        end
 
         grid(config, grid_spec, time_spec, method;
              compute_std=args["compSTD"],

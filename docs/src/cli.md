@@ -30,8 +30,9 @@ julia --project=. bin/grid.jl l2 [options]
 | `--lonMax` | Float32 | 180 | Upper longitude bound |
 | `--dLat` | Float32 | 1.0 | Latitude resolution (degrees, regular grid) |
 | `--dLon` | Float32 | 1.0 | Longitude resolution (degrees, regular grid) |
-| `--gridType` | String | `rect` | Output grid: `rect` (lat/lon) or `cs` (cubed sphere) |
+| `--gridType` | String | `rect` | Output grid: `rect` (lat/lon), `cs` (cubed sphere), or `healpix` (NESTED HEALPix) |
 | `--Nc` | Int | 0 | Cubed-sphere cells per panel edge (e.g. 360 for C360); required with `--gridType cs` |
+| `--nside` | Int | 0 | HEALPix resolution, a positive power of two required with `--gridType healpix` |
 | `--csConvention` | String | `gmao` | Cubed-sphere convention: `gmao` (GEOS/GCHP) or `equiangular` |
 | `--startDate` | String | `2018-03-07` | Start date (YYYY-MM-DD) |
 | `--stopDate` | String | `2018-10-31` | Stop date (YYYY-MM-DD) |
@@ -116,8 +117,9 @@ reused across overlapping windows (in-memory day cache), so finer sampling does
 not re-grid the same data. The `time` coordinate holds the window center, and
 every output also carries `window_start`/`window_end` recording the exact
 averaging interval (these clip naturally at the data edges). Rolling mode runs on
-`--backend sequential`, on `--gridType cs`, and on `--backend cpu`/`cuda`/`metal`
-for the mean; `--compSTD` requires the sequential CPU path.
+`--backend sequential` on all grids. For rectangular grids,
+`--backend cpu`/`cuda`/`metal` also support the mean. `--compSTD` requires
+the sequential CPU path.
 
 TROPOMI SIF onto a GEOS/GCHP C360 cubed sphere (sequential CPU only):
 
@@ -131,6 +133,10 @@ julia --project=. bin/grid.jl l2 \
 
 See [Cubed-Sphere Grids](cubed_sphere.md) for the convention, output layout, and
 the `bin/run_tropomi_c360.sh` fan-out runner.
+
+Use `--gridType healpix --nside 64` for a NESTED HEALPix grid with
+49,152 cells. See [HEALPix Grids](healpix.md) for an example and the NetCDF
+layout.
 
 ### `center` — Grid Center-Coordinate Data
 

@@ -20,29 +20,38 @@ backend_help_lines() = [
 ]
 
 """
-    resolve_backend(name) -> Union{Nothing, KernelAbstractions.Backend}
+    resolve_backend(name; grid_spec=nothing) -> Union{Nothing, KernelAbstractions.Backend}
 
 Resolve a user-facing backend name to a KernelAbstractions backend object.
 The optional GPU packages are weak dependencies and are loaded only when the
-corresponding backend is requested.
+corresponding backend is requested. Pass `grid_spec` to check that it supports
+the backend before loading any optional packages.
 """
-function resolve_backend(name::AbstractString)
+function resolve_backend(name::AbstractString; grid_spec=nothing)
     backend = lowercase(strip(String(name)))
     backend = replace(backend, "_" => "-", "ka-" => "")
 
     if backend in ("", "none", "sequential")
         return nothing
-    elseif backend == "cpu"
+    end
+    backend in supported_backend_names() ||
+        error("Unknown backend '$name'. Use one of: $(join(supported_backend_names(), ", ")).")
+    _validate_ka_grid(grid_spec)
+    if backend == "cpu"
         return CPU()
     elseif backend == "cuda"
         return _load_optional_backend(:CUDA, :SatelliteGriddingCUDAExt,
                                       :cuda_backend, "CUDA.jl", "CUDA")
-    elseif backend == "metal"
+    else
         return _load_optional_backend(:Metal, :SatelliteGriddingMetalExt,
                                       :metal_backend, "Metal.jl", "Metal")
     end
+end
 
-    error("Unknown backend '$name'. Use one of: $(join(supported_backend_names(), ", ")).")
+function _validate_ka_grid(spec)
+    spec isa AbstractSphericalGridSpec &&
+        error("$(typeof(spec)) supports only the sequential CPU path. Omit `backend` or use --backend sequential.")
+    nothing
 end
 
 function _load_optional_backend(pkg::Symbol, extname::Symbol, fn::Symbol,

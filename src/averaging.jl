@@ -83,43 +83,48 @@ end
 
 Footprint-aware accumulation onto a [`CubedSphereGridSpec`](@ref) folded into the
 `(Nc, 6·Nc)` accumulator. Unlike the rectangular [`accumulate_footprint!`], the
-subdivision happens in **lon/lat space** (not fractional-index space) because the
-cubed-sphere map is nonlinear and discontinuous across panel boundaries; each
-sub-point is then projected independently via [`to_fractional_index`], so a
-footprint straddling a cube edge correctly deposits weight on both panels.
+subdivision happens in **lon/lat space** because the cubed-sphere map is nonlinear
+and discontinuous across panel boundaries. Each subpoint is then projected
+independently via [`to_fractional_index`], so a footprint straddling a cube edge
+correctly deposits weight on both panels.
 
 For each pixel:
 - **Fast path**: all 4 corners project to the same `(col, row)` cell → full value, weight 1.
-- **Oversample path**: subdivide the corner quadrilateral into `n × n` sub-points
-  (longitudes unwrapped to a common ±180° branch first, so the linear interpolation
-  is sane for near-pole footprints that span the dateline), project each, and add
-  weight `1/n²` to the cell it lands in.
+- **Oversample path**: unwrap corner longitudes relative to the first corner
+  before subdividing the quadrilateral into `n × n` subpoints in lon/lat space.
+  Project each subpoint and add weight `1/n²` to the cell it lands in.
 
-`lat_c`/`lon_c` are `(n_pixels, 4)` corner coordinates in degrees (CCW-sorted);
-`lat_center`/`lon_center` are `(n_pixels,)` center coordinates. Buffers match
-[`compute_subpixels!`].
+`lat_c` and `lon_c` are `(n_pixels, 4)` corner coordinates in degrees, sorted
+counterclockwise. Buffers match [`compute_subpixels!`]. HEALPix uses a separate
+unit-vector subdivision path.
 """
-function accumulate_footprint_cs!(grid_data::AbstractArray{T,3},
-                                  grid_std::Union{Nothing,AbstractArray{T,3}},
-                                  grid_weights::AbstractMatrix{T},
-                                  compute_std::Bool,
-                                  spec::CubedSphereGridSpec{T},
-                                  lat_c::AbstractMatrix, lon_c::AbstractMatrix,
-                                  values::AbstractMatrix,
-                                  n_pixels::Int, n_vars::Int, n_oversample::Int,
-                                  points_buf::AbstractArray{T,3},
-                                  lats0_buf::AbstractVector, lons0_buf::AbstractVector,
-                                  lats1_buf::AbstractVector, lons1_buf::AbstractVector) where {T}
+function accumulate_footprint_cs!(grid_data, grid_std, grid_weights, compute_std,
+                                  spec::CubedSphereGridSpec, args...)
+    _accumulate_spherical_footprint!(grid_data, grid_std, grid_weights, compute_std,
+                                    spec, args...)
+end
+
+function _accumulate_spherical_footprint!(grid_data::AbstractArray{T,3},
+                                          grid_std::Union{Nothing,AbstractArray{T,3}},
+                                          grid_weights::AbstractMatrix{T},
+                                          compute_std::Bool,
+                                          spec::AbstractSphericalGridSpec{T},
+                                          lat_c::AbstractMatrix, lon_c::AbstractMatrix,
+                                          values::AbstractMatrix,
+                                          n_pixels::Int, n_vars::Int, n_oversample::Int,
+                                          points_buf::AbstractArray{<:AbstractFloat,3},
+                                          lats0_buf::AbstractVector, lons0_buf::AbstractVector,
+                                          lats1_buf::AbstractVector, lons1_buf::AbstractVector) where {T}
     fac = T(1 / n_oversample^2)
     lonv = Vector{Float64}(undef, 4)
     latv = Vector{Float64}(undef, 4)
 
     @inbounds for i in 1:n_pixels
         # Project the 4 corners; fast-path when they all share one cell.
-        c1, r1 = _cs_cell(spec, lat_c[i, 1], lon_c[i, 1])
-        c2, r2 = _cs_cell(spec, lat_c[i, 2], lon_c[i, 2])
-        c3, r3 = _cs_cell(spec, lat_c[i, 3], lon_c[i, 3])
-        c4, r4 = _cs_cell(spec, lat_c[i, 4], lon_c[i, 4])
+        c1, r1 = _spherical_cell(spec, lat_c[i, 1], lon_c[i, 1])
+        c2, r2 = _spherical_cell(spec, lat_c[i, 2], lon_c[i, 2])
+        c3, r3 = _spherical_cell(spec, lat_c[i, 3], lon_c[i, 3])
+        c4, r4 = _spherical_cell(spec, lat_c[i, 4], lon_c[i, 4])
 
         if (c1 == c2 == c3 == c4) & (r1 == r2 == r3 == r4)
             _welford_update!(grid_data, grid_std, grid_weights, compute_std,
@@ -142,7 +147,7 @@ function accumulate_footprint_cs!(grid_data::AbstractArray{T,3},
         for jj in 1:n_oversample, ii in 1:n_oversample
             sub_lat = points_buf[ii, jj, 1]
             sub_lon = points_buf[ii, jj, 2]
-            col, row = _cs_cell(spec, sub_lat, sub_lon)
+            col, row = _spherical_cell(spec, sub_lat, sub_lon)
             _welford_update!(grid_data, grid_std, grid_weights, compute_std,
                              col, row, values, i, n_vars, fac)
         end
@@ -150,13 +155,109 @@ function accumulate_footprint_cs!(grid_data::AbstractArray{T,3},
     nothing
 end
 
-# Project (lat, lon) to integer folded cell indices on a cubed-sphere grid,
-# clamped defensively to the accumulator bounds.
-@inline function _cs_cell(spec::CubedSphereGridSpec{T}, lat::Real, lon::Real) where {T}
-    col_f, row_f = to_fractional_index(spec, T(lat), T(lon))
-    col = clamp(floor(Int, col_f), 1, spec.Nc)
-    row = clamp(floor(Int, row_f), 1, 6 * spec.Nc)
-    return col, row
+@inline function _sphere_unit_vector(lat, lon)
+    sin_lat, cos_lat = sincosd(Float64(lat))
+    sin_lon, cos_lon = sincosd(_canonical_longitude(Float64(lon)))
+    return (cos_lat * cos_lon, cos_lat * sin_lon, sin_lat)
+end
+
+@inline _sphere_dot(a, b) = a[1] * b[1] + a[2] * b[2] + a[3] * b[3]
+@inline _sphere_cross(a, b) = (a[2] * b[3] - a[3] * b[2],
+                               a[3] * b[1] - a[1] * b[3],
+                               a[1] * b[2] - a[2] * b[1])
+
+@inline function _sort_four(a, b, c, d)
+    a, b = minmax(a, b)
+    c, d = minmax(c, d)
+    a, c = minmax(a, c)
+    b, d = minmax(b, d)
+    b, c = minmax(b, c)
+    return a, b, c, d
+end
+
+@inline function _sphere_ordered_corners(a, b, c, d)
+    # Summing in a canonical order makes the tangent frame independent of
+    # the input permutation, including ties at the angular sort's branch cut.
+    a, b, c, d = _sort_four(a, b, c, d)
+    centre = a .+ b .+ c .+ d
+    norm = sqrt(_sphere_dot(centre, centre))
+    normal = norm == 0 ? a : centre ./ norm
+    axis = abs(normal[3]) > abs(normal[1]) ? (1.0, 0.0, 0.0) : (0.0, 0.0, 1.0)
+    tangent = _sphere_cross(axis, normal)
+    tangent_x = tangent ./ sqrt(_sphere_dot(tangent, tangent))
+    tangent_y = _sphere_cross(normal, tangent_x)
+    keyed(point) = (atan(_sphere_dot(point, tangent_y), _sphere_dot(point, tangent_x)), point)
+    ordered = _sort_four(keyed(a), keyed(b), keyed(c), keyed(d))
+    return map(last, ordered), normal
+end
+
+@inline function _sphere_subpoints!(points, corners, normal, n)
+    a, b, c, d = corners
+    @inbounds for j in 1:n
+        v = (j - 0.5) / n
+        left = (1 - v) .* a .+ v .* d
+        right = (1 - v) .* b .+ v .* c
+        for i in 1:n
+            u = (i - 0.5) / n
+            point = (1 - u) .* left .+ u .* right
+            norm = sqrt(_sphere_dot(point, point))
+            x, y, z = norm == 0 ? normal : point ./ norm
+            horizontal = hypot(x, y)
+            points[i, j, 1] = atand(z, horizontal)
+            points[i, j, 2] = horizontal == 0 ? 0.0 : atand(y, x)
+        end
+    end
+    nothing
+end
+
+_unit_vector_cell_spacing(::AbstractSphericalGridSpec) = Inf
+_unit_vector_cell_spacing(spec::HEALPixGridSpec) = _healpix_cell_spacing(spec)
+
+"""
+    _accumulate_unit_vector_footprints!(data, m2, weights, compute_std, spec,
+                                       lat_c, lon_c, values, n_override, points, cells)
+
+Sample every footprint on the sphere at the cell centres of its bilinear
+parameter grid. The four input corners are in degrees and may be unordered.
+Count sub-point hits in each cell and add one weight `k/n²` per cell. This
+gives an exact unit weight for a single-cell footprint and the per-footprint
+overlap needed for a future sum of squared weights. Reuse the Float64 buffer
+`points` and cell-index buffer `cells`, sized for the largest sample count.
+"""
+function _accumulate_unit_vector_footprints!(data::AbstractArray{T,3}, m2, weights,
+                                             compute_std, spec::AbstractSphericalGridSpec{T},
+                                             lat_c, lon_c, values, n_override, points, cells) where {T}
+    cell_spacing = _unit_vector_cell_spacing(spec)
+    n_pixels, n_vars = size(values)
+    @inbounds for i in 1:n_pixels
+        a = _sphere_unit_vector(lat_c[i, 1], lon_c[i, 1])
+        b = _sphere_unit_vector(lat_c[i, 2], lon_c[i, 2])
+        c = _sphere_unit_vector(lat_c[i, 3], lon_c[i, 3])
+        d = _sphere_unit_vector(lat_c[i, 4], lon_c[i, 4])
+        corners, normal = _sphere_ordered_corners(a, b, c, d)
+        n = n_override === nothing ? _unit_vector_samples(corners, cell_spacing) : n_override
+        _sphere_subpoints!(points, corners, normal, n)
+        n_samples = n^2
+        for j in 1:n, k in 1:n
+            cells[k + (j - 1) * n] = _spherical_cell(spec, points[k, j, 1], points[k, j, 2])
+        end
+        # Sort just this footprint's cell indices in place so repeats are
+        # contiguous, with a deterministic order of cell updates.
+        sort!(view(cells, 1:n_samples); alg=QuickSort)
+        first_hit = 1
+        while first_hit <= n_samples
+            cell = cells[first_hit]
+            next_hit = first_hit + 1
+            while next_hit <= n_samples && cells[next_hit] == cell
+                next_hit += 1
+            end
+            col, row = cell
+            weight = T((next_hit - first_hit) / n_samples)
+            _welford_update!(data, m2, weights, compute_std, col, row, values, i, n_vars, weight)
+            first_hit = next_hit
+        end
+    end
+    nothing
 end
 
 """

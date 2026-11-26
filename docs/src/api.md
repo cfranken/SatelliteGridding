@@ -29,6 +29,7 @@ metal_backend
 
 ```@docs
 AbstractGridSpec
+AbstractSphericalGridSpec
 RectangularGridSpec
 GridSpec
 TimeSpec
@@ -51,6 +52,17 @@ EquiangularCubedSphereDefinition
 lonlat_to_panel_xy
 grid_shape
 accumulator_shape
+```
+
+## HEALPix Grids
+
+```@docs
+HEALPixGridSpec
+ang2pix_nest
+pix2ang_nest
+healpix_corners
+nside2npix
+healpix_parent
 ```
 
 ## Oversampling

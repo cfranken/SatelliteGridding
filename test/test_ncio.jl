@@ -17,6 +17,7 @@
                     path = grouped ? "Geolocation/latitude_bounds" : "latitude_bounds"
                     @test read_nc_variable(ds, path; bounds=true) == expected
                     @test size(read_nc_variable(ds, path; bounds=true)) == (n, 4)
+                    @test SatelliteGridding._read_l2_geolocation(ds, path; bounds=true) == expected
                 end
             end
 
@@ -34,6 +35,50 @@
             end
             Dataset(file) do ds
                 @test read_nc_variable(ds, "Geo/bounds"; bounds=true) == expected
+            end
+        end
+    end
+
+    @testset "Geolocation packing attributes can be used individually" begin
+        mktempdir() do dir
+            file = joinpath(dir, "packing.nc")
+            Dataset(file, "c") do ds
+                defDim(ds, "sounding", 3)
+                scaled = defVar(ds, "scaled", Int16, ("sounding",);
+                                attrib=["scale_factor" => 0.01f0, "missing_value" => Int16(-500)])
+                scaled.var[:] = Int16[150, -500, 350]
+                shifted = defVar(ds, "shifted", Int16, ("sounding",);
+                                 attrib=["add_offset" => 6.5], fillvalue=Int16(-800))
+                shifted.var[:] = Int16[-4, -800, 3]
+            end
+            Dataset(file) do ds
+                scaled = SatelliteGridding._read_l2_geolocation(ds, "scaled")
+                shifted = SatelliteGridding._read_l2_geolocation(ds, "shifted")
+                @test eltype(scaled) === Float32
+                @test eltype(shifted) === Float64
+                @test isequal(scaled, Float32[1.5, NaN, 3.5])
+                @test isequal(shifted, [2.5, NaN, 9.5])
+            end
+        end
+    end
+
+    @testset "Unpacked geolocation retains its floating-point bits" begin
+        mktempdir() do dir
+            file = joinpath(dir, "unpacked.nc")
+            Dataset(file, "c") do ds
+                defDim(ds, "sounding", 3)
+                for T in (Float32, Float64)
+                    var = defVar(ds, string(T), T, ("sounding",))
+                    var.var[:] = T[-zero(T), nextfloat(one(T)), prevfloat(T(90))]
+                end
+            end
+            Dataset(file) do ds
+                for (T, U) in ((Float32, UInt32), (Float64, UInt64))
+                    path = string(T)
+                    decoded = SatelliteGridding._read_l2_geolocation(ds, path)
+                    @test eltype(decoded) === T
+                    @test reinterpret(U, decoded) == reinterpret(U, ds[path].var[:])
+                end
             end
         end
     end
@@ -169,6 +214,70 @@
         rm(tmpfile)
     end
 
+    @testset "Payload attribute references and weighted population standard deviation" begin
+        mktempdir() do dir
+            input = joinpath(dir, "metadata_2020-01-01.nc")
+            output = joinpath(dir, "out.nc")
+            _accuracy_input(input, [(8.0, 9.0, 3.0, 4.0)], Float32[10])
+            source_refs = Dict(
+                "coordinates" => "source_lat source_lon",
+                "grid_mapping" => "source_mapping",
+                "cell_measures" => "area: source_area",
+                "bounds" => "source_bounds",
+                "ancillary_variables" => "source_qa",
+                "formula_terms" => "a: source_a",
+                "geometry" => "source_geometry",
+                "node_coordinates" => "lat lon",
+                "climatology" => "lat_bounds",
+            )
+            Dataset(input, "a") do ds
+                defVar(ds, "source_geometry", Int32, ())
+                for (name, value) in source_refs
+                    ds["signal"].attrib[name] = value
+                end
+            end
+            basic = Dict("lat" => "lat", "lon" => "lon",
+                         "lat_bnd" => "lat_bounds", "lon_bnd" => "lon_bounds")
+            options = Dict{String,Any}("metadata" =>
+                Dict("variable_attributes" => ["long_name", keys(source_refs)...]))
+            config = DataSourceConfig(basic, OrderedDict("signal" => "signal"), FilterRule[],
+                                      "metadata_YYYY-MM-DD.nc", dir, options)
+            date = DateTime(2020, 1, 1)
+            times = TimeSpec(date, date, Day(1))
+            for (spec, coordinates, mapping) in (
+                (RectangularGridSpec(dlat=5f0, dlon=5f0), nothing, nothing),
+                (CubedSphereGridSpec(Nc=4), "lons lats", "cubed_sphere"),
+                (HEALPixGridSpec(nside=4), "lat lon cell_ids", "healpix"),
+            )
+                grid_l2(config, spec, times; compute_std=true, n_oversample=8,
+                        outfile=output, progress=false)
+                Dataset(output) do ds
+                    @test ds["signal"].attrib["long_name"] == "Synthetic signal"
+                    @test !haskey(ds["signal"].attrib, "units")
+                    for name in ("signal", "signal_std", "n")
+                        attrib = ds[name].attrib
+                        @test get(attrib, "coordinates", nothing) == coordinates
+                        @test get(attrib, "grid_mapping", nothing) == mapping
+                        for ref in keys(source_refs)
+                            ref in ("coordinates", "grid_mapping") && continue
+                            @test !haskey(attrib, ref)
+                        end
+                    end
+                    @test ds["n"].attrib["units"] == "1"
+                    std = ds["signal_std"]
+                    @test std.attrib["units"] == "ppm"
+                    @test std.attrib["long_name"] == "Weighted population standard deviation"
+                    @test occursin("sqrt(M2/n)", std.attrib["comment"])
+                    @test occursin("without Bessel correction", std.attrib["comment"])
+                    @test occursin("Zero for a cell touched by a single footprint in tiled mode", std.attrib["comment"])
+                    @test occursin("Float32 cancellation can produce a small nonzero value", std.attrib["comment"])
+                    @test sum(ds["n"][:]) == 1
+                    @test all(iszero, skipmissing(std[:]))
+                end
+            end
+        end
+    end
+
     @testset "NetCDF storage settings survive reopening" begin
         mktempdir() do dir
             gs = GridSpec(lat_min=0f0, lat_max=2f0, lon_min=0f0, lon_max=3f0, dlat=1f0, dlon=1f0)
@@ -194,7 +303,7 @@
                         @test deflated == (level > 0)
                         @test isequal(v.attrib["_FillValue"], options.fill_value)
                         expected_chunks = options.chunksizes === nothing ? (3, 2, 1) : options.chunksizes
-                        @test NCDatasets.chunking(v.var)[2] == expected_chunks
+                        @test Tuple(NCDatasets.chunking(v.var)[2]) == expected_chunks
                         @test NCDatasets.checksum(v.var) == options.checksum
                     end
                     @test reopened["value"][1, 1, 1] == 1
@@ -207,7 +316,7 @@
             file = joinpath(dir, "cube.nc")
             ds, vars = create_output_dataset(file, cube, 1, gv, true;
                 output_options=NetCDFOptions(fill_value=NaN, chunksizes=[2, 2, 1, 1]))
-            @test NCDatasets.chunking(vars["value"].var)[2] == (2, 2, 1, 1)
+            @test Tuple(NCDatasets.chunking(vars["value"].var)[2]) == (2, 2, 1, 1)
             @test isnan(vars["value_std"].attrib["_FillValue"])
             close(ds)
             @test_throws ArgumentError create_output_dataset(joinpath(dir, "invalid.nc"), gs, 1, gv, false;

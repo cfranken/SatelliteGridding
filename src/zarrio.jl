@@ -75,6 +75,10 @@ zarr_time_index(date, epoch::Date = ZARR_EPOCH) = Dates.value(Date(date) - epoch
 # True if a Zarr array `name` already exists under the store at `path`.
 _zarr_array_exists(path, name) = isfile(joinpath(path, name, ".zarray"))
 
+_validate_zarr_grid(::RectangularGridSpec) = nothing
+_validate_zarr_grid(spec::AbstractGridSpec) =
+    error("Zarr output requires a rectangular lat/lon grid (--gridType rect). Got $(typeof(spec)).")
+
 """
     init_zarr_store(path, grid_spec, grid_vars; epoch, horizon, compute_std) -> ZGroup
 
@@ -85,13 +89,14 @@ own variables into one combined store.
 
 Requires `using Zarr` (provided by the `SatelliteGriddingZarrExt` extension).
 """
-function init_zarr_store(args...; kwargs...)
+function init_zarr_store(path::AbstractString, spec::AbstractGridSpec, grid_vars; kwargs...)
+    _validate_zarr_grid(spec)
     ext = Base.get_extension(@__MODULE__, :SatelliteGriddingZarrExt)
     ext === nothing &&
         error("Zarr daily emit requires Zarr.jl. Run `using Zarr` to load the SatelliteGriddingZarrExt extension (add Zarr to your environment first).")
     # invokelatest so it works even when Zarr was loaded at runtime (newer world age),
     # e.g. bin/grid.jl's `@eval using Zarr` when --zarrOut is set.
-    Base.invokelatest(ext.init_zarr_store, args...; kwargs...)
+    Base.invokelatest(ext.init_zarr_store, path, spec, grid_vars; kwargs...)
 end
 
 """
@@ -206,4 +211,8 @@ function write_zarr_meta_json(webdir::AbstractString, grid_spec::RectangularGrid
         JSON.print(io, doc)
     end
     return path
+end
+
+function write_zarr_meta_json(webdir::AbstractString, spec::AbstractGridSpec, grid_vars; kwargs...)
+    _validate_zarr_grid(spec)
 end

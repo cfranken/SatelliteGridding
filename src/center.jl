@@ -2,7 +2,7 @@
     grid_center(config, grid_spec, time_spec; kwargs...)
 
 Grid data using center coordinates only (no footprint bounds), suitable for
-MODIS-style data where each pixel maps to exactly one grid cell.
+MODIS-style data where each pixel maps to exactly one rectangular grid cell.
 
 # Keyword Arguments
 - `geo_table::Union{Nothing,String}=nothing`: Path to a legacy monolithic geolocation lookup table (NetCDF)
@@ -17,7 +17,7 @@ MODIS-style data where each pixel maps to exactly one grid cell.
   drawn only when stderr is a terminal: redirected to a file or a pipe, as in batch jobs, every
   redraw would become new lines.
 """
-function grid_center(config::DataSourceConfig, grid_spec::GridSpec{T}, time_spec::TimeSpec;
+function grid_center(config::DataSourceConfig, grid_spec::AbstractGridSpec{T}, time_spec::TimeSpec;
                      geo_table::Union{Nothing,String}=nothing,
                      geo_cache::Union{Nothing,String}=nothing,
                      geo_provider::Union{Symbol,String}=:auto,
@@ -28,6 +28,8 @@ function grid_center(config::DataSourceConfig, grid_spec::GridSpec{T}, time_spec
                      progress::Bool=_default_progress(),
                      command::Union{Nothing,String}=nothing) where {T}
 
+    grid_spec isa RectangularGridSpec ||
+        error("Center-coordinate gridding requires a rectangular lat/lon grid. Got $(typeof(grid_spec)).")
     output_options = _output_options(config.options)
     metadata = InputMetadata(config)
     dates = collect(time_spec.start_date:time_spec.time_step:time_spec.stop_date)

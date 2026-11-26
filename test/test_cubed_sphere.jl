@@ -1,4 +1,44 @@
+using SHA
+
+function _cubed_sphere_accumulator_bits(spec::CubedSphereGridSpec{T}) where {T}
+    # Repeated, overlapping footprints across a panel edge and the dateline,
+    # plus a near-pole footprint and one wholly inside a cell.
+    lat = [-2.2 -2.1 1.9 2.6; -1.4 -1.3 2.0 2.2; 3.0 3.1 7.6 7.0;
+           4.0 4.0 8.0 8.0; 86.0 87.0 89.0 89.2; -0.02 -0.02 0.02 0.02]
+    lon = [32.1 49.3 47.7 34.0; 33.2 50.0 46.8 37.0; 176.1 -176.2 -177.0 177.4;
+           177.2 -178.0 -177.3 177.4; 127.0 -137.0 -101.0 113.0;
+           -10.02 -9.98 -9.98 -10.02]
+    values = T[1.1 9.2; -4.3 6.4; 13.5 -2.6; 31.7 5.8; 0.9 4.1; 8.2 1.3]
+    n = 7
+    shape = accumulator_shape(spec)
+    data, m2, weights = zeros(T, shape..., 2), zeros(T, shape..., 2), zeros(T, shape)
+    observations = (lat_bounds=lat, lon_bounds=lon, values=values)
+    SatelliteGridding._accumulate_l2_spherical!(SatelliteGridding._spherical_subdivision(spec),
+        data, m2, weights, true, spec, observations, n)
+    # Serialize the raw bits in a fixed byte order before hashing.
+    bits_type = T == Float32 ? UInt32 : UInt64
+    bits = reinterpret(bits_type, vcat(vec(data), vec(m2), vec(weights)))
+    bytes2hex(sha256(reinterpret(UInt8, htol.(bits))))
+end
 @testset "Cubed-sphere grid" begin
+
+
+    @testset "Bit-identical sequential accumulation" begin
+        # SHA-256 of the raw mean, M2, and weight bits from the pre-refactor
+        # accumulators at 2c5e505. The 7×7 samples use non-binary weights.
+        expected = (
+            ("a88db4aa8b05ae83f8e0de9ced262d1eeeb4fb0a63a9854ba0be948dca89a497",
+             "848da16b7cfee56a4425e5db059e481c4e018cdc6b6f606d35388f01f6999b2d"),
+            ("7332b6b4bdb47a3f6ed357d7e4e1917110e1f38d321988d38be6696a87f5897a",
+             "a359297feb40f50793aba8f034d14f76c3fc0c652204e60c564536f9339ec896"),
+        )
+        definitions = (GMAOCubedSphereDefinition(), EquiangularCubedSphereDefinition())
+        for (d, def) in enumerate(definitions), (t, T) in enumerate((Float32, Float64))
+            spec = CubedSphereGridSpec(Nc=9, definition=def, T=T)
+            @test SatelliteGridding._spherical_subpixel_type(spec) === T
+            @test _cubed_sphere_accumulator_bits(spec) == expected[d][t]
+        end
+    end
 
     @testset "Projection round-trip + whole-sphere coverage" begin
         for def in (GMAOCubedSphereDefinition(), EquiangularCubedSphereDefinition())

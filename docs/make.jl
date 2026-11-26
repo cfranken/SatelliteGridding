@@ -24,6 +24,7 @@ makedocs(
         "Configuration" => "config.md",
         "CLI Reference" => "cli.md",
         "Cubed-Sphere Grids" => "cubed_sphere.md",
+        "HEALPix Grids" => "healpix.md",
         "GPU Acceleration" => "gpu.md",
         "API Reference" => "api.md",
     ],

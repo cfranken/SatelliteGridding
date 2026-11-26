@@ -1,4 +1,4 @@
-# Time-slice output shared by rectangular, cubed-sphere, and center gridding.
+# Time-slice output shared by rectangular, cubed-sphere, HEALPix, and center gridding.
 function _masked_output_slice(data, weights, nc_var; sigdigits,
                                min_weight=1e-10, normalize=false)
     values = normalize ? data ./ max.(weights, eps(eltype(data))) : data
@@ -14,8 +14,9 @@ end
 
 function _write_output_slice!(nc_var, data, ct, shape)
     spatial = ntuple(_ -> Colon(), length(shape))
-    # Unfold cubed-sphere accumulators only at the I/O boundary. Rectangular
-    # arrays have the same shape in memory and on disk.
+    # Unfold cubed-sphere accumulators or flatten HEALPix cells in NESTED
+    # order only at the I/O boundary. Rectangular arrays have the same
+    # shape in memory and on disk.
     nc_var[spatial..., ct] = reshape(data, shape)
     nothing
 end

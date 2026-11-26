@@ -12,11 +12,11 @@ circular products such as GOSAT. Circular footprints can be read from
 
 # Arguments
 - `config::DataSourceConfig`: Data source configuration (from TOML/JSON)
-- `grid_spec::GridSpec`: Output grid geometry
+- `grid_spec::AbstractGridSpec`: Output grid geometry
 - `time_spec::TimeSpec`: Temporal binning parameters
 
 # Keyword Arguments
-- `n_oversample::Union{Nothing,Int}=nothing`: Sub-pixel factor. `nothing` = auto-compute from footprint/grid ratio.
+- `n_oversample=nothing`: Positive integer sub-pixel factor. `nothing` uses the grid's default.
 - `footprint_method::AbstractGriddingMethod=SubpixelGridding(n_oversample)`: Footprint geometry method.
 - `compute_std::Bool=false`: Also compute per-cell standard deviation
 - `outfile::String="gridded_output.nc"`: Output file path
@@ -29,7 +29,7 @@ circular products such as GOSAT. Circular footprints can be read from
   redraw would become new lines.
 """
 function grid_l2(config::DataSourceConfig, grid_spec::AbstractGridSpec{T}, time_spec::TimeSpec;
-                 n_oversample::Union{Nothing,Int}=nothing,
+                 n_oversample=nothing,
                  footprint_method::AbstractGriddingMethod=SubpixelGridding(n_oversample),
                  compute_std::Bool=false,
                  outfile::String="gridded_output.nc",
@@ -41,29 +41,22 @@ function grid_l2(config::DataSourceConfig, grid_spec::AbstractGridSpec{T}, time_
                  progress::Bool=_default_progress(),
                  command::Union{Nothing,String}=nothing) where {T}
 
+    n_oversample = _validate_n_oversample(n_oversample)
     footprint_method isa SubpixelGridding ||
         footprint_method isa CircularFootprintGridding ||
         error("grid_l2 supports SubpixelGridding and CircularFootprintGridding; use grid_center for center-coordinate gridding")
+    method_n_oversample = _validate_n_oversample(footprint_method.n_oversample)
+    effective_n_oversample = method_n_oversample === nothing ? n_oversample : method_n_oversample
+    backend === nothing || _validate_ka_grid(grid_spec)
+    grid_spec isa AbstractSphericalGridSpec && footprint_method isa CircularFootprintGridding &&
+        error("CircularFootprintGridding is unsupported for $(typeof(grid_spec)). Use SubpixelGridding (quad footprints).")
+    zarr_out === nothing || _validate_zarr_grid(grid_spec)
     _validate_l2_geometry_config(config, footprint_method)
-
-    if backend !== nothing && grid_spec isa CubedSphereGridSpec
-        error("Cubed-sphere gridding currently supports only the sequential CPU path; omit `backend` or use --backend sequential.")
-    end
-    if grid_spec isa CubedSphereGridSpec && footprint_method isa CircularFootprintGridding
-        error("CircularFootprintGridding is not supported on a cubed-sphere grid yet; use SubpixelGridding (quad footprints).")
-    end
     metadata = InputMetadata(config)
     output_options = _output_options(config.options)
     rolling = is_rolling(time_spec)
     if rolling && backend !== nothing && compute_std
         error("Rolling-mean standard deviation is not supported on the KA/GPU backend yet; use --backend sequential, or drop --compSTD for a mean-only KA rolling mean.")
-    end
-
-    effective_n_oversample = if footprint_method isa Union{SubpixelGridding,CircularFootprintGridding} &&
-                                footprint_method.n_oversample !== nothing
-        footprint_method.n_oversample
-    else
-        n_oversample
     end
 
     # Snapshot schedule: spaced by `sample_step` (rolling) or `time_step` (tiled).
@@ -86,9 +79,6 @@ function grid_l2(config::DataSourceConfig, grid_spec::AbstractGridSpec{T}, time_
     write_nc || zarr_out !== nothing ||
         error("Nothing to write: pass a non-empty `outfile`, `zarr_out`, or both.")
 
-    if zarr_out !== nothing && !(grid_spec isa RectangularGridSpec)
-        error("Zarr daily emit currently supports only rectangular lat/lon grids (--gridType rect); got $(typeof(grid_spec)).")
-    end
     time_long_name = rolling ? "Time (UTC), center of averaging window" :
                                "Time (UTC), start of interval"
     ds_out, nc_vars, zg = nothing, nothing, nothing

@@ -3,17 +3,14 @@
 #
 # `AbstractGridSpec` is the dispatch surface that lets `gridder.jl`,
 # `ncio.jl`, and `oversampling.jl` serve multiple output grid geometries
-# (regular lat/lon, cubed sphere, reduced Gaussian, …) without case
-# analysis. PR #1 introduces the surface and a `RectangularGridSpec`
-# implementation that mirrors the existing inlined logic; subsequent PRs
-# add `CubedSphereGridSpec` and rewire the call sites through these
-# methods.
+# (regular lat/lon, cubed sphere, HEALPix, reduced Gaussian, …) without
+# case analysis. The rectangular implementation mirrors the original
+# inlined affine map. Spherical grids locate individual subpoints.
 #
 # Kept separate from `types.jl` so the configuration / metadata records
 # (DataSourceConfig, TimeSpec, FilterRule, AbstractGriddingMethod) stay
-# independent of the grid-extensibility contract — mirrors the
-# `AbstractMeshes.jl` + per-mesh-type file layout used by
-# AtmosTransport.
+# independent of the grid-extensibility contract. This mirrors the
+# `AbstractMeshes.jl` + per-mesh-type file layout used by AtmosTransport.
 # ---------------------------------------------------------------------------
 
 """
@@ -24,27 +21,63 @@ satellite observation's `(lat, lon)` maps onto cell indices on a
 particular grid geometry and how the matching output NetCDF file is laid
 out.
 
-Every concrete subtype `G <: AbstractGridSpec{T}` must implement five
-methods so the same gridder/oversampling/ncio machinery serves all grids
-via multiple dispatch:
+Concrete subtypes `G <: AbstractGridSpec{T}` supply their geometry to
+the same gridder, oversampling, and NetCDF machinery via multiple dispatch.
 
 | Method | Returns | Purpose |
 |--------|---------|---------|
-| [`to_fractional_index`](@ref)`(spec, lat, lon)` | `Tuple` of fractional indices | Project a point onto continuous cell indices |
+| [`to_fractional_index`](@ref)`(spec, lat, lon)` | `Tuple` of fractional indices | Project a point onto continuous cell indices where the geometry supports them |
 | [`in_bounds`](@ref)`(spec, lat, lon)` | `Bool` | Cheap scalar bounding-box pre-filter |
-| [`grid_shape`](@ref)`(spec)` | `NTuple{N, Int}` | Spatial size of the output accumulator array |
+| [`grid_shape`](@ref)`(spec)` | `NTuple{N, Int}` | Spatial grid size in index order, used by default for the accumulator |
 | [`payload_dims`](@ref)`(spec)` | `NTuple{N, String}` | NetCDF dimension names for payload variables |
 | [`write_coordinates!`](@ref)`(ds, spec)` | `Nothing` | Write the spatial coordinate axes / aux coords to a NetCDF dataset |
 
-`N` is the spatial dimensionality of the accumulator: `2` for a regular
-lat/lon grid (`(n_lon, n_lat)`), `3` for a cubed sphere (`(Nc, Nc, 6)`).
-The fractional-index tuple is allowed to mix types when an axis is
-categorical (e.g. cubed sphere returns `(panel::Int, s::T, t::T)`),
-so the return type is documented as `Tuple` rather than `NTuple{N, T}`.
-The first `N` integer cell indices recovered via `floor(Int, …)` along
-spatial axes match `grid_shape(spec)` axis-for-axis.
+For grids with fractional indices, flooring the components gives one-based
+integer indices in `grid_shape(spec)` axis order. The return type is
+`Tuple` because an axis with categorical indices may use a different type.
+The spatial dimensionality `N` of the accumulator is 2 for regular lat/lon
+grids (`(n_lon, n_lat)`) and for cubed spheres (which fold `(Nc, Nc, 6)`
+into `(Nc, 6·Nc)`).
+
+Whole-sphere grids locate subpoints directly through the
+[`AbstractSphericalGridSpec`](@ref) interface. Their on-disk dimensions
+can differ from the folded accumulator shape.
 """
 abstract type AbstractGridSpec{T<:AbstractFloat} end
+
+"""
+    AbstractSphericalGridSpec{T} <: AbstractGridSpec{T}
+
+Whole-sphere grid for sequential quadrilateral footprint gridding.
+Implement these methods to use a new spherical grid with [`grid`](@ref).
+
+- `_spherical_cell(spec, lat, lon)` locates a point in degrees and returns
+  one-based `(col, row)` indices in the accumulator.
+- `grid_shape(spec)` returns the two-dimensional accumulator shape, or
+  implement `accumulator_shape(spec)` directly to specify a folded layout.
+- `_output_spatial_shape(spec)` returns the NetCDF spatial shape in Julia
+  dimension order. The writer reshapes the accumulator in linear index order.
+- `payload_dims(spec)` returns the corresponding NetCDF spatial dimension names.
+- `write_coordinates!(ds, spec)` defines those dimensions and writes coordinates.
+
+Optionally specialize `_spherical_subdivision(spec)`. The default
+`Val(:lonlat)` uses the corner shortcut and samples in longitude/latitude
+space. `Val(:unit_vectors)` samples every footprint in 3-D and can be used
+with a fixed `n_oversample` (four per side by default). HEALPix also provides
+an adaptive sample count.
+"""
+abstract type AbstractSphericalGridSpec{T<:AbstractFloat} <: AbstractGridSpec{T} end
+
+function _spherical_cell end
+
+_spherical_subdivision(::AbstractSphericalGridSpec) = Val(:lonlat)
+_spherical_subpixel_type(::AbstractSphericalGridSpec) = Float64
+
+@inline function _canonical_longitude(lon::Float64)
+    wrapped = mod(lon, 360.0)
+    # A negative angle smaller than half an ulp at 360° can round up to 360°.
+    return wrapped == 360.0 ? 0.0 : wrapped
+end
 
 # Interface stubs. Concrete subtypes add methods; an unspecialized call
 # throws a clear `MethodError` rather than falling back silently.
@@ -58,11 +91,12 @@ indices on `spec`. The return tuple has the **same axis order as
 `floor(Int, result[k])` and (when the call site has filtered with
 [`in_bounds`](@ref)) lies in `1..grid_shape(spec)[k]`.
 
-For [`RectangularGridSpec`](@ref) the return is `(ilon, ilat)` — **lon
-first**, matching `grid_shape = (n_lon, n_lat)`. For a cubed-sphere
-grid (PR #2) the return is `(s, t, panel::Int)` with `(Nc, Nc, 6)` as
-the grid shape; an axis whose index is categorical is allowed to be
-`Int` rather than the float type `T`.
+For [`RectangularGridSpec`](@ref) the return is `(ilon, ilat)`, with
+**longitude first**, matching `grid_shape = (n_lon, n_lat)`. For a
+cubed-sphere grid the return is `(col, row)` in the folded `(Nc, 6·Nc)`
+accumulator. A categorical index may be an `Int` alongside fractional
+indices of type `T`. Grids with direct cell locators such as HEALPix use
+`_spherical_cell` for footprint gridding.
 """
 function to_fractional_index end
 
@@ -73,24 +107,30 @@ Cheap scalar bounding-box pre-filter, intended to be broadcast at call
 sites: `any(in_bounds.(spec, lat_centers, lon_centers))`. Returns
 `true` when the point is strictly inside the grid's bounding box (open
 intervals on both axes, matching the existing call-site convention).
-Whole-sphere grids (cubed sphere, reduced Gaussian) return `true` for
-every finite input.
+Whole-sphere grids have periodic longitude. The cubed-sphere implementation
+checks finiteness, and HEALPix also checks the latitude range here. Spherical
+footprint gridding validates the centre and all four vertices together
+during input preparation.
 """
 function in_bounds end
 
 """
     grid_shape(spec::AbstractGridSpec) -> NTuple{N, Int}
 
-Spatial dimensions of the output accumulator array, in the same axis
-order as [`to_fractional_index`](@ref).
+Spatial grid dimensions in index order. For grids with
+[`to_fractional_index`](@ref), the axis order matches the fractional
+indices. The gridder allocates this shape by default, and a grid may
+specialize [`accumulator_shape`](@ref) separately.
 """
 function grid_shape end
 
 """
     payload_dims(spec::AbstractGridSpec) -> NTuple{N, String}
 
-NetCDF dimension names used when defining payload variables on this
-grid. Returned in the same order as [`grid_shape`](@ref).
+NetCDF dimension names used when defining payload variables on this grid.
+The spatial dimensions are returned in Julia dimension order, matching
+`_output_spatial_shape(spec)`. Rectangular grids use the same order as
+[`grid_shape`](@ref), and the writer appends time after the spatial axes.
 """
 function payload_dims end
 
@@ -99,14 +139,14 @@ function payload_dims end
 
 Spatial dimensions of the in-memory accumulator array that the gridder
 allocates, in the same axis order as the indices returned by
-[`to_fractional_index`](@ref). This is the layout the Welford / scatter
-machinery indexes with `(col, row)`.
+[`to_fractional_index`](@ref) or `_spherical_cell`. The Welford / scatter
+machinery indexes this layout with `(col, row)`.
 
-For grids whose accumulator matches the NetCDF spatial layout this is just
-[`grid_shape`](@ref) (the default). A cubed-sphere grid folds its
-`(Nc, Nc, 6)` cube into a 2D `(Nc, 6·Nc)` accumulator and un-folds only at
-write time, so its `accumulator_shape` equals its (already-folded)
-`grid_shape`.
+The default is [`grid_shape`](@ref). A cubed-sphere grid folds its
+`(Nc, Nc, 6)` cube into a 2D `(Nc, 6·Nc)` accumulator and unfolds only
+at write time. HEALPix folds the NESTED sequence into `(nside^2, 12)`
+in memory and writes it on a single cell axis. Both use the default
+because their `grid_shape` is already folded.
 """
 accumulator_shape(spec::AbstractGridSpec) = grid_shape(spec)
 
@@ -168,12 +208,11 @@ const GridSpec = RectangularGridSpec
 # AbstractGridSpec interface — RectangularGridSpec implementations
 # ---------------------------------------------------------------------------
 #
-# These mirror the closed-form affine map currently inlined inside
-# `_process_l2_file!` / `_process_l2_file_ka!` and the dim/coord-var
-# definitions in `create_output_dataset`. The call sites in `gridder.jl`
-# and `ncio.jl` will be rewired through these methods in a follow-up PR;
-# this PR introduces the dispatch surface only, so existing performance
-# and behavior are unchanged.
+# These mirror the original closed-form affine map in
+# `_process_l2_file!` / `_process_l2_file_ka!` and the dimension and
+# coordinate-variable definitions in `create_output_dataset`. The
+# rectangular L2 paths use the affine map in bulk, while scalar callers
+# use this interface. The NetCDF writer dispatches through the methods below.
 
 @inline function to_fractional_index(spec::RectangularGridSpec{T},
                                      lat::Real, lon::Real) where {T}

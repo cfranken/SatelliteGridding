@@ -48,8 +48,8 @@ function _read_or_derive_l2_centers(fin, config::DataSourceConfig,
                                     lat_bnd::AbstractMatrix,
                                     lon_bnd::AbstractMatrix)
     if haskey(config.basic, "lat") && haskey(config.basic, "lon")
-        return vec(read_nc_variable(fin, config.basic["lat"])),
-               vec(read_nc_variable(fin, config.basic["lon"]))
+        return vec(_read_l2_geolocation(fin, config.basic["lat"])),
+               vec(_read_l2_geolocation(fin, config.basic["lon"]))
     end
 
     vec(mean(lat_bnd, dims=2)), vec(mean(lon_bnd, dims=2))
@@ -58,8 +58,8 @@ end
 function _read_l2_centers(fin, config::DataSourceConfig)
     _has_l2_centers(config) ||
         error("Radius-based circular footprint gridding requires basic.lat and basic.lon")
-    vec(read_nc_variable(fin, config.basic["lat"])),
-    vec(read_nc_variable(fin, config.basic["lon"]))
+    vec(_read_l2_geolocation(fin, config.basic["lat"])),
+    vec(_read_l2_geolocation(fin, config.basic["lon"]))
 end
 
 function _read_l2_radius(fin, config::DataSourceConfig, n::Integer)
@@ -119,7 +119,7 @@ function _circle_bounds_from_radius(lat_center, lon_center, radius,
 end
 
 function _read_l2_geometry(fin, config::DataSourceConfig,
-                           footprint_method::AbstractGriddingMethod)
+                           footprint_method::AbstractGriddingMethod, spec::AbstractGridSpec)
     if _use_radius_l2_geometry(config, footprint_method)
         lat_center, lon_center = _read_l2_centers(fin, config)
         radius = _read_l2_radius(fin, config, length(lat_center))
@@ -128,16 +128,51 @@ function _read_l2_geometry(fin, config::DataSourceConfig,
         return lat_center, lon_center, lat_bnd, lon_bnd
     end
 
-    lat_bnd = read_nc_variable(fin, config.basic["lat_bnd"]; bounds=true)
-    lon_bnd = read_nc_variable(fin, config.basic["lon_bnd"]; bounds=true)
+    lat_bnd = _read_l2_geolocation(fin, config.basic["lat_bnd"]; bounds=true)
+    lon_bnd = _read_l2_geolocation(fin, config.basic["lon_bnd"]; bounds=true)
 
-    sort_corners_ccw!(lat_bnd, lon_bnd)
+    _order_l2_corners!(spec, lat_bnd, lon_bnd)
     lat_center, lon_center = _read_or_derive_l2_centers(fin, config,
                                                         lat_bnd, lon_bnd)
     lat_center, lon_center, lat_bnd, lon_bnd
 end
 
-# Use the same input preparation for sequential, KA, and cubed-sphere paths.
+_order_l2_corners!(::RectangularGridSpec, lat, lon) = sort_corners_ccw!(lat, lon)
+_order_l2_corners!(spec::AbstractSphericalGridSpec, lat, lon) =
+    _order_l2_corners!(_spherical_subdivision(spec), lat, lon)
+_order_l2_corners!(::Val{:lonlat}, lat, lon) = sort_corners_ccw!(lat, lon)
+_order_l2_corners!(::Val{:unit_vectors}, lat, lon) = nothing
+
+const _POLAR_LATITUDE_TOLERANCE = 1e-4 # degrees
+const _SPHERICAL_LONGITUDE_LIMIT = 720 # degrees
+
+@inline _clamp_polar_latitude(lat) = lat
+@inline function _clamp_polar_latitude(lat::T) where {T<:AbstractFloat}
+    return 90 < abs(lat) <= 90 + _POLAR_LATITUDE_TOLERANCE ? copysign(T(90), lat) : lat
+end
+
+_validate_l2_geolocation!(valid, ::RectangularGridSpec, lat, lon, lat_c, lon_c) = nothing
+
+"""
+Clamp small polar overshoots and reject spherical soundings whose centre or
+corners fall outside the latitude and longitude domains in physical degrees.
+`valid` already excludes nonfinite coordinates.
+"""
+function _validate_l2_geolocation!(valid, ::AbstractSphericalGridSpec, lat, lon, lat_c, lon_c)
+    @inbounds for i in eachindex(valid)
+        valid[i] || continue
+        lat[i] = _clamp_polar_latitude(lat[i])
+        valid[i] = (-90 <= lat[i] <= 90) & (-_SPHERICAL_LONGITUDE_LIMIT <= lon[i] <= _SPHERICAL_LONGITUDE_LIMIT)
+        for j in axes(lat_c, 2)
+            lat_c[i, j] = _clamp_polar_latitude(lat_c[i, j])
+            valid[i] &= -90 <= lat_c[i, j] <= 90
+            valid[i] &= -_SPHERICAL_LONGITUDE_LIMIT <= lon_c[i, j] <= _SPHERICAL_LONGITUDE_LIMIT
+        end
+    end
+    nothing
+end
+
+# Use the same input preparation for rectangular and spherical grids and KA backends.
 function _with_l2_observations(f, filepath, config, spec, method,
                                nc_vars, fill_attrib, progress; metadata=nothing)
     Dataset(filepath) do fin
@@ -145,7 +180,7 @@ function _with_l2_observations(f, filepath, config, spec, method,
         if fill_attrib && nc_vars !== nothing
             attributes = get(get(config.options, "metadata", Dict()),
                              "variable_attributes", DEFAULT_VARIABLE_ATTRIBUTES)
-            copy_variable_attributes!(nc_vars, fin, config.grid_vars; attributes=attributes)
+            copy_variable_attributes!(nc_vars, fin, config.grid_vars; attributes)
         end
         observations = _prepare_l2_observations(fin, config, spec, method, progress, filepath)
         observations === nothing || f(observations)
@@ -153,13 +188,13 @@ function _with_l2_observations(f, filepath, config, spec, method,
     nothing
 end
 
-_l2_file_in_bounds(::CubedSphereGridSpec, lat, lon) = true
+_l2_file_in_bounds(::AbstractSphericalGridSpec, lat, lon) = true
 _l2_file_in_bounds(spec::RectangularGridSpec, lat, lon) =
     any(i -> in_bounds(spec, lat[i], lon[i]), eachindex(lat, lon))
 
 function _prepare_l2_observations(fin, config, spec::AbstractGridSpec{T}, method,
                                   progress, filepath) where {T}
-    lat_center, lon_center, lat_bounds, lon_bounds = _read_l2_geometry(fin, config, method)
+    lat_center, lon_center, lat_bounds, lon_bounds = _read_l2_geometry(fin, config, method, spec)
     if !_l2_file_in_bounds(spec, lat_center, lon_center)
         ProgressMeter.next!(progress; showvalues=[(:File, filepath), (:N_pixels, 0)])
         return nothing
@@ -184,6 +219,7 @@ function _prepare_l2_observations(fin, config, spec::AbstractGridSpec{T}, method
     finite = vec(all(isfinite, values; dims=2)) .&
              vec(all(isfinite, lat_c; dims=2)) .& vec(all(isfinite, lon_c; dims=2)) .&
              isfinite.(lat) .& isfinite.(lon)
+    _validate_l2_geolocation!(finite, spec, lat, lon, lat_c, lon_c)
     any(finite) || return nothing
     if !all(finite)
         values = values[finite, :]

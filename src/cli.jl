@@ -5,7 +5,7 @@ Parse command-line arguments for L2 gridding. Matches the interface of the
 original `gridL2_Dates.jl` script.
 """
 function parse_l2_args(args=ARGS)
-    s = ArgParseSettings(description="Grid Level-2 satellite data onto regular grids with footprint oversampling")
+    s = ArgParseSettings(description="Grid Level-2 satellite data with footprint oversampling")
 
     @add_arg_table! s begin
         "--config", "-c"
@@ -47,11 +47,15 @@ function parse_l2_args(args=ARGS)
             arg_type = Float32
             default = 1.0f0
         "--gridType"
-            help = "Output grid geometry: rect (regular lat/lon) or cs (cubed sphere, GEOS/GCHP)"
+            help = "Output grid geometry: rect (regular lat/lon), cs (GEOS/GCHP cubed sphere), or healpix (NESTED HEALPix)"
             arg_type = String
             default = "rect"
         "--Nc"
             help = "Cubed-sphere cells per panel edge (e.g. 360 for C360); required when --gridType cs"
+            arg_type = Int64
+            default = 0
+        "--nside"
+            help = "HEALPix resolution, a positive power of two required when --gridType healpix"
             arg_type = Int64
             default = 0
         "--csConvention"
@@ -201,8 +205,9 @@ end
     args_to_grid_spec(args::Dict) -> AbstractGridSpec
 
 Convert parsed CLI arguments to a grid spec. Returns a `RectangularGridSpec` for
-`--gridType rect` (default) or a `CubedSphereGridSpec` for `--gridType cs`
-(GEOS/GCHP cubed sphere; requires `--Nc`).
+`--gridType rect` (default), a `CubedSphereGridSpec` for `--gridType cs`
+(GEOS/GCHP convention by default, requires `--Nc`), or a `HEALPixGridSpec`
+for `--gridType healpix` with `--nside`.
 """
 function args_to_grid_spec(args::Dict)::AbstractGridSpec
     gtype = lowercase(strip(get(args, "gridType", "rect")))
@@ -222,8 +227,10 @@ function args_to_grid_spec(args::Dict)::AbstractGridSpec
             error("Unknown --csConvention '$conv'. Use gmao or equiangular.")
         end
         return CubedSphereGridSpec(; Nc=Nc, definition=definition, T=Float32)
+    elseif gtype == "healpix"
+        return HEALPixGridSpec(; nside=get(args, "nside", 0))
     else
-        error("Unknown --gridType '$gtype'. Use rect or cs.")
+        error("Unknown --gridType '$gtype'. Use rect, cs, or healpix.")
     end
 end
 

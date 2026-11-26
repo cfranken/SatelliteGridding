@@ -52,6 +52,7 @@ _progress_bar(n, desc, progress::Bool) = Progress(n; desc=desc, enabled=progress
 include("types.jl")
 include("grid_spec.jl")
 include("cubed_sphere.jl")
+include("healpix.jl")
 include("backends.jl")
 include("config.jl")
 include("filepatterns.jl")
@@ -75,7 +76,7 @@ include("center.jl")
 include("methods.jl")
 include("cli.jl")
 
-export AbstractGridSpec, RectangularGridSpec, GridSpec,
+export AbstractGridSpec, AbstractSphericalGridSpec, RectangularGridSpec, GridSpec,
        DataSourceConfig, TimeSpec, FilterRule
 export CubedSphereGridSpec, CubedSphereDefinition,
        GMAOCubedSphereDefinition, EquiangularCubedSphereDefinition,
@@ -83,6 +84,7 @@ export CubedSphereGridSpec, CubedSphereDefinition,
        EquiangularGnomonic, GMAOEqualDistanceGnomonic,
        AngularMidpointCenter, FourCornerNormalizedCenter,
        lonlat_to_panel_xy, grid_shape, accumulator_shape
+export HEALPixGridSpec, ang2pix_nest, pix2ang_nest, healpix_corners, nside2npix, healpix_parent
 export AbstractGriddingMethod, SubpixelGridding, CircularFootprintGridding,
        CenterPointGridding, ExactIntersectionGridding
 export supported_backend_names, backend_help_lines, resolve_backend,

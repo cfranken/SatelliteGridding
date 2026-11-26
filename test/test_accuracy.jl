@@ -122,7 +122,7 @@
                 @test !haskey(attrs, "@absent")
                 @test ds["time"][:] == [DateTime(2020, 1, 1), DateTime(2020, 1, 3)]
                 @test NCDatasets.deflate(ds["signal"].var) == (true, true, 4)
-                @test NCDatasets.chunking(ds["signal"].var)[2] == (2, 1, 1)
+                @test Tuple(NCDatasets.chunking(ds["signal"].var)[2]) == (2, 1, 1)
             end
         end
 

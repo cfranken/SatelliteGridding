@@ -1,7 +1,7 @@
 # SatelliteGridding.jl
 
-A Julia package for gridding satellite Level-2 data onto regular rectangular grids
-with footprint-aware oversampling.
+A Julia package for gridding satellite Level-2 data onto rectangular, cubed-sphere,
+and HEALPix grids with footprint-aware oversampling.
 
 ## Overview
 
@@ -56,6 +56,9 @@ For development (editable local clone):
 ```julia
 Pkg.develop(url="https://github.com/cfranken/SatelliteGridding.git")
 ```
+
+See [Cubed-Sphere Grids](cubed_sphere.md) and [HEALPix Grids](healpix.md) for
+global spherical output grids.
 
 ## Quick Start — Julia API
 

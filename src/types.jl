@@ -132,18 +132,27 @@ Use [`SubpixelGridding`](@ref) for footprint-aware oversampling,
 """
 abstract type AbstractGriddingMethod end
 
+_validate_n_oversample(::Nothing) = nothing
+function _validate_n_oversample(n)
+    n isa Integer && !(n isa Bool) && 0 < n <= typemax(Int) ||
+        throw(ArgumentError("n_oversample must be a positive integer or nothing"))
+    return Int(n)
+end
+
 """
     SubpixelGridding(; n_oversample=nothing)
 
 Footprint-aware gridding by sampling an `n × n` grid of subpoints inside each
-quadrilateral footprint. `nothing` keeps the existing automatic oversampling
-heuristic.
+quadrilateral footprint. Set `n_oversample` to a positive integer to use a fixed
+sample count, or leave it as `nothing` to use the grid's default.
 """
 struct SubpixelGridding <: AbstractGriddingMethod
     n_oversample::Union{Nothing,Int}
+
+    SubpixelGridding(n_oversample) = new(_validate_n_oversample(n_oversample))
 end
 
-SubpixelGridding(; n_oversample::Union{Nothing,Int}=nothing) =
+SubpixelGridding(; n_oversample=nothing) =
     SubpixelGridding(n_oversample)
 
 """

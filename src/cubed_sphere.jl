@@ -415,7 +415,7 @@ end
 # ---------------------------------------------------------------------------
 
 """
-    CubedSphereGridSpec{T,D} <: AbstractGridSpec{T}
+    CubedSphereGridSpec{T,D} <: AbstractSphericalGridSpec{T}
 
 Cubed-sphere output grid with `Nc` cells per panel edge and 6 panels (`6·Nc²`
 cells total). The default `definition` is [`GMAOCubedSphereDefinition`](@ref) —
@@ -436,7 +436,7 @@ un-folds via `reshape(slice, Nc, Nc, 6)` back to `(Xdim, Ydim, nf)`.
 - `centers_lon`, `centers_lat`: `(Nc, Nc, 6)` cell-center coords (degrees, lon in [0,360))
 - `corners_lon`, `corners_lat`: `(Nc+1, Nc+1, 6)` cell-corner coords (degrees)
 """
-struct CubedSphereGridSpec{T<:AbstractFloat,D<:CubedSphereDefinition} <: AbstractGridSpec{T}
+struct CubedSphereGridSpec{T<:AbstractFloat,D<:CubedSphereDefinition} <: AbstractSphericalGridSpec{T}
     Nc::Int
     definition::D
     centers_lon::Array{T,3}
@@ -498,6 +498,18 @@ Project `(lat, lon)` (degrees) onto continuous indices in the **folded**
     row = T((panel - 1) * spec.Nc) + t
     return (col, row)
 end
+
+# Project (lat, lon) to integer folded cell indices on a cubed-sphere grid,
+# clamped defensively to the accumulator bounds.
+@inline function _spherical_cell(spec::CubedSphereGridSpec{T}, lat::Real, lon::Real) where {T}
+    col_f, row_f = to_fractional_index(spec, T(lat), T(lon))
+    col = clamp(floor(Int, col_f), 1, spec.Nc)
+    row = clamp(floor(Int, row_f), 1, 6 * spec.Nc)
+    return col, row
+end
+
+# Keep the original cubed-sphere subpixel rounding for Float32 accumulators.
+_spherical_subpixel_type(::CubedSphereGridSpec{T}) where {T} = T
 
 # Whole-sphere grid: every finite (lat, lon) lands in exactly one cell.
 @inline in_bounds(::CubedSphereGridSpec, lat::Real, lon::Real) =
