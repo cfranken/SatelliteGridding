@@ -118,7 +118,7 @@ end
                 grid_l2(config, spec, roll ? rolling : tiled; n_oversample=7,
                         footprint_method=method, outfile=path, backend, accumulator_precision, compute_std=std,
                         progress=false, verbose=false)
-                @test _l2_payload_hash(path) == expected
+                @test_bitwise _l2_payload_hash(path) == expected
             end
         end
 

@@ -131,7 +131,7 @@ end
         definitions = (GMAOCubedSphereDefinition(), EquiangularCubedSphereDefinition())
         for (d, def) in enumerate(definitions), (t, T) in enumerate((Float32, Float64))
             spec = CubedSphereGridSpec(Nc=9, definition=def, T=T)
-            @test _cubed_sphere_accumulator_bits(spec) == expected[d][t]
+            @test_bitwise _cubed_sphere_accumulator_bits(spec) == expected[d][t]
         end
     end
 
@@ -260,7 +260,7 @@ end
         @test_deprecated accumulate_footprint_cs!(data, nothing, weights, false, spec,
             lat, lon, values, 1, 1, 7, nothing, nothing, nothing, nothing, nothing)
         @test weights == Float32.(_cube_footprint_weights(spec, lat[1, :], lon[1, :], 7))
-        @test all(==(values[1, 1]), data[weights .> 0])
+        @test all(==(values[1, 1]), view(data, :, :, 1)[weights .> 0])
 
         lat[1, 1] = NaN
         @test_throws ArgumentError accumulate_footprint_cs!(data, nothing, weights, false, spec,

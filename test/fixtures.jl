@@ -1,3 +1,13 @@
+# Exact bit-level hashes were recorded with Julia 1.10-1.12. Base floating-point
+# routines can change between Julia minor versions, so other versions skip the
+# exact-hash assertions (set SATGRID_BITWISE_TESTS=1 to force them); the
+# tolerance-based tests still cover correctness on every version.
+const _BITWISE_HASHES = v"1.10" <= VERSION < v"1.13" || get(ENV, "SATGRID_BITWISE_TESTS", "") == "1"
+
+macro test_bitwise(ex)
+    esc(:(_BITWISE_HASHES ? @test($ex) : @test_skip($ex)))
+end
+
 # Numerical expectations below come from rectangle areas and elementary moments,
 # independently of the package's geometry / accumulation helpers.
 function _accuracy_input(file, rectangles, values; qa=ones(Float32, length(values)), version="B1",

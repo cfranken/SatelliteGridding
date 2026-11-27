@@ -468,7 +468,7 @@ end
         for (n, hashes) in zip((7, nothing), expected)
             for ((T, side), hash) in zip(Iterators.product((Float32, Float64), (8, 128)),
                                         (hashes[1], hashes[3], hashes[2], hashes[4]))
-                @test _healpix_accumulator_hash(T, side, n) == hash
+                @test_bitwise _healpix_accumulator_hash(T, side, n) == hash
             end
         end
     end
