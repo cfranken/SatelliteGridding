@@ -381,6 +381,59 @@ end
             end
         end
 
+        @testset "Circular scatter groups wide, unordered footprints" begin
+            n = 8
+            cells = [(col, row) for col in 1:4 for row in 1:4]
+            # Three visits per cell in alternating orders, 5 outside the
+            # output grid but inside the ellipse, and 11 outside the ellipse.
+            samples = [cells; reverse(cells); cells;
+                       fill((1, 5), 5); fill((-1, -1), 11)]
+            ix = reshape(Int32.(first.(samples)), 1, n^2)
+            iy = reshape(Int32.(last.(samples)), 1, n^2)
+            counts, skip = Int32[53], Int32[0]
+            values = fill(2f0, 1, 1)
+            for scatter! in (scatter_accumulate_circular!,
+                             (args...) -> scatter_accumulate_circular_ka!(ka_backend, args...))
+                sums = zeros(Float32, 4, 4, 1)
+                weights = zeros(Float32, 4, 4)
+                scatter!(sums, weights, ix, iy, counts, skip, values, n, 1)
+                @test all(==(3f0 / 53f0), weights)
+                @test all(==(6f0 / 53f0), sums)
+                @test vec(ix) == first.(samples)
+                @test vec(iy) == last.(samples)
+            end
+        end
+
+        @testset "Circular scatter scratch is bounded by oversampling" begin
+            function scatter_bytes(scatter!::F, n_fp, single_cell) where {F}
+                n = 20
+                # Descending, repeating cell IDs exercise the scratch sort.
+                cols = repeat(Int32.(10:-1:1), n^2 ÷ 10)
+                ix = repeat(reshape(cols, 1, :), n_fp, 1)
+                iy = ones(Int32, n_fp, n^2)
+                counts = fill(Int32(n^2), n_fp)
+                skip = fill(Int32(single_cell), n_fp)
+                values = ones(Float32, n_fp, 1)
+                sums, weights = zeros(Float32, 10, 1, 1), zeros(Float32, 10, 1)
+                scatter!(sums, weights, ix, iy, counts, skip, values, n, 1)
+                # Measure steady-state scratch after one-time call specialization.
+                bytes = typemax(Int)
+                for _ in 1:3
+                    bytes = min(bytes, @allocated scatter!(sums, weights, ix, iy, counts, skip, values, n, 1))
+                end
+                return bytes
+            end
+            scatter_ka! = (sums, weights, ix, iy, counts, skip, values, n, n_vars) ->
+                scatter_accumulate_circular_ka!(ka_backend, sums, weights, ix, iy, counts, skip, values, n, n_vars)
+            for scatter! in (scatter_accumulate_circular!, scatter_ka!)
+                single = scatter_bytes(scatter!, 16, true)
+                wide = scatter_bytes(scatter!, 16, false)
+                @test scatter_bytes(scatter!, 1_000, true) == single
+                @test scatter_bytes(scatter!, 1_000, false) == wide
+            end
+            @test scatter_bytes(scatter_accumulate_circular!, 1_000, true) == 0
+        end
+
         @testset "accumulate_circular_batch! edge/pole agreement with sequential and determinism" begin
             n_lon, n_lat = 10, 10
             n_vars = 2
@@ -466,7 +519,8 @@ end
             @test 0.05f0 < w_edge_c < 0.8f0
             expected_mean_c = (1.0f0 * v_int + w_edge_c * v_edge) / (1.0f0 + w_edge_c)
             renorm_mean = (v_int + v_edge) / 2.0f0  # 55.0f0 (wrong)
-            @test gw_c[5, 10] ≈ gw_c_seq[5, 10] rtol=1e-6
+            @test gw_c_seq[5, 10] == 1f0 + 32f0 / 97f0
+            @test gw_c[5, 10] ≈ gw_c_seq[5, 10] rtol=2e-6
             @test gs_c[5, 10, 1] ≈ expected_mean_c rtol=1e-5
             @test gd_c_seq[5, 10, 1] ≈ expected_mean_c rtol=1e-5
             @test abs(gs_c[5, 10, 1] - renorm_mean) > 10.0f0
@@ -708,8 +762,9 @@ end
                     w_ka, v_ka = Dataset(out_ka) do ds
                         Array(ds["n"][:, :, 1]), Array(ds["val"][:, :, 1])
                     end
-                    @test isequal(w_ka, w_seq)
                     mask = w_seq .> 0.0f0
+                    @test (w_ka .> 0.0f0) == mask
+                    @test all(isapprox.(w_ka[mask], w_seq[mask]; rtol=5e-7))
                     @test any(mask)
                     @test all(isapprox.(v_ka[mask], v_seq[mask]; rtol=1e-5, atol=1e-5))
                 end
@@ -816,8 +871,6 @@ end
                 @test isequal(gs1, gs2)
 
                 # 3. Per-cell circular agreement against sequential (Float64 & Float32 coords).
-                # Populated-cell masks match identically; per-cell weights can differ where
-                # KA's single-cell fast path adds 1.0f0 once vs summing rounded 1/inside_count.
                 for (clat_in, clon_in, lat_in, lon_in) in (
                         (ilat_c64, ilon_c64, ilat64, ilon64),
                         (ilat_c32, ilon_c32, ilat32, ilon32))
@@ -891,7 +944,7 @@ end
             gw_cpu = zeros(Float32, n_lon, n_lat)
             scatter_accumulate_circular!(gs_cpu, gw_cpu, ix, iy, inside_count, skip, vals, n, 1)
 
-            # KA @atomic scatter (GPU path exercised on CPU backend)
+            # KA CPU scatter
             gs_ka = zeros(Float32, n_lon, n_lat, 1)
             gw_ka = zeros(Float32, n_lon, n_lat)
             scatter_accumulate_circular_ka!(ka_backend, gs_ka, gw_ka, ix, iy, inside_count, skip, vals, n, 1)
@@ -911,6 +964,33 @@ end
 
     @testset "Quadrilateral KA path — edge bounds and scatter guards" begin
         ka_backend = resolve_backend("cpu")
+
+        @testset "Overlapping quadrilaterals preserve CPU weight order" begin
+            S = SatelliteGridding
+            spec = GridSpec(lat_min=0., lat_max=4., lon_min=0., lon_max=4., dlat=1., dlon=1.)
+            n_fp = 2048
+            west = collect(range(0.70, 0.90; length=n_fp))
+            south = reverse(west)
+            for n in (8, 16, 7)
+                east, north = west .+ 0.50, south .+ 0.50
+                if n == 7
+                    # Mix exact single-cell additions with rounded 1/49 additions.
+                    east[1:2:end] .= west[1:2:end] .+ 0.05
+                    north[1:2:end] .= south[1:2:end] .+ 0.05
+                end
+                obs = (values=ones(n_fp, 1), lat_bounds=hcat(south, south, north, north),
+                       lon_bounds=hcat(west, east, east, west))
+                method = SubpixelGridding(n)
+                seq = S.new_accumulator(spec, nothing, nothing, 1, false)
+                ka = S.new_accumulator(spec, ka_backend, Float64, 1, false)
+                S._accumulate!(seq, spec, obs, method, nothing)
+                S._accumulate!(ka, spec, obs, method, nothing)
+                _, _, expected = S.finish!(seq)
+                _, _, actual = S.finish!(ka)
+                @test count(>(0), expected) == 4
+                @test isequal(actual, expected)
+            end
+        end
 
         @testset "compute_footprint_indices_ka! clips out-of-range indices" begin
             n_lon, n_lat = 180, 90

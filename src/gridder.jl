@@ -14,9 +14,9 @@ To archive Float64 results exactly, use Float64 accumulators and set `[output]`
 `precision = "float64"`, `significant_digits_mean = "none"`, and
 `significant_digits_std = "none"`. Use Float64 bounds and spacings for
 `GridSpec`, or `T=Float64` for `CubedSphereGridSpec` and sequential
-`HEALPixGridSpec`. The CLI creates Float32 grids. Only HEALPix on `--backend cpu`
-or `--backend cuda` accumulates in Float64 by default. Use this configuration
-for aggregation inputs such as HEALPix 4:1 coarsening or regridding. At fine
+`HEALPixGridSpec`. The CLI creates Float32 grids. KA CPU and CUDA
+accumulate in Float64 by default, as do sequential rolling runs. Use this
+configuration for aggregation inputs such as HEALPix 4:1 coarsening or regridding. At fine
 `nside`, quantization of nearly equal child means can dominate a small parent
 standard deviation.
 
@@ -29,10 +29,9 @@ standard deviation.
 - `n_oversample=nothing`: Sub-pixel factor in `1:1024`. `nothing` uses the grid's default.
 - `footprint_method::AbstractGriddingMethod=SubpixelGridding()`: Footprint geometry method.
 - `compute_std::Bool=false`: Also compute per-cell standard deviation on
-  sequential and spherical KA paths. Mean-only spherical KA runs skip mean refinement. For accumulator precision `A`, values
-  with magnitude below about `eps(A) * abs(reference - value)` can round away
-  when shifted by the per-variable reference (`eps(Float64)` ≈ `2e-16`,
-  `eps(Float32)` ≈ `1e-7`). Enable `compute_std` to recover those values.
+  sequential and KA paths. KA replays input files to refine the mean for
+  Float32 accumulators and whenever standard deviation is requested.
+  Mean-only Float64 KA runs use a single pass.
 - `verbose::Bool=true`: Log run status with `@info`.
 - `outfile::String="gridded_output.nc"`: Output file path
 - `backend`: KernelAbstractions backend (default: `nothing` for sequential Welford path).
@@ -40,8 +39,8 @@ standard deviation.
 - `geometry_precision=nothing`: Spherical KA subdivision and locator precision.
   Use `Float32` or `Float64`. Defaults to `Float64` on CUDA and KA CPU and
   `Float32` on Metal.
-- `accumulator_precision=nothing`: Spherical KA precision for weights, sums,
-  and variance, including rolling daily moments. Defaults to `Float64` on
+- `accumulator_precision=nothing`: KA precision for weights, sums, and daily moments.
+  All rolling merges use Float64. Defaults to `Float64` on
   CUDA and KA CPU and `Float32` on Metal. With `Float32`, a standard deviation
   below roughly one ulp of the cell mean (`σ/|mean| ≲ 1e-7`) can be reported
   as zero. Use `Float64` when such small relative variability matters.
@@ -111,14 +110,6 @@ _start_l2(backend::Union{Nothing,CPU}, args...) = _grid_l2(backend, args...)
 # An optional backend can be loaded by resolve_backend in the calling expression.
 _start_l2(backend, args...) = Base.invokelatest(_grid_l2, backend, args...)
 
-function _validate_statistics(spec, backend, compute_std)
-    if backend !== nothing && compute_std
-        error("Rectangular KA gridding does not support compute_std=true; use --backend sequential or omit --compSTD.")
-    end
-    nothing
-end
-_validate_statistics(::AbstractSphericalGridSpec, backend, compute_std) = nothing
-
 function _l2_schedule(time_spec)
     step = time_spec.sample_step
     if step === nothing
@@ -135,13 +126,12 @@ function _l2_schedule(time_spec)
 end
 
 function _grid_l2(backend, config, spec, time_spec, run, geometry_precision, accumulator_precision)
-    spherical_ka = _spherical_ka_options(spec, backend, geometry_precision, accumulator_precision)
+    ka_options = _ka_options(spec, backend, geometry_precision, accumulator_precision)
     _validate(spec, run.method)
     output_options = _output_options(config.options)
     run.zarr_out === nothing || _validate_zarr_output(spec, output_options)
     _validate_l2_geometry_config(config, run.method)
     metadata = InputMetadata(config)
-    _validate_statistics(spec, backend, run.compute_std)
 
     (; snapshots, step, time_long_name, status) = _l2_schedule(time_spec)
     n_times = length(snapshots)
@@ -164,13 +154,13 @@ function _grid_l2(backend, config, spec, time_spec, run, geometry_precision, acc
         if write_nc
             ds, nc_vars = create_output_dataset(run.outfile, spec, n_times, config.grid_vars,
                 run.compute_std; window_bounds=true, time_long_name, command=run.command,
-                filters=config.filters, output_options, spherical_ka_std=spherical_ka !== nothing && run.compute_std)
+                filters=config.filters, output_options)
         end
         if run.zarr_out !== nothing
             zg = init_zarr_store(run.zarr_out, spec, config.grid_vars;
                                  epoch=run.zarr_epoch, compute_std=run.compute_std)
         end
-        acc = new_accumulator(spec, backend, spherical_ka, length(config.grid_vars), run.compute_std)
+        acc = new_accumulator(spec, backend, ka_options, length(config.grid_vars), run.compute_std, step)
         ctx = L2Context(config, spec, run, output_options, ds, nc_vars, zg, metadata, Ref(true))
         total, successful = _run_l2_schedule!(acc, ctx, time_spec, snapshots, step)
         total > 0 || error("No input files matched pattern '$(config.file_pattern)' in folder '$(config.folder)'")
@@ -203,14 +193,14 @@ function _run_l2_schedule!(acc, ctx, time_spec, snapshots, ::Nothing)
 
         p_files = _progress_bar(length(files), "  Files: ", run.progress)
         _reset_reference!(acc)
-        successful += _accumulate_l2_files!(acc, ctx, files, p_files; keep_shifted=false)
+        successful += _accumulate_l2_files!(acc, ctx, files, p_files; keep_mean_parts=false)
         _emit_l2_snapshot!(ctx, finish!(acc), ct, d, d, end_date)
         reset!(acc)
     end
     total, successful
 end
 
-function _accumulate_l2_files!(acc, ctx, files, p_files; keep_shifted)
+function _accumulate_l2_files!(acc, ctx, files, p_files; keep_mean_parts)
     bounds = _start_pass!(acc)
     replay_files = bounds === nothing ? nothing : String[]
     successful = 0
@@ -229,7 +219,7 @@ function _accumulate_l2_files!(acc, ctx, files, p_files; keep_shifted)
             end
         end
     end
-    finish_pass!(acc, ctx, replay_files, bounds, keep_shifted)
+    finish_pass!(acc, ctx, replay_files, bounds, keep_mean_parts)
     successful
 end
 

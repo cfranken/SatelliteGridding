@@ -233,7 +233,6 @@ function create_output_dataset(outfile::String, spec::AbstractGridSpec,
                                command::Union{Nothing,String}=nothing,
                                filters::Vector{FilterRule}=FilterRule[],
                                output_options::NetCDFOptions=NetCDFOptions(),
-                               spherical_ka_std::Bool=false,
                                vegetation_names::Tuple{Vararg{String}}=())
     T = typeof(output_options.fill_value)
     storage = _storage_kwargs(output_options, spec)
@@ -252,15 +251,12 @@ function create_output_dataset(outfile::String, spec::AbstractGridSpec,
 
         dims = (payload_dims(spec)..., "time")
         attributes = _payload_attributes(spec)
-        rolling_comment = spherical_ka_std ?
-            "Rolling windows combine centered daily moments. A non-finite variance or variance input in accumulator precision is written as fill." :
-            "Rolling windows reconstruct variance from raw moments, where Float32 cancellation can produce a small nonzero value."
-        single_comment = spherical_ka_std ?
-            "Zero for a cell touched by a single footprint in tiled mode when its moments are finite. " :
-            "Zero for a cell touched by a single footprint in tiled mode. "
+        std_comment = "sqrt(M2/n), where M2 is the weighted sum of squared deviations and n is the sum of weights. " *
+                      "Computed without Bessel correction. Zero for a cell touched by a single footprint when its moments are finite. " *
+                      "Rolling windows combine centered daily moments in Float64."
         std_attributes = vcat(attributes, [
             "long_name" => "Weighted population standard deviation",
-            "comment" => "sqrt(M2/n), where M2 is the weighted sum of squared deviations and n is the sum of weights. Computed without Bessel correction. " * single_comment * rolling_comment,
+            "comment" => std_comment,
         ])
         nc_vars = Dict{String,Any}()
         for key in keys(grid_vars)

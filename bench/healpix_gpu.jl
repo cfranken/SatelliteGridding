@@ -86,8 +86,8 @@ function time_cuda(backend, spec, batches; geometry_precision, accumulator_preci
     shape = accumulator_shape(spec)
     data = KernelAbstractions.zeros(backend, A, shape..., 1)
     weights = KernelAbstractions.zeros(backend, A, shape)
-    reference = SG._SphericalKAReference(backend, A, size(data, 3))
-    host_batch = SG._SphericalKAHostBatch(F, A)
+    reference = SG._KAReference(backend, A, size(data, 3))
+    host_batch = SG._SphericalKAHostBatch(F)
     KernelAbstractions.synchronize(backend)
     seconds = @elapsed for observations in batches
         SG._accumulate_spherical_batch!(backend, data, weights, nothing, options.locator, F,

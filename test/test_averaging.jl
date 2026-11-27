@@ -1,4 +1,22 @@
+function _circular_accumulation_allocations(n_footprints)
+    means = zeros(Float32, 2, 2, 1)
+    weights = zeros(Float32, 2, 2)
+    centers = fill(1.5f0, n_footprints)
+    corners = repeat(Float32[1.2 1.2 1.8 1.8], n_footprints, 1)
+    values = fill(1f0, n_footprints, 1)
+    accumulate!() = accumulate_circular_footprint!(means, nothing, weights, false,
+        centers, centers, corners, corners, values, n_footprints, 1, 20)
+
+    accumulate!()
+    @test weights[1, 1] == n_footprints
+    @allocated accumulate!()
+end
+
 @testset "Averaging" begin
+
+    @testset "Circular allocations are independent of footprint count" begin
+        @test _circular_accumulation_allocations(1000) == _circular_accumulation_allocations(10)
+    end
 
     @testset "Mean-only accumulation needs no variance workspace" begin
         for T in (Float32, Float64)
@@ -12,9 +30,6 @@
                 zeros(T, n), zeros(T, n), zeros(T, n), zeros(T, n))
             @test means[1, 1, 1] ≈ 20
             @test weights[1, 1] == 2
-            S1 = similar(means)
-            SatelliteGridding.welford_to_moments!(S1, nothing, means, nothing, weights, false)
-            @test S1[1, 1, 1] ≈ 40
         end
     end
 

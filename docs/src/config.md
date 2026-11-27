@@ -69,9 +69,12 @@ To archive Float64 results exactly, accumulate in Float64, set
 to `"none"` for center mode. In Julia, use Float64 bounds and spacings in
 `GridSpec` (`RectangularGridSpec`), or pass `T=Float64` to
 `CubedSphereGridSpec` or `HEALPixGridSpec` for sequential gridding.
-The CLI creates Float32 grids. With `--gridType healpix --backend cpu` or
-`--backend cuda`, the backend accumulates in Float64 by default. Other CLI
-modes accumulate in Float32, including sequential HEALPix and HEALPix on Metal.
+The CLI creates Float32 grids. Rectangular and HEALPix grids on KA CPU and
+CUDA accumulate in Float64 by default. Set `accumulator_precision` in Julia
+or `--accumulator-precision` on the CLI to choose the daily precision. Metal
+requires Float32. Sequential rolling runs accumulate daily moments in Float64
+for both mean and standard deviation. All rolling standard deviations merge centered
+daily moments in Float64 before applying the output settings.
 Use this Float64 configuration for outputs that feed aggregation, including
 HEALPix 4:1 coarsening and regridding. Quantization of nearly equal child
 means can dominate a small parent standard deviation at fine `nside`.

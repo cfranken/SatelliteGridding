@@ -1,47 +1,66 @@
 # Centered temporal windows and reusable daily moments.
 
-"""
-Host arrays for one daily contribution or a rolling window. The first moment
-is a sum (shifted for mean-only spherical KA) or a shifted mean (when there
-is a correction). The second moment is raw for Welford and central for
-spherical KA.
-"""
+"""Daily or window weight, centered M2, and mean with optional low-order correction."""
 struct DayMoments{T,M,C}
     weights::Matrix{T}
-    first::Array{T,3}
-    second::M
+    mean::Array{T,3}
+    m2::M
     correction::C
 end
 
-_host_buffer(a) = Array{eltype(a)}(undef, size(a))
-_host_buffer(::Nothing) = nothing
-_host_copy(a) = Array(a)
-_host_copy(::Nothing) = nothing
-
-function day_moments(acc::WelfordAccumulator)
-    first, second = similar(acc.data), _host_buffer(acc.m2)
-    welford_to_moments!(first, second, acc.data, acc.m2, acc.weights, second !== nothing)
-    DayMoments(copy(acc.weights), first, second, nothing)
+"""Mean-only KA windows can add shifted sums using the common run reference."""
+struct ShiftedSums{T}
+    weights::Matrix{T}
+    sums::Array{T,3}
 end
 
-day_moments(acc::RectKAAccumulator) =
-    DayMoments(Array(acc.weights), Array(acc.data), nothing, nothing)
+_host_copy(a) = Array(a)
+_host_copy(::Nothing) = nothing
+_window_buffer(a) = Array{Float64}(undef, size(a))
+_window_buffer(::Nothing) = nothing
 
-# Replay leaves the centered moments relative to the reference shared by all days.
-day_moments(acc::SphericalKAAccumulator) =
-    DayMoments(Array(acc.weights), Array(acc.data), _host_copy(acc.m2), _host_copy(acc.residual))
+_day_moments_type(::WelfordAccumulator{T,M}) where {T,M} = DayMoments{T,M,Nothing}
+_day_moments_type(acc::AbstractKAAccumulator) = _day_moments_type(acc.moments)
+_day_moments_type(::KAMoments{B,D,W,Nothing}) where {B,D,W} = ShiftedSums{eltype(W)}
+_day_moments_type(acc::KAMoments) = _ka_day_moments_type(acc.replay, eltype(acc.weights))
+_ka_day_moments_type(::KAReplay{Nothing}, ::Type{T}) where {T} =
+    DayMoments{T,Nothing,Array{T,3}}
+_ka_day_moments_type(::KAReplay, ::Type{T}) where {T} =
+    DayMoments{T,Array{T,3},Array{T,3}}
+
+day_moments(acc::WelfordAccumulator) =
+    DayMoments(copy(acc.weights), copy(acc.data), _host_copy(acc.m2), nothing)
+
+day_moments(acc::AbstractKAAccumulator) = day_moments(acc.moments)
+day_moments(acc::KAMoments{B,D,W,Nothing}) where {B,D,W} =
+    ShiftedSums(Array(acc.weights), Array(acc.data))
+
+# Replay leaves Float64 means relative to the shared reference and Float32
+# means as absolute high and low parts.
+day_moments(acc::KAMoments) =
+    DayMoments(Array(acc.weights), Array(acc.data), _host_copy(_ka_m2(acc.replay)),
+               Array(acc.replay.residual))
 
 _window_moments(acc::WelfordAccumulator) = _window_moments(acc, acc.m2, nothing)
-_window_moments(acc::RectKAAccumulator) = _window_moments(acc, nothing, nothing)
-_window_moments(acc::SphericalKAAccumulator) = _window_moments(acc, acc.m2, acc.residual)
-_window_moments(acc, second, correction) =
-    DayMoments(_host_buffer(acc.weights), _host_buffer(acc.data), _host_buffer(second), _host_buffer(correction))
+_window_moments(acc::AbstractKAAccumulator) = _window_moments(acc.moments)
+_window_moments(acc::KAMoments{B,D,W,Nothing}) where {B,D,W} =
+    ShiftedSums(_window_buffer(acc.weights), _window_buffer(acc.data))
+_window_moments(acc::KAMoments) = _window_moments(acc, _ka_m2(acc.replay), acc.replay.residual)
+_window_moments(acc, m2, correction) =
+    DayMoments(_window_buffer(acc.weights), _window_buffer(acc.data),
+               _window_buffer(m2), _window_buffer(correction))
 
 function reset!(win::DayMoments)
     _zero!(win.weights)
-    _zero!(win.first)
-    _zero!(win.second)
+    _zero!(win.mean)
+    _zero!(win.m2)
     _zero!(win.correction)
+    nothing
+end
+
+function reset!(win::ShiftedSums)
+    _zero!(win.weights)
+    _zero!(win.sums)
     nothing
 end
 
@@ -54,7 +73,7 @@ function _run_l2_schedule!(acc, ctx, time_spec, snapshots, ::Dates.Day)
     (; config, run) = ctx
     N = Dates.Day(time_spec.window_halfwidth_days)
     window = _window_moments(acc)
-    cache = Dict{Date,Union{Nothing,typeof(window)}}()
+    cache = Dict{Date,Union{Nothing,_day_moments_type(acc)}}()
     total = successful = 0
 
     p_time = _progress_bar(length(snapshots), "Snapshots: ", run.progress)
@@ -71,14 +90,14 @@ function _run_l2_schedule!(acc, ctx, time_spec, snapshots, ::Dates.Day)
             total += length(files)
             cache[day] = if !isempty(files)
                 p_files = _progress_bar(length(files), "  $day: ", run.progress)
-                successful += _accumulate_l2_files!(acc, ctx, files, p_files; keep_shifted=true)
+                successful += _accumulate_l2_files!(acc, ctx, files, p_files; keep_mean_parts=true)
                 moments = day_moments(acc)
                 reset!(acc)
                 moments
             end
         end
 
-        # Combine the window's days into summed or centered moments.
+        # Merge the cached days in calendar order.
         reset!(window)
         for dd in days
             moments = cache[Date(dd)]
@@ -95,63 +114,83 @@ function _run_l2_schedule!(acc, ctx, time_spec, snapshots, ::Dates.Day)
     total, successful
 end
 
-function _merge_day!(win::DayMoments{T,M,Nothing}, day) where {T,M}
+function _merge_day!(win::ShiftedSums, day::ShiftedSums)
     win.weights .+= day.weights
-    win.first .+= day.first
-    win.second === nothing || (win.second .+= day.second)
+    win.sums .+= day.sums
     nothing
 end
 
-function _merge_day!(win::DayMoments, day)
-    _merge_spherical_moments!(win.weights, win.first, win.second, win.correction,
-                              day.weights, day.first, day.second, day.correction)
+function finish!(win::ShiftedSums, acc::AbstractKAAccumulator)
+    @inbounds for cell in eachindex(win.weights)
+        _finalize_mean_cell!(win.sums, win.weights, cell, length(win.weights),
+                            size(win.sums, 3), 0.0)
+    end
+    _restore_ka_reference!(win.sums, win.weights, acc.moments.reference)
+    win.sums, nothing, win.weights
 end
+
+_finalize_rolling_mean!(win, ::WelfordAccumulator) = nothing
+_finalize_rolling_mean!(win, acc::AbstractKAAccumulator) =
+    _finalize_rolling_ka_mean!(win, acc.moments.reference)
+
+function _finalize_rolling_ka_mean!(win, ::_KAReference{Float32})
+    win.mean .+= win.correction
+    nothing
+end
+
+_finalize_rolling_ka_mean!(win, reference::_KAReference{Float64}) =
+    _restore_ka_reference!(win.mean, win.weights, reference, win.correction)
 
 function finish!(win::DayMoments, acc)
-    finalize_moments!(win.first, win.second, win.weights, win.second !== nothing)
-    win.first, win.second, win.weights
+    win.m2 === nothing || _finalize_centered_std!(win.m2, win.weights)
+    _finalize_rolling_mean!(win, acc)
+    win.mean, win.m2, win.weights
 end
 
-function finish!(win::DayMoments{T,Nothing,Nothing}, acc::SphericalKAAccumulator) where {T}
-    finalize_moments!(win.first, nothing, win.weights, false; min_weight=zero(T))
-    _restore_spherical_reference!(win.first, win.weights, acc.reference)
-    win.first, nothing, win.weights
+@inline _moment_at(::Nothing, i) = 0.0
+@inline _moment_at(a, i) = @inbounds Float64(a[i])
+@inline _set_moment!(::Nothing, value, i) = nothing
+@inline _set_moment!(a, value, i) = @inbounds a[i] = value
+
+@inline function _merge_mean!(mean, ::Nothing, i, old_mean, shift)
+    @inbounds mean[i] = old_mean + shift
 end
 
-function finish!(win::DayMoments, acc::SphericalKAAccumulator)
-    _finalize_spherical_std!(win.second, win.weights)
-    _restore_spherical_reference!(win.first, win.weights, acc.reference, win.correction)
-    win.first, win.second, win.weights
+@inline function _merge_mean!(mean, correction, i, old_mean, shift)
+    @inbounds mean[i], correction[i] = _two_sum(old_mean, shift)
 end
 
-# Combine weighted populations using Chan's merge on the two-part means
-# relative to the same run reference.
-function _merge_spherical_moments!(weights, mean, m2, correction,
-                                   day_weights, day_mean, day_m2, day_correction)
-    @inbounds for v in axes(mean, 3), j in axes(weights, 2), i in axes(weights, 1)
-        wb = day_weights[i, j]
-        wb > zero(wb) || continue
-        wa = weights[i, j]
+@inline _merge_m2!(::Nothing, day_m2, i, cross_weight, delta) = nothing
+@inline function _merge_m2!(m2, day_m2, i, cross_weight, delta)
+    @inbounds m2[i] += Float64(day_m2[i]) + (cross_weight * delta) * delta
+end
+
+# Chan's merge. Convert both parts of each mean before arithmetic.
+function _merge_day!(win::DayMoments{Float64}, day::DayMoments)
+    (; weights, mean, m2, correction) = win
+    stride = length(weights)
+    @inbounds for v in axes(mean, 3), cell in eachindex(weights, day.weights)
+        wb = Float64(day.weights[cell])
+        wb > 0 || continue
+        wa = weights[cell]
+        i = cell + (v - 1) * stride
         if iszero(wa)
-            mean[i, j, v] = day_mean[i, j, v]
-            m2[i, j, v] = day_m2[i, j, v]
-            correction[i, j, v] = day_correction[i, j, v]
+            mean[i] = day.mean[i]
+            _set_moment!(m2, _moment_at(day.m2, i), i)
+            _set_moment!(correction, _moment_at(day.correction, i), i)
         else
-            w = wa + wb
-            fraction = wb / w
-            cross_weight = wa * fraction
-            old_mean = mean[i, j, v]
-            old_correction = correction[i, j, v]
-            delta = (day_mean[i, j, v] - old_mean) + (day_correction[i, j, v] - old_correction)
-            mean[i, j, v], correction[i, j, v] =
-                _spherical_two_sum(old_mean, old_correction + fraction * delta)
-            m2[i, j, v] += day_m2[i, j, v] + (cross_weight * delta) * delta
+            fraction = wb / (wa + wb)
+            old_mean = mean[i]
+            old_correction = _moment_at(correction, i)
+            delta = (Float64(day.mean[i]) - old_mean) + (_moment_at(day.correction, i) - old_correction)
+            _merge_mean!(mean, correction, i, old_mean, old_correction + fraction * delta)
+            _merge_m2!(m2, day.m2, i, wa * fraction, delta)
         end
     end
-    # The previous weight is common to every variable. Update it after the merge.
-    @inbounds for i in eachindex(weights, day_weights)
-        wb = day_weights[i]
-        wb > zero(wb) && (weights[i] += wb)
+    # Update the shared weight after all variables have used its previous value.
+    @inbounds for cell in eachindex(weights, day.weights)
+        wb = Float64(day.weights[cell])
+        wb > 0 && (weights[cell] += wb)
     end
     nothing
 end

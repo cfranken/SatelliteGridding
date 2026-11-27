@@ -78,7 +78,7 @@ CUDA and KA CPU use `Float64` geometry by default to match sequential cell
 assignment. Set `geometry_precision=Float32` (`--geometry-precision float32`)
 to use single precision. Set `accumulator_precision`
 (`--accumulator-precision float32` or `float64`) independently for weights,
-shifted sums, deviations, and rolling moments. Accumulators default to
+shifted sums, deviations, and cached daily moments. Accumulators default to
 Float64 on CUDA and KA CPU. Metal uses Float32 for both settings and
 rejects Float64.
 Float32 geometry quantizes the input corner vectors and orders them in the tangent
@@ -92,13 +92,10 @@ subpoint can change occupancy or shift the mean by an amount comparable
 to the scene standard deviation. In the XCO₂ examples, cell means with
 `n ≳ 2` shifted by about 0.05 ppm or less.
 The first nonempty batch supplies a per-variable median reference for the
-shifted first pass. Mean-only runs skip refinement. In either accumulator
-precision `A`, values with magnitude below about
-`eps(A) * abs(reference - value)` can round away in that first pass.
-`eps(Float64)` is about `2e-16`, and `eps(Float32)` is about `1e-7`.
-Enable `compute_std` to recover those values by refining each cell's mean
-using deviations around it. [GPU Acceleration](@ref) gives examples of
-precision limits and describes memory use and the spherical grid locator interface.
+shifted first pass. Float32 KA runs replay the files to refine each cell's
+mean using deviations around it. Float64 KA runs replay when standard
+deviation is requested. [GPU Acceleration](@ref) describes precision limits,
+memory use, and the spherical grid locator interface.
 
 ## NetCDF layout
 
@@ -117,13 +114,12 @@ sounding split across cells contributes a fraction to each cell. The optional
 `*_std` is the weighted population standard deviation, `sqrt(M2 / n)`, where
 `M2` is the weighted sum of squared deviations from the cell mean. It has the
 source variable's units. A cell touched by a single footprint has zero
-standard deviation in tiled mode when the moments are finite. Spherical
+standard deviation when the moments are finite. Spherical
 KA writes fill when the variance or its inputs become non-finite in
 accumulator precision. The calculation uses no Bessel correction.
-With Float32 accumulators, including on Metal, a standard deviation below
-roughly one ulp of the cell mean (`σ/|mean| ≲ 1e-7`) can be reported as zero.
-Use Float64 accumulators (the CUDA and KA CPU default) when such small
-relative variability matters.
+With Float32 accumulators, including on Metal, roundoff can erase small
+standard deviations, especially in cells with many contributions.
+See [the GPU precision discussion](gpu.md#accumulation-and-standard-deviation).
 
 NetCDF stores `n = 0` for unobserved cells, including entirely empty time
 slices, and reserves `-1` for unwritten weights. A cell with `n > 0` can
@@ -132,20 +128,17 @@ still contain science fill, for example when its standard deviation overflows.
 To archive Float64 results exactly, accumulate in Float64 and set
 `[output] precision = "float64"`, `significant_digits_mean = "none"`, and
 `significant_digits_std = "none"`. In Julia, use
-`HEALPixGridSpec(; nside=..., T=Float64)` for sequential gridding. The CLI
-creates Float32 grids.
-HEALPix on `--backend cpu` or `--backend cuda` accumulates in Float64 by
-default. Other CLI modes accumulate in Float32. Use this Float64 configuration
+`HEALPixGridSpec(; nside=..., T=Float64)` for tiled sequential gridding.
+KA CPU and CUDA accumulate in Float64 by default. Sequential rolling runs
+also accumulate in Float64. Use this Float64 configuration
 for outputs that feed HEALPix 4:1 coarsening or regridding. At fine `nside`,
 quantization of nearly equal child means can dominate a small parent standard
 deviation.
 
-Spherical KA rolling windows combine centered daily moments using corrected
-means relative to the run reference. Sequential
-rolling windows reconstruct variance from unshifted raw moments, which
-can lose small variances in Float32 when the absolute tracer values are
-large. Use `HEALPixGridSpec(nside=...; T=Float64)` for sequential rolling
-standard deviations of high-offset tracers such as XCO₂.
+All rolling windows with standard deviation merge centered daily moments
+in Float64, as do mean-only Float32 KA runs. Float64 KA restores the shared
+reference after merging. Float32 KA replay supplies the bounded absolute
+mean to the merge.
 
 For xdggs, open the file with xarray and use
 `xdggs.decode(ds.set_coords("cell_ids"))` to decode the ID coordinate.
@@ -167,8 +160,6 @@ HEALPix supports quadrilateral Level-2 footprints to NetCDF. Circular
 footprints, centre-coordinate gridding such as MODIS, Zarr output, UGRID
 export, and coarsening or aggregation helpers are outside this support.
 
-- In sequential rolling windows, Float32 raw moment cancellation can
-  erase variance or introduce spurious variance for high-offset tracers.
 - Outputs contain neither per-cell `sum_w2` nor counts of contributing soundings.
 - Per-cell WGS84 ellipsoidal areas are planned separately.
 - Cubed-sphere seam corner ordering, pole-enclosing footprints, and

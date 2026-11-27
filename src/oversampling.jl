@@ -570,7 +570,7 @@ function scatter_accumulate!(grid_sum::AbstractArray{T,3},
                              skip_flag::AbstractVector{<:Integer},
                              values::AbstractMatrix,
                              n::Int, n_vars::Int) where {T}
-    _scatter_serial!(grid_sum, grid_weights, ix, iy, nothing, skip_flag, values, n, n_vars)
+    _scatter_serial!(grid_sum, grid_weights, ix, iy, skip_flag, values, n, n_vars)
 end
 
 """
@@ -578,8 +578,8 @@ end
                                  skip_flag, values, n, n_vars)
 
 Sequential scatter-accumulate for circular footprints. Oversampled footprints
-use per-footprint weights `1 / inside_count[fp]` because samples outside the
-circle/ellipse are masked out. Samples outside `1..n_lon × 1..n_lat` are dropped.
+contribute once per cell, with weight `k / inside_count[fp]` for `k` hits.
+Samples outside `1..n_lon × 1..n_lat` are dropped without renormalization.
 """
 function scatter_accumulate_circular!(grid_sum::AbstractArray{T,3},
                                       grid_weights::AbstractMatrix{T},
@@ -589,16 +589,20 @@ function scatter_accumulate_circular!(grid_sum::AbstractArray{T,3},
                                       skip_flag::AbstractVector{<:Integer},
                                       values::AbstractMatrix,
                                       n::Int, n_vars::Int) where {T}
-    _scatter_serial!(grid_sum, grid_weights, ix, iy, inside_count, skip_flag, values, n, n_vars)
+    nsq = n^2
+    scratch = any(iszero, skip_flag) ? Vector{Int}(undef, nsq) : nothing
+    for fp in axes(ix, 1)
+        _scatter_circular_footprint!(grid_sum, grid_weights, Val(:sum), ix, iy,
+            inside_count, skip_flag, values, nothing, fp, nsq, n_vars, Val(false), scratch, 0)
+    end
+    nothing
 end
 
 """
     scatter_accumulate_ka!(backend, grid_sum, grid_weights,
                            ix, iy, skip_flag, values, n, n_vars)
 
-KA kernel version of scatter-accumulate using `@atomic` for thread safety.
-Required for GPU backends where multiple threads write to the same grid cells.
-For CPU backends, use `scatter_accumulate!` (sequential) instead.
+Scatter in footprint order on CPU and use atomic updates on GPU.
 Samples outside `1..n_lon × 1..n_lat` are dropped.
 """
 function scatter_accumulate_ka!(backend,
@@ -609,7 +613,7 @@ function scatter_accumulate_ka!(backend,
                                 skip_flag::AbstractVector{Int32},
                                 values::AbstractMatrix,
                                 n::Int, n_vars::Int) where {T}
-    _scatter_atomic!(backend, grid_sum, grid_weights, ix, iy, nothing, skip_flag, values, n, n_vars)
+    _scatter_batch!(backend, grid_sum, grid_weights, ix, iy, nothing, skip_flag, values, n, n_vars)
 end
 
 """
@@ -617,8 +621,9 @@ end
                                     ix, iy, inside_count, skip_flag,
                                     values, n, n_vars)
 
-KA kernel version of circular-footprint scatter-accumulate using atomics for
-GPU backends. Samples outside `1..n_lon × 1..n_lat` are dropped.
+Scatter in footprint order on CPU and use atomic updates on GPU.
+Each footprint contributes weight `k / inside_count[fp]` to a
+cell with `k` hits. Out-of-grid samples are dropped without renormalization.
 """
 function scatter_accumulate_circular_ka!(backend,
                                          grid_sum::AbstractArray{T,3},
@@ -629,25 +634,37 @@ function scatter_accumulate_circular_ka!(backend,
                                          skip_flag::AbstractVector{Int32},
                                          values::AbstractMatrix,
                                          n::Int, n_vars::Int) where {T}
-    _scatter_atomic!(backend, grid_sum, grid_weights, ix, iy, inside_count, skip_flag, values, n, n_vars)
+    _scatter_circular_indices!(backend, grid_sum, grid_weights, ix, iy,
+                               inside_count, skip_flag, values, n, n_vars)
 end
 
-# Quads have a constant weight; circles use the number of inside samples,
-# including samples whose indices were masked at the grid boundary.
-_serial_weights(::Type{T}, ::Nothing, n) where {T} = T(1 / n^2)
-_serial_weights(::Type{T}, counts, n) where {T} = counts
+_scatter_circular_indices!(::CPU, sums, weights, ix, iy, counts, skip, values, n, n_vars) =
+    scatter_accumulate_circular!(sums, weights, ix, iy, counts, skip, values, n, n_vars)
 
-@inline _serial_weight(::Type{T}, weight, fp) where {T} = weight
-@inline function _serial_weight(::Type{T}, counts::AbstractVector, fp) where {T}
-    @inbounds count = counts[fp]
-    count > 0 ? T(1 / count) : nothing
+function _scatter_circular_indices!(backend, sums, weights, ix, iy, counts, skip,
+                                    values, n, n_vars)
+    isempty(skip) && return nothing
+    nsq = n^2
+    workers = _circular_scratch_workers(backend, nsq)
+    scratch = if _has_circular_samples(backend, skip, workers)
+        KernelAbstractions.allocate(backend, Int, (nsq * workers,))
+    else
+        nothing
+    end
+    if scratch === nothing
+        workers = size(ix, 1)
+    end
+    _scatter_circular_workers_ka!(backend, _KA_WORKGROUP_SIZE)(
+        sums, weights, ix, iy, counts, skip, values, nsq, n_vars, scratch, workers; ndrange=workers)
+    KernelAbstractions.synchronize(backend)
+    nothing
 end
 
-function _scatter_serial!(sums, weights, ix, iy, counts, skip, values, n, n_vars)
+function _scatter_serial!(sums, weights, ix, iy, skip, values, n, n_vars)
     T = eltype(weights)
     n_lon, n_lat = size(weights)
-    sample_weights = _serial_weights(T, counts, n)
     nsq = n * n
+    fac = T(1 / nsq)
     @inbounds for fp in 1:size(ix, 1)
         flag = skip[fp]
         if flag == 1
@@ -661,8 +678,6 @@ function _scatter_serial!(sums, weights, ix, iy, counts, skip, values, n, n_vars
                 end
             end
         elseif flag == 0
-            fac = _serial_weight(T, sample_weights, fp)
-            fac === nothing && continue
             for k in 1:nsq
                 col = Int(ix[fp, k])
                 row = Int(iy[fp, k])
@@ -679,20 +694,15 @@ function _scatter_serial!(sums, weights, ix, iy, counts, skip, values, n, n_vars
     nothing
 end
 
-function _scatter_atomic!(backend, sums, weights, ix, iy, counts, skip, values, n, n_vars)
+function _scatter_atomic!(backend, sums, weights, ix, iy, skip, values, n, n_vars)
     n_lon, n_lat = size(weights)
-    _scatter_kernel!(backend)(sums, weights, ix, iy, counts, skip, values,
+    _scatter_kernel!(backend)(sums, weights, ix, iy, skip, values,
         Int32(n), Int32(n_vars), Int32(n_lon), Int32(n_lat); ndrange=size(ix, 1))
     KernelAbstractions.synchronize(backend)
     nothing
 end
 
-@inline _sample_count(::Nothing, fp, nsq) = nsq
-@inline _sample_count(counts, fp, nsq) = @inbounds counts[fp]
-@inline _has_samples(::Nothing, count) = true
-@inline _has_samples(counts, count) = count > Int32(0)
-
-@kernel function _scatter_kernel!(sums, weights, ix, iy, counts, skip,
+@kernel function _scatter_kernel!(sums, weights, ix, iy, skip,
                                   values, n::Int32, n_vars::Int32,
                                   n_lon::Int32, n_lat::Int32)
     fp = @index(Global)
@@ -711,17 +721,14 @@ end
             end
         elseif flag == Int32(0)
             nsq = n * n
-            count = _sample_count(counts, fp, nsq)
-            if _has_samples(counts, count)
-                fac = one(eltype(weights)) / count
-                for k in Int32(1):nsq
-                    col = ix[fp, k]
-                    row = iy[fp, k]
-                    if (Int32(1) <= col) & (col <= n_lon) & (Int32(1) <= row) & (row <= n_lat)
-                        @atomic weights[col, row] += fac
-                        for v in Int32(1):n_vars
-                            @atomic sums[col, row, v] += fac * values[fp, v]
-                        end
+            fac = one(eltype(weights)) / nsq
+            for k in Int32(1):nsq
+                col = ix[fp, k]
+                row = iy[fp, k]
+                if (Int32(1) <= col) & (col <= n_lon) & (Int32(1) <= row) & (row <= n_lat)
+                    @atomic weights[col, row] += fac
+                    for v in Int32(1):n_vars
+                        @atomic sums[col, row, v] += fac * values[fp, v]
                     end
                 end
             end
@@ -729,5 +736,279 @@ end
     end
 end
 
-_scatter_batch!(::CPU, args...) = _scatter_serial!(args...)
-_scatter_batch!(backend, args...) = _scatter_atomic!(backend, args...)
+_scatter_batch!(::CPU, sums, weights, ix, iy, ::Nothing, skip, values, n, n_vars) =
+    _scatter_serial!(sums, weights, ix, iy, skip, values, n, n_vars)
+_scatter_batch!(backend, sums, weights, ix, iy, ::Nothing, skip, values, n, n_vars) =
+    _scatter_atomic!(backend, sums, weights, ix, iy, skip, values, n, n_vars)
+
+function _scatter_batch!(backend, sums, weights, ix, iy, counts::AbstractVector, skip, values, n, n_vars)
+    _scatter_rectangular!(backend, sums, weights, Val(:sum), ix, iy, counts,
+                          skip, values, nothing, n^2, n_vars)
+end
+
+@inline function _scatter_ka_cell!(sums, weights, ::Val{:sum}, values, ::Nothing,
+                                   fp, cell, w, n_vars, atomic)
+    @inbounds begin
+        _add_ka_cell!(weights, cell, w, atomic)
+        for v in 1:n_vars
+            _add_ka_cell!(sums, cell + (v - 1) * length(weights), w * values[fp, v], atomic)
+        end
+    end
+    nothing
+end
+
+@inline _rect_cell_id(col, row, n_lon) = Int(col) + (Int(row) - 1) * n_lon
+@inline _valid_rect_cell(col, row, n_lon, n_lat) =
+    (1 <= col <= n_lon) & (1 <= row <= n_lat)
+
+@inline function _rect_sample_cell(ix, iy, fp, k, n_lon, n_lat)
+    @inbounds col, row = ix[fp, k], iy[fp, k]
+    return _valid_rect_cell(col, row, n_lon, n_lat) ? _rect_cell_id(col, row, n_lon) : 0
+end
+
+@inline function _sift_circular_cells!(cells, offset, root, last)
+    @inbounds begin
+        cell = cells[offset + root]
+        while 2root <= last
+            child = 2root
+            if child < last && cells[offset + child] < cells[offset + child + 1]
+                child += 1
+            end
+            child_cell = cells[offset + child]
+            cell < child_cell || break
+            cells[offset + root] = child_cell
+            root = child
+        end
+        cells[offset + root] = cell
+    end
+    nothing
+end
+
+# Sort one footprint at a time. Exported scatter sorts a packed scratch
+# region. The geometry pipeline can sort its own index tables in place.
+function _sort_circular_cells!(cells, offset, n_samples)
+    @inbounds begin
+        for root in (n_samples ÷ 2):-1:1
+            _sift_circular_cells!(cells, offset, root, n_samples)
+        end
+        for last in n_samples:-1:2
+            cells[offset + 1], cells[offset + last] = cells[offset + last], cells[offset + 1]
+            _sift_circular_cells!(cells, offset, 1, last - 1)
+        end
+    end
+    nothing
+end
+
+@inline function _scatter_circular_runs!(cell_at, sums, weights, pass, values, reference,
+                                        fp, n_samples, n_vars, denominator, atomic)
+    T = eltype(weights)
+    cell = hits = 0
+    @inbounds for k in 1:n_samples
+        next_cell = cell_at(k)
+        iszero(next_cell) && continue
+        if next_cell != cell
+            if hits > 0
+                _scatter_ka_cell!(sums, weights, pass, values, reference,
+                                  fp, cell, T(hits) / T(denominator), n_vars, atomic)
+            end
+            cell, hits = next_cell, 0
+        end
+        hits += 1
+    end
+    if hits > 0
+        _scatter_ka_cell!(sums, weights, pass, values, reference,
+                          fp, cell, T(hits) / T(denominator), n_vars, atomic)
+    end
+    nothing
+end
+
+@inline function _circular_sample_runs(cell_at, nsq, ::Nothing, offset)
+    return cell_at, nsq
+end
+
+struct _OwnedCircularIndices{X,Y,I}
+    ix::X
+    iy::Y
+    fp::I
+end
+
+@inline Base.getindex(indices::_OwnedCircularIndices, k) =
+    @inbounds (indices.iy[indices.fp, k], indices.ix[indices.fp, k])
+
+@inline function Base.setindex!(indices::_OwnedCircularIndices, (row, col), k)
+    @inbounds indices.iy[indices.fp, k], indices.ix[indices.fp, k] = row, col
+    nothing
+end
+
+@inline function _circular_sample_runs(cell_at, nsq, indices::_OwnedCircularIndices, offset)
+    previous = 0
+    for k in 1:nsq
+        cell = cell_at(k)
+        iszero(cell) && continue
+        if cell < previous
+            _sort_circular_cells!(indices, offset, nsq)
+            break
+        end
+        previous = cell
+    end
+    return cell_at, nsq
+end
+
+@inline function _circular_sample_runs(cell_at, nsq, cells, offset)
+    occupied = previous = 0
+    ordered = true
+    @inbounds for k in 1:nsq
+        cell = cell_at(k)
+        iszero(cell) && continue
+        ordered &= previous <= cell
+        previous = cell
+        occupied += 1
+        cells[offset + occupied] = cell
+    end
+    ordered || _sort_circular_cells!(cells, offset, occupied)
+    return (k -> @inbounds cells[offset + k]), occupied
+end
+
+@inline function _scatter_circular_footprint!(sums, weights, pass, ix, iy, counts, skip,
+                                              values, reference, fp, nsq, n_vars, atomic,
+                                              scratch, offset)
+    T = eltype(weights)
+    n_lon, n_lat = size(weights)
+    @inbounds flag = skip[fp]
+    if flag == 1
+        cell = _rect_sample_cell(ix, iy, fp, 1, n_lon, n_lat)
+        if !iszero(cell)
+            _scatter_ka_cell!(sums, weights, pass, values, reference, fp, cell, one(T), n_vars, atomic)
+        end
+    elseif flag == 0
+        @inbounds denominator = Int(counts[fp])
+        denominator > 0 || return nothing
+        cell_at = k -> _rect_sample_cell(ix, iy, fp, k, n_lon, n_lat)
+        ids = hits = _empty_ka_histogram()
+        occupied = 0
+        for k in 1:nsq
+            cell = cell_at(k)
+            iszero(cell) && continue
+            ids, hits, occupied, overflow = _count_ka_cell(ids, hits, occupied, cell, Val(false))
+            if overflow
+                sample_cell, n_samples = _circular_sample_runs(cell_at, nsq, scratch, offset)
+                _scatter_circular_runs!(sample_cell, sums, weights, pass, values, reference,
+                                       fp, n_samples, n_vars, denominator, atomic)
+                return nothing
+            end
+        end
+        _scatter_ka_counts!(sums, weights, pass, values, reference, fp,
+                            ids, hits, occupied, denominator, n_vars, atomic)
+    end
+    nothing
+end
+
+@inline function _scatter_rectangular_footprint!(sums, weights, pass, ix, iy, skip,
+                                                 values, reference, fp, nsq, w, n_vars, atomic)
+    T = eltype(weights)
+    n_lon, n_lat = size(weights)
+    @inbounds flag = skip[fp]
+    if flag == 1
+        cell = _rect_sample_cell(ix, iy, fp, 1, n_lon, n_lat)
+        if !iszero(cell)
+            _scatter_ka_cell!(sums, weights, pass, values, reference, fp, cell, one(T), n_vars, atomic)
+        end
+    elseif flag == 0
+        for k in 1:nsq
+            cell = _rect_sample_cell(ix, iy, fp, k, n_lon, n_lat)
+            if !iszero(cell)
+                _scatter_ka_cell!(sums, weights, pass, values, reference, fp, cell, w, n_vars, atomic)
+            end
+        end
+    end
+    nothing
+end
+
+@kernel function _accumulate_rectangular_ka!(sums, weights, pass, @Const(ix), @Const(iy),
+                                            @Const(skip), @Const(values), @Const(reference),
+                                            nsq, n_vars, atomic)
+    fp = @index(Global, Linear)
+    T = eltype(weights)
+    w = one(T) / T(nsq)
+    _scatter_rectangular_footprint!(sums, weights, pass, ix, iy, skip, values, reference,
+                                   fp, nsq, w, n_vars, atomic)
+end
+
+@kernel function _accumulate_circular_ka!(sums, weights, pass, ix, iy,
+                                         @Const(counts), @Const(skip), @Const(values),
+                                         @Const(reference), nsq, n_vars, atomic)
+    fp = @index(Global, Linear)
+    scratch = _OwnedCircularIndices(ix, iy, fp)
+    _scatter_circular_footprint!(sums, weights, pass, ix, iy, counts, skip,
+                                values, reference, fp, nsq, n_vars, atomic, scratch, 0)
+end
+
+# Keep the scratch size independent of the batch length and limit it to
+# 8 MiB on the GPU (or one region if a single footprint needs more).
+_circular_scratch_workers(backend, nsq) = clamp((8 * 1024^2) ÷ (sizeof(Int) * max(1, nsq)), 1, 256)
+
+function _has_circular_samples(backend, skip, workers)
+    flags = KernelAbstractions.allocate(backend, Int32, (workers,))
+    _circular_sample_flags_ka!(backend, _KA_WORKGROUP_SIZE)(flags, skip, workers; ndrange=workers)
+    KernelAbstractions.synchronize(backend)
+    return any(!iszero, Array(flags))
+end
+
+@kernel function _circular_sample_flags_ka!(flags, @Const(skip), workers)
+    worker = @index(Global, Linear)
+    flag = Int32(0)
+    @inbounds for fp in worker:workers:length(skip)
+        if iszero(skip[fp])
+            flag = Int32(1)
+            break
+        end
+    end
+    @inbounds flags[worker] = flag
+end
+
+@kernel function _scatter_circular_workers_ka!(sums, weights, ix, iy, counts, skip, values,
+                                               nsq, n_vars, scratch, workers)
+    worker = @index(Global, Linear)
+    offset = (worker - 1) * nsq
+    for fp in worker:workers:size(ix, 1)
+        _scatter_circular_footprint!(sums, weights, Val(:sum), ix, iy, counts, skip,
+                                    values, nothing, fp, nsq, n_vars, Val(true), scratch, offset)
+    end
+end
+
+function _scatter_rectangular!(::CPU, sums, weights, pass, ix, iy, ::Nothing, skip,
+                               values, reference, nsq, n_vars)
+    T = eltype(weights)
+    w = one(T) / T(nsq)
+    for fp in axes(ix, 1)
+        _scatter_rectangular_footprint!(sums, weights, pass, ix, iy, skip, values, reference,
+                                       fp, nsq, w, n_vars, Val(false))
+    end
+    nothing
+end
+
+function _scatter_rectangular!(::CPU, sums, weights, pass, ix, iy, counts::AbstractVector, skip,
+                               values, reference, nsq, n_vars)
+    for fp in axes(ix, 1)
+        scratch = _OwnedCircularIndices(ix, iy, fp)
+        _scatter_circular_footprint!(sums, weights, pass, ix, iy, counts, skip,
+                                    values, reference, fp, nsq, n_vars, Val(false), scratch, 0)
+    end
+    nothing
+end
+
+function _scatter_rectangular!(backend, sums, weights, pass, ix, iy, ::Nothing, skip,
+                               values, reference, nsq, n_vars)
+    _accumulate_rectangular_ka!(backend, _KA_WORKGROUP_SIZE)(
+        sums, weights, pass, ix, iy, skip, values, reference, nsq, n_vars, Val(true); ndrange=size(ix, 1))
+    KernelAbstractions.synchronize(backend)
+    nothing
+end
+
+function _scatter_rectangular!(backend, sums, weights, pass, ix, iy, counts::AbstractVector, skip,
+                               values, reference, nsq, n_vars)
+    _accumulate_circular_ka!(backend, _KA_WORKGROUP_SIZE)(
+        sums, weights, pass, ix, iy, counts, skip, values, reference, nsq, n_vars, Val(true); ndrange=size(ix, 1))
+    KernelAbstractions.synchronize(backend)
+    nothing
+end

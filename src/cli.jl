@@ -126,7 +126,7 @@ function parse_l2_args(args=ARGS)
             arg_type = String
             range_tester = x -> lowercase(x) in ("float32", "float64")
         "--accumulator-precision"
-            help = "Spherical KA accumulator precision: float32 or float64 (default: float32 on Metal, float64 elsewhere)"
+            help = "KA accumulator precision: float32 or float64 (default: float32 on Metal, float64 elsewhere)"
             arg_type = String
             range_tester = x -> lowercase(x) in ("float32", "float64")
         "--zarrOut"

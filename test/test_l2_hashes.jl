@@ -59,21 +59,30 @@ function _l2_payload_hash(path)
 end
 
 @testset "L2 NetCDF payload bit regressions" begin
-    # Raw variable hashes from pre-cleanup HEAD, 11115f6. The fixture
+    # Unchanged cases retain their pre-cleanup hashes. Centered rolling
+    # and rectangular KA precision changes use the new payload hashes. The fixture
     # includes a QA-rejected file, empty days, overlapping footprints, and
     # polar and seam geometry. Hash the on-disk values without CF decoding.
     cases = (
         ("rect", Float32, "quad", false, true, "float32") => "6a1ff8b417621839f23276c05541ff190839722c6feab688ec7c2b8fbf88cf04",
-        ("rect", Float64, "circle", true, true, "float64") => "62ed7d54bc77c6eef174c934f7bd85d29061512300299f604a879936e7eabcec",
+        ("rect", Float64, "circle", true, true, "float64") => "73dead95fa3afa2bbccc6f372d0760e02a720d984f758209a91ae341f4588daf",
         ("rect", Float64, "radius", false, false, "float32") => "2c95678b9e52c862e0d6c2752d45db5efa0f81ab40ace4e6f94d22a9df320322",
         ("rect-ka", Float64, "quad", false, false, "float32") => "713a9680afd94f678d0baee28e4e939367fdd77104940184631c7f12d99f1897",
-        ("rect-ka", Float32, "quad", true, false, "float64") => "3b1b5a007d40ba9195d72128dd1bef2e1ea24623bac662a1c8153b229b8b7ef9",
-        ("rect-ka", Float32, "circle", true, false, "float64") => "d072c13c2a1b29ef3cbbc5adfd561d368587c7fc1f7aa5871c255173a83fc234",
-        ("rect-ka", Float64, "radius", false, false, "float64") => "dcb11a185ce9ada5d9fdaee696baa666cc4b3871ff877ea8586d5e09922275e2",
-        ("cube", Float32, "quad", true, true, "float32") => "f154a166e135e85e0a726d538d9f5b9d802498a2d16346e4d83b509541857c76",
+        ("rect-ka", Float32, "quad", true, false, "float64") => "b58c90024ec7e28fa3b95a485f13147aa6c58faba6da794b80e4089fbbdf671e",
+        ("rect-ka", Float32, "circle", true, false, "float64") => "4775603ab1432585b0c466ca92abe2b7e165d30bc7f48371239b5e219b23550c",
+        ("rect-ka", Float64, "radius", false, false, "float64") => "9a821100987a1f6e46fbab091a2939da5b89033a23b6730d20f88899fd0d382d",
+        ("cube", Float32, "quad", false, true, "float32") => "16d93f166cde802d15813d1dbdd9e6faa3a48c3b327ff1c728b4b595fcd2a05f",
+        ("cube", Float32, "quad", true, true, "float32") => "621794d024b52d9b211dda3b025e91f142f10cf976d11da81671a852695850d2",
         ("cube-eq", Float64, "quad", false, false, "float64") => "f6cfca012ef16a7f27703b268fc27a367c8256c480f41afe13322b0e8cf092dc",
         ("healpix", Float32, "quad", false, true, "float64") => "060b7db41885239bd28fa90ef6237011766657c890d740e8cba8298427ab46bf",
         ("healpix", Float64, "quad", true, false, "float32") => "aa03ff9e3216e0baebe87b0c75bbbef4461e9772c985ef2fe040bb663700174b",
+        ("healpix", Float32, "quad", true, true, "float32") => "00033007e3941cbeeb97e9b60a9cc60f5b20bcd4409fd672457585ad3e15eede",
+        ("healpix-ka-f32", Float32, "quad", false, false, "float64") => "90be5bce58dae75083062a2a6df290c50ad25788571768cdafbe6fa06f1e5763",
+        ("healpix-ka-f32", Float32, "quad", false, true, "float64") => "050ff137bd66d20597f9b0325e2e41143812e2ade9b14f7d8442a09e723cc899",
+        ("healpix-ka-f32", Float32, "quad", true, false, "float64") => "4218a34e2a0126580a4921c449d411a0fa2f1e613a8d709facf767641a7b458a",
+        ("healpix-ka-f32", Float32, "quad", true, true, "float64") => "e23c4726b4020e4414c8c19ffe7c45b91aa8cca03d3f04033cb9dfedafd5fb22",
+        ("healpix-ka", Float32, "quad", false, false, "float32") => "93af7943c197f3bb4aa1decd3928909b24e77a91b37a2fc2fa45585fed54329f",
+        ("healpix-ka", Float32, "quad", true, false, "float32") => "553a8e59a010ab3ad814e62d0b0bf7657a9414f7710c638774fc325087808b33",
         ("healpix-ka", Float32, "quad", true, true, "float32") => "00033007e3941cbeeb97e9b60a9cc60f5b20bcd4409fd672457585ad3e15eede",
         ("healpix-ka", Float64, "quad", false, true, "float64") => "ffe6e0cbe638e9d0ff30cfefdf73a5d0cb542cc689a353e1846fc16ecf3bbb17",
     )
@@ -105,22 +114,12 @@ end
                 config.options["output"] = output == "float32" ? Dict("precision" => output) :
                     Dict("precision" => output, "significant_digits_mean" => "none", "significant_digits_std" => "none")
                 method = footprint == "quad" ? SubpixelGridding() : CircularFootprintGridding(7)
-                backend = endswith(label, "-ka") ? CPU() : nothing
+                backend = occursin("-ka", label) ? CPU() : nothing
+                accumulator_precision = endswith(label, "-f32") ? Float32 : nothing
                 grid_l2(config, spec, roll ? rolling : tiled; n_oversample=7,
-                        footprint_method=method, outfile=path, backend, compute_std=std,
+                        footprint_method=method, outfile=path, backend, accumulator_precision, compute_std=std,
                         progress=false, verbose=false)
                 @test _l2_payload_hash(path) == expected
-            end
-        end
-
-        @testset "Rectangular KA STD fails before opening output" begin
-            sentinel = read(path)
-            spec = GridSpec(lat_min=-5f0, lat_max=5f0, lon_min=0f0, lon_max=60f0, dlat=1f0, dlon=1f0)
-            message = "Rectangular KA gridding does not support compute_std=true; use --backend sequential or omit --compSTD."
-            for schedule in (tiled, rolling)
-                @test_throws ErrorException(message) grid_l2(
-                    cfg, spec, schedule; outfile=path, backend=CPU(), compute_std=true, progress=false, verbose=false)
-                @test read(path) == sentinel
             end
         end
 

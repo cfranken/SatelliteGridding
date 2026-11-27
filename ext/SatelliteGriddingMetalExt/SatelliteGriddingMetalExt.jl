@@ -12,8 +12,8 @@ API. Requires `using Metal`.
 """
 metal_backend() = MetalBackend()
 
-SatelliteGridding._default_spherical_ka_precision(::MetalBackend) = Float32
-SatelliteGridding._validate_spherical_ka_precision(::MetalBackend, F, A) =
+SatelliteGridding._default_ka_precision(::MetalBackend) = Float32
+SatelliteGridding._validate_ka_precision(::MetalBackend, F, A) =
     SatelliteGridding._validate_metal_precision(F, A)
 
 end # module

@@ -1,3 +1,7 @@
+_convert_output(::Type{T}, data::Array{T}) where {T} = data
+_convert_output(::Type{T}, data::Array) where {T} = T.(data)
+_convert_output(::Type, ::Nothing) = nothing
+
 # Time-slice output shared by rectangular, cubed-sphere, HEALPix, and center gridding.
 _round_output(value, ::Nothing) = value
 function _round_output(value, sigdigits::Int)
@@ -69,7 +73,7 @@ _output_arrays(::NetCDFOptions{Float64}, T, data, std, weights) = (data, std, we
 
 # Preserve the existing rounding inputs when the grid and KA accumulator differ.
 _output_arrays(::NetCDFOptions{Float32}, T, data, std, weights) =
-    (_spherical_output(T, data), _spherical_output(T, std), _spherical_output(T, weights))
+    (_convert_output(T, data), _convert_output(T, std), _convert_output(T, weights))
 
 function _emit_l2_snapshot!(ds, nc_vars, zg, config, spec::AbstractGridSpec{T}, output_options,
                             data, std, weights,

@@ -46,7 +46,7 @@ julia --project=. bin/grid.jl l2 [options]
 | `--compSTD` | Flag | false | Compute standard deviation |
 | `--backend` | String | `sequential` | Compute backend: `sequential`, `cpu`, `cuda`, or `metal` |
 | `--geometry-precision` | String | Backend default | HEALPix KA geometry precision, `float32` or `float64` |
-| `--accumulator-precision` | String | `float64` on CUDA and KA CPU, `float32` on Metal | HEALPix KA precision for weights, sums, deviations, and rolling moments. Metal rejects `float64`. |
+| `--accumulator-precision` | String | `float64` on CUDA and KA CPU, `float32` on Metal | KA precision for weights, sums, deviations, and cached daily moments. Metal rejects `float64`. |
 | `--keepGoing` | Flag | false | Continue after per-file processing errors |
 | `--noProgress` | Flag | false | Don't draw progress bars. By default they're drawn only when stderr is a terminal |
 | `--quiet` | Flag | false | Suppress progress bars and run status messages |
@@ -120,9 +120,9 @@ reused across overlapping windows (in-memory day cache), so finer sampling does
 not re-grid the same data. The `time` coordinate holds the window center, and
 every output also carries `window_start`/`window_end` recording the exact
 averaging interval (these clip naturally at the data edges). Rolling mode runs on
-`--backend sequential` on all grids. For rectangular grids,
-`--backend cpu`/`cuda`/`metal` also support the mean. For HEALPix, all
-three KA backends support both the mean and `--compSTD`.
+`--backend sequential` on all grids. For rectangular and HEALPix grids,
+`--backend cpu`/`cuda`/`metal` support both the mean and `--compSTD`. Rolling
+standard deviations merge centered daily moments in Float64.
 
 TROPOMI SIF onto a GEOS/GCHP C360 cubed sphere (sequential CPU only):
 
@@ -204,7 +204,6 @@ julia --project=. bin/generate_modis_geolocation.jl \
 | KA CUDA | `--backend cuda` | KernelAbstractions CUDA backend. Requires CUDA.jl. All computation on GPU with atomic scatter. |
 | KA Metal | `--backend metal` | KernelAbstractions Metal backend. Requires Metal.jl on macOS/Apple GPU. |
 
-The KernelAbstractions backends use sum-based accumulation (mean = sum/weight) instead of
-Welford's incremental mean. HEALPix supports `--compSTD` through two passes
-on KA backends. For rectangular and cubed-sphere grids, use `--backend
-sequential` to compute standard deviation.
+The KernelAbstractions backends use shifted sums and a replay pass for
+`--compSTD` on rectangular and HEALPix grids. Cubed-sphere grids use the
+sequential backend for both the mean and standard deviation.

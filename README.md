@@ -81,9 +81,10 @@ close(ds)
 |:--------|:--------|:------------|
 | `n_oversample` | `nothing` (auto) | Sub-pixel factor per footprint side. `nothing` = auto-compute from footprint/grid ratio |
 | `footprint_method` | `SubpixelGridding(...)` | Geometry method for direct `grid_l2` calls. Use `CircularFootprintGridding(...)` for circular footprints |
-| `compute_std` | `false` | Also compute per-cell standard deviation (sequential backend only) |
+| `compute_std` | `false` | Also compute per-cell standard deviation |
 | `outfile` | `"gridded_output.nc"` | Output NetCDF file path |
 | `backend` | `nothing` (sequential) | Compute backend — `nothing`, `CPU()`, `CUDABackend()`, `MetalBackend()`, or another compatible KernelAbstractions backend |
+| `accumulator_precision` | Backend default | KA weights and daily moments for rectangular and HEALPix grids. Float64 on KA CPU and CUDA, Float32 on Metal. |
 
 ### Center-coordinate gridding (MODIS)
 
@@ -281,9 +282,10 @@ To archive Float64 results exactly, accumulate in Float64, set
 `significant_digits_std` to `"none"` for L2 or `significant_digits_center`
 to `"none"` for center mode. In Julia, pass Float64 bounds and spacings to
 `GridSpec` or use `T=Float64` with `CubedSphereGridSpec` or sequential
-`HEALPixGridSpec`. The CLI creates Float32 grids. HEALPix L2 on `--backend cpu`
-or `--backend cuda` accumulates in Float64 by default. Other CLI modes
-accumulate in Float32. Use the Float64 configuration for aggregation inputs,
+`HEALPixGridSpec`. The CLI creates Float32 grids. Rectangular and HEALPix L2
+use Float64 accumulators by default on `--backend cpu` and `--backend cuda`.
+Sequential rolling L2 also accumulates daily moments in Float64. Metal uses
+Float32 accumulators. Use the Float64 configuration for aggregation inputs,
 including HEALPix 4:1 coarsening and regridding. At fine `nside`, quantization
 of nearly equal child means can dominate a small parent standard deviation.
 
@@ -409,7 +411,12 @@ The package supports sequential gridding plus KernelAbstractions backends:
 | KA CUDA | `--backend cuda` | `backend=resolve_backend("cuda")` or `CUDABackend()` | NVIDIA GPU pipeline. Requires CUDA.jl. |
 | KA Metal | `--backend metal` | `backend=resolve_backend("metal")` or `MetalBackend()` | Apple GPU pipeline. Requires Metal.jl on macOS/Apple Silicon. |
 
-The KA backends use sum-based accumulation (`mean = sum/weight`) instead of Welford's incremental mean, which is fully parallelizable but does not support `--compSTD` in a single pass.
+Rectangular and HEALPix KA gridding use reference-shifted sums. The replay pass
+refines the mean for Float32 accumulators and computes the standard deviation
+when requested with `compute_std=true` (`--compSTD`). KA CPU and CUDA default
+to Float64 accumulators, and Metal uses Float32. Select the precision
+with `accumulator_precision` or `--accumulator-precision`. All rolling
+standard deviations merge centered daily moments in Float64.
 
 ### GPU example
 

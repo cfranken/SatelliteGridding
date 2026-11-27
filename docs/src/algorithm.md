@@ -55,7 +55,7 @@ carries weight `1/n²`.
 
 Each sub-pixel is assigned to the grid cell it falls in (via `floor` of its
 fractional grid index). The observation value is accumulated into that cell
-with the sub-pixel's weight.
+with the sub-pixel's weight on both the sequential and rectangular KA paths.
 
 **Fast path**: If all 4 corners fall in the same grid cell, the footprint is
 entirely within one cell. The full observation is assigned with weight 1 (no
@@ -99,8 +99,9 @@ julia --project=. bin/grid.jl l2 \
 ```
 
 This method works with the sequential backend and the KA CPU/CUDA/Metal
-backends. The KA path uses a separate circular index kernel and normalizes each
-footprint by the number of samples inside the inferred circle/ellipse.
+backends. A footprint contributes `k / inside_count` to a cell with `k` hits.
+The denominator counts all samples inside the inferred circle or ellipse.
+Out-of-grid samples are dropped without renormalizing the remaining weights.
 
 ### Choosing `n`
 
@@ -133,28 +134,42 @@ for each observation x with weight w:
 This is numerically stable even for values with large magnitudes, as it never
 computes large sums. The standard deviation is: `std = sqrt(M2 / total_weight)`.
 
-### KA Path (Sum-Based)
+### KA Path (Shifted Sums)
 
-The KernelAbstractions path uses **weighted sums** for the mean, which is fully
-parallelizable:
+The KernelAbstractions path accumulates weights and shifted values in parallel.
+For each variable, the reference is the median of the values finite in
+accumulator precision in the first nonempty batch. A variable with no finite
+values in that batch uses zero. Tiled runs choose a reference per tile.
+Rolling runs share one reference across days.
 
 ```
 for each observation x with weight w:
-    sum_data += w * x       # can use atomic add (GPU)
-    sum_weight += w          # can use atomic add (GPU)
+    shifted_sum += w * (x - reference)
+    W += w
 
-# After all files:
-mean = sum_data / sum_weight
+preliminary_mean = reference + shifted_sum / W
 ```
 
-This enables parallel execution on both CPU and GPU backends. The trade-off is
-slightly less numerical stability for Float32 with extreme values, but this is
-negligible for typical satellite data ranges.
+With Float32 accumulators or when standard deviation is requested, the first
+pass also records the observed cell minimum and maximum. The driver clamps the
+finite preliminary cell mean to those bounds, then replays the input files.
+For each cell with preliminary mean `m`, replay accumulates the linear
+residual `r` and, when computing standard deviation, the squared residual `q`.
 
-For standard deviation with the KA path, a **two-pass approach** is used:
-1. Pass 1: Compute mean via sum-based accumulation
-2. Pass 2: Re-read data, compute `sum(w × (x - mean)²)` per cell
-3. `std = sqrt(sum_sq_dev / sum_weight)`
+```
+r = sum(w * (x - m))
+q = sum(w * (x - m)^2)
+mean = m + r / W
+M2 = max(q - r^2 / W, 0)
+std = sqrt(M2 / W)
+```
+
+With Float32 accumulators, the driver also clamps the refined mean to the
+observed bounds.
+
+Mean-only Float64 runs use the first pass alone. Rolling windows merge
+centered daily moments in Float64 with Chan's formula. Mean-only Float64 KA
+windows add the daily shifted sums in Float64 before restoring the reference.
 
 ## Pipeline Architecture
 

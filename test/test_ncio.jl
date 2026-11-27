@@ -269,8 +269,8 @@
                     @test std.attrib["long_name"] == "Weighted population standard deviation"
                     @test occursin("sqrt(M2/n)", std.attrib["comment"])
                     @test occursin("without Bessel correction", std.attrib["comment"])
-                    @test occursin("Zero for a cell touched by a single footprint in tiled mode", std.attrib["comment"])
-                    @test occursin("Float32 cancellation can produce a small nonzero value", std.attrib["comment"])
+                    @test occursin("Zero for a cell touched by a single footprint", std.attrib["comment"])
+                    @test occursin("centered daily moments in Float64", std.attrib["comment"])
                     @test sum(ds["n"][:]) == 1
                     @test all(iszero, skipmissing(std[:]))
                 end

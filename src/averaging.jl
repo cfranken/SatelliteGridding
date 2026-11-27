@@ -41,7 +41,7 @@ function accumulate_footprint!(grid_data::AbstractArray{T,3},
                                lat_idx::AbstractMatrix, lon_idx::AbstractMatrix,
                                values::AbstractMatrix,
                                n_pixels::Int, n_vars::Int, n_oversample::Int,
-                               points_buf::AbstractArray{T,3},
+                               points_buf::AbstractArray{<:AbstractFloat,3},
                                ix_buf::AbstractVector{<:Integer},
                                iy_buf::AbstractVector{<:Integer},
                                lats0_buf::AbstractVector,
@@ -122,7 +122,7 @@ function _accumulate_spherical_footprint!(grid_data::AbstractArray{T,3},
                                           grid_std::Union{Nothing,AbstractArray{T,3}},
                                           grid_weights::AbstractMatrix{T},
                                           compute_std::Bool,
-                                          spec::AbstractSphericalGridSpec{T},
+                                          spec::AbstractSphericalGridSpec,
                                           lat_c::AbstractMatrix, lon_c::AbstractMatrix,
                                           values::AbstractMatrix,
                                           n_pixels::Int, n_vars::Int, n_oversample::Int,
@@ -254,7 +254,7 @@ overlap needed for a future sum of squared weights. Reuse the cell-index
 buffer `cells`, sized for the largest sample count.
 """
 function _accumulate_unit_vector_footprints!(data::AbstractArray{T,3}, m2, weights,
-                                             compute_std, spec::AbstractSphericalGridSpec{T},
+                                             compute_std, spec::AbstractSphericalGridSpec,
                                              lat_c, lon_c, values, n_override, cells) where {T}
     locator = _device_locator(spec)
     cell_spacing = _device_cell_spacing(locator, Float64)
@@ -306,7 +306,7 @@ GOSAT-like viewing geometry), and sampling is performed in `Float64` fractional
 grid-index space.
 
 Sub-samples outside `1..n_lon × 1..n_lat` are dropped without renormalizing the
-per-footprint weight `1 / inside_count`, keeping boundary-cell weights equal to
+per-cell weight `hits / inside_count`, keeping boundary-cell weights equal to
 true fractional footprint overlap so regional boundary means remain
 domain-invariant. On global rectangular grids, samples beyond `±180°` longitude
 or beyond the poles are dropped rather than wrapped.
@@ -323,33 +323,37 @@ function accumulate_circular_footprint!(grid_data::AbstractArray{T,3},
                                         n_pixels::Int, n_vars::Int,
                                         n_oversample::Int) where {T}
     n_lon, n_lat = size(grid_weights)
+    hits = Dict{Tuple{Int,Int},Int}()
 
     @inbounds for i in 1:n_pixels
         clat, clon, radius_lat, radius_lon =
             _circle_footprint_axes(center_lat_idx[i], center_lon_idx[i],
                                    @view(lat_idx[i, :]), @view(lon_idx[i, :]))
 
+        empty!(hits)
         inside_count = if radius_lat <= eps(Float64) || radius_lon <= eps(Float64)
             0
         else
-            _foreach_circle_sample(Returns(nothing), clat, clon, radius_lat, radius_lon, n_oversample)
+            _foreach_circle_sample(clat, clon, radius_lat, radius_lon, n_oversample) do lat, lon
+                sample_row = floor(Int, lat)
+                sample_col = floor(Int, lon)
+                if 1 <= sample_col <= n_lon && 1 <= sample_row <= n_lat
+                    cell = (sample_col, sample_row)
+                    hits[cell] = get(hits, cell, 0) + 1
+                end
+            end
         end
         if inside_count == 0
             row = floor(Int, clat)
             col = floor(Int, clon)
             if 1 <= col <= n_lon && 1 <= row <= n_lat
                 _welford_update!(grid_data, grid_std, grid_weights, compute_std,
-                                 col, row, values, i, n_vars, T(1))
+                                 col, row, values, i, n_vars, one(T))
             end
-            continue
-        end
-
-        weight = T(1 / inside_count)
-        _foreach_circle_sample(clat, clon, radius_lat, radius_lon, n_oversample) do lat, lon
-            row = floor(Int, lat)
-            col = floor(Int, lon)
-            if 1 <= col <= n_lon && 1 <= row <= n_lat
-                @inbounds _welford_update!(grid_data, grid_std, grid_weights, compute_std,
+        else
+            for ((col, row), count) in hits
+                weight = T(count / inside_count)
+                _welford_update!(grid_data, grid_std, grid_weights, compute_std,
                                  col, row, values, i, n_vars, weight)
             end
         end
@@ -401,10 +405,10 @@ dropped rather than wrapped.
 
 After processing all files, call [`finalize_mean!`](@ref) to convert sums to means.
 
-For spherical KA gridding with `compute_std=true`, the fused spherical
-kernel provides two passes. The first accumulates shifted sums and weights
-to compute cell means. The second uses the cell means to accumulate weighted
-linear and squared deviations.
+This low-level helper accumulates weighted sums in `grid_sum`. Rectangular and spherical
+[`grid_l2`](@ref) use a shared reference-shifted accumulator. They replay
+the inputs to refine Float32 means and to compute standard deviations when
+requested.
 
 # Arguments
 - `backend`: KernelAbstractions backend (`CPU()`, `CUDABackend()`, `MetalBackend()`, etc.)
@@ -441,11 +445,12 @@ GOSAT-like viewing geometry). On backends that support double precision
 (KA CPU, CUDA), radii and sub-sample positions are promoted to `Float64` inside
 the index kernel to mirror `accumulate_circular_footprint!`; on Metal, where
 `Float64` is unavailable, they execute in `Float32` and boundary cell
-assignments may differ from the sequential path. Sub-samples outside
-`1..n_lon × 1..n_lat` are dropped without renormalizing `1 / inside_count` so
-boundary-cell weights reflect true fractional footprint overlap and remain
-domain-invariant. On global rectangular grids, samples beyond `±180°` longitude
-or beyond the poles are dropped rather than wrapped.
+assignments may differ from the sequential path. Each footprint contributes
+weight `k / inside_count` to a cell with `k` hits. Sub-samples outside
+`1..n_lon × 1..n_lat` are dropped without renormalization, so boundary-cell
+weights reflect true fractional footprint overlap and remain domain-invariant.
+On global rectangular grids, this also applies beyond `±180°` longitude and
+beyond the poles.
 """
 function accumulate_circular_batch!(backend,
                                     grid_sum::AbstractArray{T,3},
@@ -468,32 +473,40 @@ function _accumulate_rectangular_batch!(backend, grid_sum, grid_weights, centers
     n_fp = size(lat_corners, 1)
     n_fp == 0 && return nothing
 
-    centers = _rect_backend_centers(backend, centers)
-    lat_c = _rect_backend_input(backend, lat_corners)
-    lon_c = _rect_backend_input(backend, lon_corners)
     val = _rect_backend_input(backend, values)
-    sort_corners && sort_corners_ccw_ka!(backend, lat_c, lon_c)
-
-    # Both geometries use the same index and flag buffers. Circles also count
-    # all inside samples, even those outside the output grid.
-    ix = KernelAbstractions.zeros(backend, Int32, n_fp, n * n)
-    iy = KernelAbstractions.zeros(backend, Int32, n_fp, n * n)
-    skip = KernelAbstractions.zeros(backend, Int32, n_fp)
-    counts = _rect_batch_indices!(backend, grid_weights, ix, iy, skip, centers, lat_c, lon_c, n)
+    geometry = _rect_batch_geometry(backend, size(grid_weights), eltype(grid_weights),
+                                    centers, lat_corners, lon_corners, n, sort_corners)
+    (; ix, iy, counts, skip) = geometry
     _scatter_batch!(backend, grid_sum, grid_weights, ix, iy, counts, skip, val, n, n_vars)
     nothing
 end
 
-function _rect_batch_indices!(backend, grid_weights, ix, iy, skip, ::Nothing, lat, lon, n)
-    n_lon, n_lat = size(grid_weights)
+function _rect_batch_geometry(backend, shape, ::Type{P}, centers,
+                              lat_corners, lon_corners, n, sort_corners) where {P}
+    centers = _rect_backend_centers(backend, centers)
+    lat_c = _rect_backend_input(backend, lat_corners)
+    lon_c = _rect_backend_input(backend, lon_corners)
+    sort_corners && sort_corners_ccw_ka!(backend, lat_c, lon_c)
+
+    # Circles count all inside samples, including those outside the output grid.
+    n_fp = size(lat_corners, 1)
+    ix = KernelAbstractions.allocate(backend, Int32, (n_fp, n * n))
+    iy = KernelAbstractions.allocate(backend, Int32, (n_fp, n * n))
+    skip = KernelAbstractions.allocate(backend, Int32, (n_fp,))
+    counts = _rect_batch_indices!(backend, shape, P, ix, iy, skip, centers, lat_c, lon_c, n)
+    (; ix, iy, counts, skip)
+end
+
+function _rect_batch_indices!(backend, shape, ::Type{P}, ix, iy, skip, ::Nothing, lat, lon, n) where {P}
+    n_lon, n_lat = shape
     _compute_footprint_indices_ka!(backend, ix, iy, skip, lat, lon, n,
-        n_lon, n_lat, _ka_supported_float(backend, eltype(grid_weights)))
+        n_lon, n_lat, _ka_supported_float(backend, P))
     nothing
 end
 
-function _rect_batch_indices!(backend, grid_weights, ix, iy, skip, centers, lat, lon, n)
-    n_lon, n_lat = size(grid_weights)
-    counts = KernelAbstractions.zeros(backend, Int32, size(lat, 1))
+function _rect_batch_indices!(backend, shape, ::Type{P}, ix, iy, skip, centers, lat, lon, n) where {P}
+    n_lon, n_lat = shape
+    counts = KernelAbstractions.allocate(backend, Int32, (size(lat, 1),))
     compute_circular_footprint_indices_ka!(backend, ix, iy, counts, skip,
         centers..., lat, lon, n; n_lon, n_lat)
     counts
@@ -581,64 +594,6 @@ function finalize_std!(grid_std::AbstractArray{T,3}, grid_weights::AbstractMatri
             for z in 1:nvars
                 grid_std[i, j, z] = sqrt(grid_std[i, j, z] / w)
             end
-        end
-    end
-    nothing
-end
-
-# --- Rolling-mean support: additive raw moments -----------------------------
-#
-# To average a day across several overlapping windows without re-gridding it, each
-# day is stored as raw moments that are *additive* over days:
-#   S0 = Σw       (weights)
-#   S1 = Σw·x     (per variable)
-#   S2 = Σw·x²    (per variable, only when std is requested)
-# A window is then the elementwise sum of its days' moments, finalized once at the end.
-
-"""
-    welford_to_moments!(S1, S2, mean, M2, weights, compute_std)
-
-Convert a day's Welford accumulators (`mean`, Welford `M2`, `weights`) into additive raw
-moments: `S1 = Σw·x = w·mean` and, when `compute_std`, `S2 = Σw·x² = M2 + w·mean²`.
-`S0` is just the `weights` array itself (no copy needed). `M2` and `S2` may be `nothing` when
-`compute_std` is false.
-"""
-function welford_to_moments!(S1::AbstractArray{T,3}, S2,
-                             mean::AbstractArray{T,3}, M2::Union{Nothing,AbstractArray{T,3}},
-                             weights::AbstractMatrix{T}, compute_std::Bool) where {T}
-    nlon, nlat, nvars = size(mean)
-    @inbounds for z in 1:nvars, j in 1:nlat, i in 1:nlon
-        w = weights[i, j]
-        m = mean[i, j, z]
-        S1[i, j, z] = w * m
-        if compute_std
-            S2[i, j, z] = M2[i, j, z] + w * m * m
-        end
-    end
-    nothing
-end
-
-"""
-    finalize_moments!(S1, S2, S0, compute_std; min_weight=eps(T))
-
-Finalize summed window moments in place. `S1` (`Σw·x`) becomes the weighted mean
-`Σw·x / Σw`; when `compute_std`, `S2` (`Σw·x²`) becomes the population standard
-deviation `sqrt(M2/Σw)` with `M2 = Σw·x² − (Σw·x)²/Σw` (matching [`finalize_std!`](@ref)).
-Cells with weight at or below `min_weight` are left untouched. The combined `M2` must be computed from
-the summed `S1` *before* `S1` is overwritten with the mean, so this is done in one pass.
-"""
-function finalize_moments!(S1::AbstractArray{T,3}, S2, S0::AbstractMatrix{T},
-                           compute_std::Bool; min_weight=eps(T)) where {T}
-    nlon, nlat, nvars = size(S1)
-    @inbounds for z in 1:nvars, j in 1:nlat, i in 1:nlon
-        w = S0[i, j]
-        if w > min_weight
-            s1 = S1[i, j, z]
-            if compute_std
-                M2 = S2[i, j, z] - s1 * s1 / w
-                S2[i, j, z] = sqrt(max(M2, zero(T)) / w)
-            end
-            S1[i, j, z] = s1 / w
         end
     end
     nothing

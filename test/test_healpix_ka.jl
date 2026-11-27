@@ -167,15 +167,10 @@ function _test_healpix_moment_precision(backend, accumulator_precision)
                     else
                         @test std_var[101, 1] ≈ std(reference; corrected=false) rtol=1e-3
                     end
-                    if times === tiled
-                        singles = (0 .< n) .& (n .< 1)
-                        @test count(singles) > 1
-                        @test all(iszero, std_var[:, 1][singles])
-                        @test occursin("Zero for a cell touched by a single footprint in tiled mode",
-                                       std_var.attrib["comment"])
-                    else
-                        @test occursin("centered daily moments", std_var.attrib["comment"])
-                    end
+                    singles = (0 .< n) .& (n .< 1)
+                    @test count(singles) > 1
+                    @test all(iszero, std_var[:, 1][singles])
+                    @test occursin("centered daily moments in Float64", std_var.attrib["comment"])
                 end
             end
         end
@@ -231,19 +226,13 @@ function _test_healpix_accumulator_cases(backend, accumulator_precision)
                     Dataset(output) do ds
                         @test ds["n"][101, 1] == length(values)
                         found_mean = ds["signal"][101, 1]
-                        if !single || compute_std || name == "prepended"
-                            if single && overflow
-                                @test found_mean ≈ expected_mean rtol=2e-6
-                            else
-                                @test found_mean === expected_mean
-                            end
-                        elseif name == "distant"
-                            # The fixed 380 ppm reference leaves a 30.1 ppm shifted sum.
-                            @test abs(found_mean - expected_mean) < 0.005f0
+                        if single && overflow
+                            @test found_mean ≈ expected_mean rtol=2e-6
+                        else
+                            @test found_mean === expected_mean
                         end
                         if compute_std
                             deviation = ds["signal_std"]
-                            @test occursin("non-finite variance or variance input", deviation.attrib["comment"])
                             if single && overflow
                                 @test ismissing(deviation[101, 1])
                             elseif single && name == "sub_ulp_std"
@@ -371,9 +360,9 @@ function _test_healpix_tiny_weight(backend, accumulator_precision)
         for rolling in (false, true)
             acc = S.new_accumulator(spec, backend, options, 1, true)
             bounds = S._start_pass!(acc)
-            S._accumulate_spherical_pass!(acc, obs, n, acc.data, bounds)
-            S._finish_spherical_pass!(acc, bounds, rolling) do replay
-                S._accumulate_spherical_pass!(acc, obs, n, acc.m2, replay)
+            S._accumulate_spherical_pass!(acc, obs, n, acc.moments.data, bounds)
+            S._finish_ka_pass!(acc.moments, bounds, rolling) do replay
+                S._accumulate_spherical_pass!(acc, obs, n, S._ka_m2(acc.moments.replay), replay)
             end
             mean, std, weights = if rolling
                 window = S._window_moments(acc)
@@ -514,6 +503,29 @@ end
 
     @testset "KA CPU" begin
         backend = resolve_backend("cpu")
+        @testset "Spherical scatter preserves footprint order" begin
+            S = SatelliteGridding
+            spec = HEALPixGridSpec(nside=16)
+            shape = accumulator_shape(spec)
+            locator = S._spherical_ka_options(spec, backend, nothing, nothing).locator
+            spacing = S._device_cell_spacing(locator, Float64)
+            lat, lon, values = _healpix_ka_footprints(Float64)
+            # Exercise the buffered path with overlapping footprints, including
+            # footprints that overflow the private eight-cell histogram.
+            vertices = repeat(map(S._sphere_unit_vector, lat, lon); outer=(17, 1))
+            values = repeat(values; outer=(17, 1))
+            reference = [3.0, 7.0]
+            expected_weights, weights = zeros(shape), zeros(shape)
+            expected_sums, sums = zeros(shape..., 2), zeros(shape..., 2)
+            for batch in Iterators.partition(axes(vertices, 1), 32)
+                S._scatter_spherical!(backend, expected_sums, expected_weights, nothing,
+                    view(vertices, batch, :), view(values, batch, :), reference, locator, spacing, 7)
+            end
+            S._scatter_spherical!(backend, sums, weights, nothing, vertices, values,
+                                  reference, locator, spacing, 7)
+            @test isequal(weights, expected_weights)
+            @test isequal(sums, expected_sums)
+        end
         @testset "Largest public oversampling override" begin
             scratch = mkpath(joinpath(@__DIR__, "..", ".scratch"))
             mktempdir(scratch) do dir
@@ -553,7 +565,7 @@ end
             "metal"; grid_spec=spec, accumulator_precision=Float64)
         @test_throws ArgumentError("accumulator_precision must be Float32 or Float64") resolve_backend(
             "cuda"; grid_spec=spec, accumulator_precision=Float16)
-        @test_throws ArgumentError("accumulator_precision requires a spherical grid and a KA backend") resolve_backend(
+        @test_throws ArgumentError("accumulator_precision requires a KA backend on a supported grid") resolve_backend(
             "sequential"; grid_spec=spec, accumulator_precision=Float32)
         @test_throws ArgumentError("accumulator_precision must be Float32 or Float64") SatelliteGridding._spherical_ka_options(
             spec, backend, nothing, Float16)
