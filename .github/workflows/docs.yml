@@ -62,7 +62,8 @@ jobs:
         if: github.event_name == 'push'
         run: |
           git fetch origin gh-pages
-          git checkout gh-pages
+          # The docs build modifies docs/Project.toml; discard it before switching branches.
+          git checkout --force gh-pages
           if [ ! -f .nojekyll ]; then
             touch .nojekyll
             git add .nojekyll
