@@ -95,79 +95,33 @@ end
                              lat_c, lon_c, values, n_pixels, n_vars, n_oversample,
                              points_buf, lats0_buf, lons0_buf, lats1_buf, lons1_buf)
 
-Footprint-aware accumulation onto a [`CubedSphereGridSpec`](@ref) folded into the
-`(Nc, 6·Nc)` accumulator. Unlike the rectangular [`accumulate_footprint!`], the
-subdivision happens in **lon/lat space** because the cubed-sphere map is nonlinear
-and discontinuous across panel boundaries. Each subpoint is then projected
-independently via [`to_fractional_index`], so a footprint straddling a cube edge
-correctly deposits weight on both panels.
-
-For each pixel:
-- **Fast path**: all 4 corners project to the same `(col, row)` cell → full value, weight 1.
-- **Oversample path**: unwrap corner longitudes relative to the first corner
-  before subdividing the quadrilateral into `n × n` subpoints in lon/lat space.
-  Project each subpoint and add weight `1/n²` to the cell it lands in.
-
-`lat_c` and `lon_c` are `(n_pixels, 4)` corner coordinates in degrees, sorted
-counterclockwise. Buffers match [`compute_subpixels!`]. HEALPix uses a separate
-unit-vector subdivision path.
+Deprecated. Use [`grid_l2`](@ref) with a [`CubedSphereGridSpec`](@ref) for
+footprint accumulation. This wrapper accepts unordered corners in degrees
+and uses unit-vector subdivision with the supplied `n_oversample`. The old
+longitude/latitude work buffers are ignored.
 """
 function accumulate_footprint_cs!(grid_data, grid_std, grid_weights, compute_std,
-                                  spec::CubedSphereGridSpec, args...)
-    _accumulate_spherical_footprint!(grid_data, grid_std, grid_weights, compute_std,
-                                    spec, args...)
+                                  spec::CubedSphereGridSpec, lat_c, lon_c, values,
+                                  n_pixels::Int, n_vars::Int, n_oversample::Int,
+                                  points_buf, lats0_buf, lons0_buf, lats1_buf, lons1_buf)
+    Base.depwarn("accumulate_footprint_cs! is deprecated. Use grid_l2 with a CubedSphereGridSpec.",
+                 :accumulate_footprint_cs!)
+    n = _validate_n_oversample(n_oversample)
+    lat_bounds = view(lat_c, 1:n_pixels, 1:4)
+    lon_bounds = view(lon_c, 1:n_pixels, 1:4)
+    all(isfinite, lat_bounds) && all(isfinite, lon_bounds) ||
+        throw(ArgumentError("Footprint corners must be finite"))
+    observations = (; lat_bounds, lon_bounds,
+                    values=view(values, 1:n_pixels, 1:n_vars))
+    return _accumulate_l2_spherical!(grid_data, grid_std, grid_weights, compute_std,
+                                    spec, observations, n)
 end
 
-function _accumulate_spherical_footprint!(grid_data::AbstractArray{T,3},
-                                          grid_std::Union{Nothing,AbstractArray{T,3}},
-                                          grid_weights::AbstractMatrix{T},
-                                          compute_std::Bool,
-                                          spec::AbstractSphericalGridSpec,
-                                          lat_c::AbstractMatrix, lon_c::AbstractMatrix,
-                                          values::AbstractMatrix,
-                                          n_pixels::Int, n_vars::Int, n_oversample::Int,
-                                          points_buf::AbstractArray{<:AbstractFloat,3},
-                                          lats0_buf::AbstractVector, lons0_buf::AbstractVector,
-                                          lats1_buf::AbstractVector, lons1_buf::AbstractVector) where {T}
-    fac = T(1 / n_oversample^2)
-    lonv = Vector{Float64}(undef, 4)
-    latv = Vector{Float64}(undef, 4)
+@inline _sphere_unit_vector(::AbstractSphericalGridSpec, lat, lon) = _sphere_unit_vector(lat, lon)
 
-    @inbounds for i in 1:n_pixels
-        # Project the 4 corners; fast-path when they all share one cell.
-        c1, r1 = _spherical_cell(spec, lat_c[i, 1], lon_c[i, 1])
-        c2, r2 = _spherical_cell(spec, lat_c[i, 2], lon_c[i, 2])
-        c3, r3 = _spherical_cell(spec, lat_c[i, 3], lon_c[i, 3])
-        c4, r4 = _spherical_cell(spec, lat_c[i, 4], lon_c[i, 4])
-
-        if (c1 == c2 == c3 == c4) & (r1 == r2 == r3 == r4)
-            _welford_update!(grid_data, grid_std, grid_weights, compute_std,
-                             c1, r1, values, i, n_vars, T(1))
-            continue
-        end
-
-        # Unwrap corner longitudes to a common branch relative to corner 1 so the
-        # bilinear subdivision does not interpolate across the ±180° seam.
-        lon1 = Float64(lon_c[i, 1])
-        for k in 1:4
-            latv[k] = Float64(lat_c[i, k])
-            lk = Float64(lon_c[i, k])
-            lonv[k] = lk - 360 * round((lk - lon1) / 360)
-        end
-
-        compute_subpixels!(points_buf, latv, lonv, n_oversample,
-                           lats0_buf, lons0_buf, lats1_buf, lons1_buf)
-
-        for jj in 1:n_oversample, ii in 1:n_oversample
-            sub_lat = points_buf[ii, jj, 1]
-            sub_lon = points_buf[ii, jj, 2]
-            col, row = _spherical_cell(spec, sub_lat, sub_lon)
-            _welford_update!(grid_data, grid_std, grid_weights, compute_std,
-                             col, row, values, i, n_vars, fac)
-        end
-    end
-    nothing
-end
+# Adding 360° to signed longitudes can round points across a cube cell edge.
+@inline _sphere_unit_vector(::CubedSphereGridSpec, lat, lon) =
+    _cube_unit_vector(Float64(lat), Float64(lon))
 
 @inline function _sphere_unit_vector(lat, lon)
     sin_lat, cos_lat = sincosd(Float64(lat))
@@ -230,16 +184,20 @@ end
     return iszero(norm) ? normal : point ./ norm
 end
 
-@inline function _unit_vector_cell(spec, ::Nothing, x, y, z)
-    horizontal = hypot(x, y)
-    lat = atand(z, horizontal)
-    lon = iszero(horizontal) ? zero(x) : atand(y, x)
-    return _spherical_cell(spec, lat, lon)
-end
+const _SPHERICAL_SAMPLES_PER_CELL = 4
+const _SPHERICAL_MIN_OVERSAMPLE = 4
+const _SPHERICAL_MAX_OVERSAMPLE = 24
 
-@inline function _unit_vector_cell(spec, locator, x, y, z)
-    row, col = divrem(locate(locator, x, y, z) - 1, first(accumulator_shape(spec)))
-    return col + 1, row + 1
+@inline function _unit_vector_samples(corners, cell_spacing::F) where {F}
+    max_chord_squared = zero(F)
+    @inbounds for i in 1:length(corners), j in (i + 1):length(corners)
+        a, b = corners[i], corners[j]
+        chord_squared = abs2(a[1] - b[1]) + abs2(a[2] - b[2]) + abs2(a[3] - b[3])
+        max_chord_squared = max(max_chord_squared, chord_squared)
+    end
+    span = F(2) * asin(min(one(F), _spherical_sqrt(max_chord_squared) / F(2)))
+    samples = Base.unsafe_trunc(Int, ceil(F(_SPHERICAL_SAMPLES_PER_CELL) * span / cell_spacing))
+    return clamp(samples, _SPHERICAL_MIN_OVERSAMPLE, _SPHERICAL_MAX_OVERSAMPLE)
 end
 
 """
@@ -256,14 +214,15 @@ buffer `cells`, sized for the largest sample count.
 function _accumulate_unit_vector_footprints!(data::AbstractArray{T,3}, m2, weights,
                                              compute_std, spec::AbstractSphericalGridSpec,
                                              lat_c, lon_c, values, n_override, cells) where {T}
-    locator = _device_locator(spec)
+    locator = _device_locator(spec, Float64)
     cell_spacing = _device_cell_spacing(locator, Float64)
+    n_cols = size(weights, 1)
     n_pixels, n_vars = size(values)
     @inbounds for i in 1:n_pixels
-        a = _sphere_unit_vector(lat_c[i, 1], lon_c[i, 1])
-        b = _sphere_unit_vector(lat_c[i, 2], lon_c[i, 2])
-        c = _sphere_unit_vector(lat_c[i, 3], lon_c[i, 3])
-        d = _sphere_unit_vector(lat_c[i, 4], lon_c[i, 4])
+        a = _sphere_unit_vector(spec, lat_c[i, 1], lon_c[i, 1])
+        b = _sphere_unit_vector(spec, lat_c[i, 2], lon_c[i, 2])
+        c = _sphere_unit_vector(spec, lat_c[i, 3], lon_c[i, 3])
+        d = _sphere_unit_vector(spec, lat_c[i, 4], lon_c[i, 4])
         corners, normal = _sphere_ordered_corners(a, b, c, d)
         n = n_override === nothing ? _unit_vector_samples(corners, cell_spacing) : n_override
         n_samples = n^2
@@ -271,7 +230,7 @@ function _accumulate_unit_vector_footprints!(data::AbstractArray{T,3}, m2, weigh
             left, right = _sphere_subpoint_edges(corners, j, n)
             for k in 1:n
                 x, y, z = _sphere_subpoint(left, right, normal, k, n)
-                cells[k + (j - 1) * n] = _unit_vector_cell(spec, locator, x, y, z)
+                cells[k + (j - 1) * n] = locate(locator, x, y, z)
             end
         end
         # Sort just this footprint's cell indices in place so repeats are
@@ -284,9 +243,10 @@ function _accumulate_unit_vector_footprints!(data::AbstractArray{T,3}, m2, weigh
             while next_hit <= n_samples && cells[next_hit] == cell
                 next_hit += 1
             end
-            col, row = cell
+            row, col = divrem(cell - 1, n_cols)
             weight = T((next_hit - first_hit) / n_samples)
-            _welford_update!(data, m2, weights, compute_std, col, row, values, i, n_vars, weight)
+            _welford_update!(data, m2, weights, compute_std, col + 1, row + 1,
+                             values, i, n_vars, weight)
             first_hit = next_hit
         end
     end

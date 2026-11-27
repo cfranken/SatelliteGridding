@@ -84,7 +84,7 @@ close(ds)
 | `compute_std` | `false` | Also compute per-cell standard deviation |
 | `outfile` | `"gridded_output.nc"` | Output NetCDF file path |
 | `backend` | `nothing` (sequential) | Compute backend — `nothing`, `CPU()`, `CUDABackend()`, `MetalBackend()`, or another compatible KernelAbstractions backend |
-| `accumulator_precision` | Backend default | KA weights and daily moments for rectangular and HEALPix grids. Float64 on KA CPU and CUDA, Float32 on Metal. |
+| `accumulator_precision` | Backend default | KA weights and daily moments. Float64 on KA CPU and CUDA, Float32 on Metal. |
 
 ### Center-coordinate gridding (MODIS)
 
@@ -280,14 +280,17 @@ decoded before L2 science values and quality filters are used.
 To archive Float64 results exactly, accumulate in Float64, set
 `precision = "float64"`, and set `significant_digits_mean` and
 `significant_digits_std` to `"none"` for L2 or `significant_digits_center`
-to `"none"` for center mode. In Julia, pass Float64 bounds and spacings to
-`GridSpec` or use `T=Float64` with `CubedSphereGridSpec` or sequential
-`HEALPixGridSpec`. The CLI creates Float32 grids. Rectangular and HEALPix L2
-use Float64 accumulators by default on `--backend cpu` and `--backend cuda`.
-Sequential rolling L2 also accumulates daily moments in Float64. Metal uses
-Float32 accumulators. Use the Float64 configuration for aggregation inputs,
-including HEALPix 4:1 coarsening and regridding. At fine `nside`, quantization
-of nearly equal child means can dominate a small parent standard deviation.
+to `"none"` for center mode. For tiled sequential L2, pass Float64 bounds and
+spacings to `GridSpec` or set `T=Float64` on `CubedSphereGridSpec` or
+`HEALPixGridSpec` in Julia. KA CPU and CUDA use Float64 accumulators by default,
+and sequential rolling L2 accumulates daily moments in Float64. Metal uses
+Float32 accumulators. The CLI creates Float32 grids. A `CubedSphereGridSpec`
+with `T=Float32` also computes cell centre and corner coordinates in Float32
+before widening them to Float64 for NetCDF. Set `T=Float64` to compute and
+write those coordinates in double precision. Use the Float64 configuration
+for aggregation inputs, including HEALPix 4:1 coarsening and regridding. At
+fine `nside`, quantization of nearly equal child means can dominate a small
+parent standard deviation.
 
 Zarr output requires `precision = "float32"` and ignores `significant_digits_*`.
 It narrows science values and standard errors to Float32 and rounds weights
@@ -411,7 +414,7 @@ The package supports sequential gridding plus KernelAbstractions backends:
 | KA CUDA | `--backend cuda` | `backend=resolve_backend("cuda")` or `CUDABackend()` | NVIDIA GPU pipeline. Requires CUDA.jl. |
 | KA Metal | `--backend metal` | `backend=resolve_backend("metal")` or `MetalBackend()` | Apple GPU pipeline. Requires Metal.jl on macOS/Apple Silicon. |
 
-Rectangular and HEALPix KA gridding use reference-shifted sums. The replay pass
+Rectangular and spherical KA gridding use reference-shifted sums. The replay pass
 refines the mean for Float32 accumulators and computes the standard deviation
 when requested with `compute_std=true` (`--compSTD`). KA CPU and CUDA default
 to Float64 accumulators, and Metal uses Float32. Select the precision
@@ -433,7 +436,8 @@ grid_l2(config, grid_spec, time_spec;
 
 ## How oversampling works
 
-Quadrilateral satellite footprints are defined by 4 corner lat/lon pairs:
+On rectangular grids, oversampling uses the four corner latitude/longitude pairs
+of each quadrilateral footprint.
 
 1. Corners are sorted into counter-clockwise (CCW) order
 2. Two opposite edges are subdivided into n equally-spaced points
@@ -441,11 +445,16 @@ Quadrilateral satellite footprints are defined by 4 corner lat/lon pairs:
 4. Result: n×n sub-pixel positions filling the footprint interior
 5. Each sub-pixel is mapped to a grid cell via `floor()` and contributes weight `1/n²`
 
-**Fast path**: When all 4 corners fall in the same grid cell, the full weight goes to that cell (no sub-pixel computation).
+When all four corners fall in the same rectangular cell, it receives the full
+weight immediately. Otherwise, adaptive subdivision targets about three samples
+per cell width, with `n` clamped to `2:20`.
 
-**Adaptive n**: By default, n is auto-computed from the footprint-to-grid-cell size ratio (~3 sub-pixels per grid cell width, clamped to [2, 20]). Override with `n_oversample=10` or `--nOversample 10`.
-
-**Corner ordering**: Different satellite products store corners in different orders. The package normalizes them to CCW order automatically using a 5-comparator sorting network.
+On cubed-sphere and HEALPix grids, all quadrilateral footprints are subdivided
+on unit vectors. The adaptive rule uses four samples per mean cell spacing
+along the longest corner-to-corner span, with `n` clamped to `4:24`. See the
+[cubed-sphere](docs/src/cubed_sphere.md) and [HEALPix](docs/src/healpix.md) pages.
+Use `n_oversample=10` or `--nOversample 10` to set a fixed count on either grid
+type.
 
 For circular products such as GOSAT, use `CircularFootprintGridding` or
 `--footprint circle`. The footprint can be represented by four bounding

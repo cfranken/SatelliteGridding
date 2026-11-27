@@ -59,9 +59,8 @@ function _l2_payload_hash(path)
 end
 
 @testset "L2 NetCDF payload bit regressions" begin
-    # Unchanged cases retain their pre-cleanup hashes. Centered rolling
-    # and rectangular KA precision changes use the new payload hashes. The fixture
-    # includes a QA-rejected file, empty days, overlapping footprints, and
+    # Cube hashes cover unit-vector subdivision. The fixture includes a
+    # QA-rejected file, empty days, overlapping footprints, and
     # polar and seam geometry. Hash the on-disk values without CF decoding.
     cases = (
         ("rect", Float32, "quad", false, true, "float32") => "6a1ff8b417621839f23276c05541ff190839722c6feab688ec7c2b8fbf88cf04",
@@ -71,9 +70,9 @@ end
         ("rect-ka", Float32, "quad", true, false, "float64") => "b58c90024ec7e28fa3b95a485f13147aa6c58faba6da794b80e4089fbbdf671e",
         ("rect-ka", Float32, "circle", true, false, "float64") => "4775603ab1432585b0c466ca92abe2b7e165d30bc7f48371239b5e219b23550c",
         ("rect-ka", Float64, "radius", false, false, "float64") => "9a821100987a1f6e46fbab091a2939da5b89033a23b6730d20f88899fd0d382d",
-        ("cube", Float32, "quad", false, true, "float32") => "16d93f166cde802d15813d1dbdd9e6faa3a48c3b327ff1c728b4b595fcd2a05f",
+        ("cube", Float32, "quad", false, true, "float32") => "9cc05dfffc56f5dd181b3897d71497ebf07985f75d8f5f4ce1108e8e2c2a7374",
         ("cube", Float32, "quad", true, true, "float32") => "621794d024b52d9b211dda3b025e91f142f10cf976d11da81671a852695850d2",
-        ("cube-eq", Float64, "quad", false, false, "float64") => "f6cfca012ef16a7f27703b268fc27a367c8256c480f41afe13322b0e8cf092dc",
+        ("cube-eq", Float64, "quad", false, false, "float64") => "9fa7ed809e6cac9c6804debf195c4b3642db091585027d1428209cb514c5c30b",
         ("healpix", Float32, "quad", false, true, "float64") => "060b7db41885239bd28fa90ef6237011766657c890d740e8cba8298427ab46bf",
         ("healpix", Float64, "quad", true, false, "float32") => "aa03ff9e3216e0baebe87b0c75bbbef4461e9772c985ef2fe040bb663700174b",
         ("healpix", Float32, "quad", true, true, "float32") => "00033007e3941cbeeb97e9b60a9cc60f5b20bcd4409fd672457585ad3e15eede",

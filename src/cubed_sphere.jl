@@ -210,10 +210,10 @@ end
 
 @inline function _rotate_z_lon_offset(x::FT, y::FT, z::FT, offset_deg::Real) where {FT}
     θ = FT(deg2rad(offset_deg))
-    c = cos(θ)
-    s = sin(θ)
-    return (c * x - s * y, s * x + c * y, z)
+    return _rotate_cube_z(x, y, z, cos(θ), sin(θ))
 end
+
+@inline _rotate_cube_z(x, y, z, c, s) = (c * x - s * y, s * x + c * y, z)
 
 @inline function _edge_tangent_coordinate(::EquiangularGnomonic, s::Real, Nc::Int,
                                           ::Type{FT}) where {FT}
@@ -385,27 +385,30 @@ Honors the definition's panel convention, coordinate law, and longitude offset.
 """
 @inline function lonlat_to_panel_xy(def::CubedSphereDefinition, Nc::Int,
                                     lon_deg::Real, lat_deg::Real, ::Type{FT}) where {FT}
-    coslat = cosd(FT(lat_deg))
-    x = coslat * cosd(FT(lon_deg))
-    y = coslat * sind(FT(lon_deg))
-    z = sind(FT(lat_deg))
+    x, y, z = _cube_unit_vector(FT(lat_deg), FT(lon_deg))
+    panel, s, t = _xyz_to_panel_xy(def, Nc, x, y, z)
+    upper = prevfloat(FT(Nc + 1))
+    return (panel, clamp(s, one(FT), upper), clamp(t, one(FT), upper))
+end
 
+@inline function _cube_unit_vector(lat, lon)
+    cos_lat = cosd(lat)
+    return (cos_lat * cosd(lon), cos_lat * sind(lon), sind(lat))
+end
+
+@inline function _xyz_to_panel_xy(def::CubedSphereDefinition, Nc::Int, x, y, z)
     offset = longitude_offset_deg(def)
     if !iszero(offset)
         x, y, z = _rotate_z_lon_offset(x, y, z, -offset)
     end
+    return _xyz_to_panel_xy(coordinate_law(def), panel_convention(def), Nc, x, y, z)
+end
 
+@inline function _xyz_to_panel_xy(law, convention, Nc::Int, x::FT, y::FT, z::FT) where {FT}
     ξg, ηg, gpanel = _gnomonic_inverse(x, y, z)
-    ξ, η, panel = _undo_panel_convention(panel_convention(def), ξg, ηg, gpanel)
-
-    law = coordinate_law(def)
+    ξ, η, panel = _undo_panel_convention(convention, ξg, ηg, gpanel)
     s = _inverse_edge_tangent_coordinate(law, ξ, Nc, FT)
     t = _inverse_edge_tangent_coordinate(law, η, Nc, FT)
-
-    s_max = prevfloat(FT(Nc + 1))
-    t_max = prevfloat(FT(Nc + 1))
-    s = clamp(s, one(FT), s_max)
-    t = clamp(t, one(FT), t_max)
     return (panel, s, t)
 end
 
@@ -498,17 +501,37 @@ Project `(lat, lon)` (degrees) onto continuous indices in the **folded**
     return (col, row)
 end
 
-# Project (lat, lon) to integer folded cell indices on a cubed-sphere grid,
-# clamped defensively to the accumulator bounds.
-@inline function _spherical_cell(spec::CubedSphereGridSpec{T}, lat::Real, lon::Real) where {T}
-    col_f, row_f = to_fractional_index(spec, T(lat), T(lon))
-    col = clamp(floor(Int, col_f), 1, spec.Nc)
-    row = clamp(floor(Int, row_f), 1, 6 * spec.Nc)
-    return col, row
+struct _CubedSphereLocator{L,P,F}
+    Nc::Int
+    law::L
+    convention::P
+    cos_offset::F
+    sin_offset::F
 end
 
-# Keep the original cubed-sphere subpixel rounding for Float32 accumulators.
-_spherical_subpixel_type(::CubedSphereGridSpec{T}) where {T} = T
+function _device_locator(spec::CubedSphereGridSpec, ::Type{F}=Float64) where {F}
+    def = spec.definition
+    angle = deg2rad(-longitude_offset_deg(def))
+    # Compute the rotation accurately on the host, in the device's precision
+    # after rounding each coefficient once.
+    return _CubedSphereLocator(spec.Nc, coordinate_law(def), panel_convention(def),
+                              F(cos(angle)), F(sin(angle)))
+end
+
+@inline function locate(locator::_CubedSphereLocator{L,P,F}, x::F, y::F, z::F) where {L,P,F}
+    if !iszero(locator.sin_offset) || !isone(locator.cos_offset)
+        x, y, z = _rotate_cube_z(x, y, z, locator.cos_offset, locator.sin_offset)
+    end
+    Nc = locator.Nc
+    panel, s, t = _xyz_to_panel_xy(locator.law, locator.convention, Nc, x, y, z)
+    # Clamp after truncation to keep panel-edge points inside the selected face.
+    col = clamp(Base.unsafe_trunc(Int, s), 1, Nc)
+    row = clamp(Base.unsafe_trunc(Int, t), 1, Nc)
+    return col + Nc * (row - 1 + Nc * (panel - 1))
+end
+
+@inline _device_cell_spacing(locator::_CubedSphereLocator, ::Type{F}) where {F} =
+    sqrt(F(4pi) / F(6 * locator.Nc^2))
 
 # Whole-sphere grid: every finite (lat, lon) lands in exactly one cell.
 @inline in_bounds(::CubedSphereGridSpec, lat::Real, lon::Real) =

@@ -41,7 +41,7 @@ end
 function new_accumulator(spec::AbstractGridSpec{T}, ::Nothing, ::Nothing, n_vars, compute_std,
                          step=nothing) where {T}
     # A Float64 merge cannot recover variation already lost in a day's mean
-    # or in the input values. Keep tiled Welford and geometry in grid precision.
+    # or in the input values. Keep tiled Welford accumulation in grid precision.
     A = step === nothing ? T : Float64
     shape = accumulator_shape(spec)
     data = zeros(A, shape..., n_vars)
@@ -156,30 +156,15 @@ function _accumulate_rectangular!(acc::WelfordAccumulator, ::Type, ilat, ilon,
                                    centers..., ilat, ilon, values, n_pixels, n_vars, n)
 end
 
-# Spherical grids locate each subpoint independently. Their subdivision
-# trait selects the geometry and sampling buffers.
 function _accumulate!(acc::WelfordAccumulator, spec::AbstractSphericalGridSpec, obs, method::SubpixelGridding)
-    _accumulate_l2_spherical!(_spherical_subdivision(spec), acc.data, acc.m2,
-                              acc.weights, acc.m2 !== nothing, spec, obs, method.n_oversample)
+    _accumulate_l2_spherical!(acc.data, acc.m2, acc.weights, acc.m2 !== nothing,
+                              spec, obs, method.n_oversample)
 end
 
-function _accumulate_l2_spherical!(::Val{:lonlat}, data, m2, weights, compute_std,
+function _accumulate_l2_spherical!(data, m2, weights, compute_std,
                                    spec, observations, n_override)
-    n = n_override === nothing ? 4 : n_override
-    points = zeros(_spherical_subpixel_type(spec), n, n, 2)
-    lats0, lons0, lats1, lons1 = zeros(n), zeros(n), zeros(n), zeros(n)
-    values = observations.values
-    n_pixels, n_vars = size(values)
-    _accumulate_spherical_footprint!(data, m2, weights, compute_std, spec,
-                                     observations.lat_bounds, observations.lon_bounds,
-                                     values, n_pixels, n_vars, n,
-                                     points, lats0, lons0, lats1, lons1)
-end
-
-function _accumulate_l2_spherical!(::Val{:unit_vectors}, data, m2, weights, compute_std,
-                                   spec, observations, n_override)
-    capacity = n_override === nothing ? _HEALPIX_MAX_OVERSAMPLE : n_override
-    cells = Vector{Tuple{Int,Int}}(undef, capacity^2)
+    capacity = n_override === nothing ? _SPHERICAL_MAX_OVERSAMPLE : n_override
+    cells = Vector{Int}(undef, capacity^2)
     _accumulate_unit_vector_footprints!(data, m2, weights, compute_std, spec,
                                        observations.lat_bounds, observations.lon_bounds,
                                        observations.values, n_override, cells)
@@ -209,12 +194,12 @@ function _accumulate_ka_pass!(acc::RectKAAccumulator, spec::RectangularGridSpec{
 end
 
 function _accumulate_ka_pass!(acc::SphericalKAAccumulator, spec, obs, method, data, pass)
-    _accumulate_spherical_pass!(acc, obs, method.n_oversample, data, pass)
+    _accumulate_spherical_pass!(acc, spec, obs, method.n_oversample, data, pass)
 end
 
-function _accumulate_spherical_pass!(acc, obs, n_override, data, pass)
+function _accumulate_spherical_pass!(acc, spec, obs, n_override, data, pass)
     (; backend, weights, reference) = acc.moments
-    _accumulate_spherical_batch!(backend, data, weights, pass, acc.options.locator,
+    _accumulate_spherical_batch!(backend, data, weights, pass, spec, acc.options.locator,
         acc.options.geometry_precision, obs.lat_bounds, obs.lon_bounds, obs.values,
         n_override, reference, acc.host_batch)
 end

@@ -10,8 +10,10 @@ spatial information.
 
 `SatelliteGridding.jl` uses **sub-pixel oversampling** to properly distribute each
 observation across the grid cells it covers. The default path treats footprints as
-quadrilaterals; `CircularFootprintGridding` treats the four coordinates as a
+quadrilaterals. `CircularFootprintGridding` treats the four coordinates as a
 circular-footprint bounding box or edge points.
+
+The following three steps describe quadrilateral subdivision on rectangular grids.
 
 ### Step 1: Corner Sorting (CCW)
 
@@ -64,6 +66,17 @@ sub-pixel computation needed).
 **Skip path**: If the footprint's longitude extent exceeds `n` grid cells,
 it's too wide for meaningful oversampling and is skipped.
 
+### Spherical Footprints
+
+Cubed-sphere and HEALPix grids convert the corners to unit vectors and order
+them in a local tangent plane. Every footprint is sampled at the midpoints of a
+bilinear `n × n` grid, and each interpolated vector is normalized and located on
+the sphere. A cell hit by `k` samples gets one update with weight `k/n²`.
+Automatic subdivision uses `n = clamp(ceil(4 L_max / Δ), 4, 24)`, where
+`L_max` is the longest great-circle span between corners and `Δ` is the mean
+cell spacing. See the [cubed-sphere](cubed_sphere.md) and [HEALPix](healpix.md)
+pages for geometry and weighting details.
+
 ### Circular Footprints
 
 For circular products such as GOSAT, the footprint extent can come from four
@@ -103,12 +116,13 @@ backends. A footprint contributes `k / inside_count` to a cell with `k` hits.
 The denominator counts all samples inside the inferred circle or ellipse.
 Out-of-grid samples are dropped without renormalizing the remaining weights.
 
-### Choosing `n`
+### Choosing `n` on Rectangular Grids
 
-The oversampling factor `n` is auto-computed if not specified:
+With automatic oversampling, each batch uses the median of its footprints'
+larger latitude or longitude extent measured in grid cells.
 
 ```
-n = clamp(ceil(footprint_extent / cell_size × 3), 2, 20)
+n = clamp(ceil(3 × median_extent), 2, 20)
 ```
 
 This aims for ~3 sub-pixels per grid cell width. Typical values:

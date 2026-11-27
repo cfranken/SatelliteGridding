@@ -40,7 +40,7 @@ function _healpix_footprint_weights(nside, lon, lat, n_override)
     weights = spzeros(prod(shape))
     observations = (lat_bounds=reshape(collect(lat), 1, 4),
                     lon_bounds=reshape(collect(lon), 1, 4), values=ones(1, 1))
-    SatelliteGridding._accumulate_l2_spherical!(SatelliteGridding._spherical_subdivision(spec),
+    SatelliteGridding._accumulate_l2_spherical!(
         data, nothing, reshape(weights, shape), false, spec, observations, n_override)
     return weights
 end
@@ -53,20 +53,18 @@ function _healpix_hot_loop_allocations(::Type{T}, n_override=nothing) where {T}
     lat = Matrix{T}(repeat(Int16[-4 -4 4 4], 3, 1))
     capacity = something(n_override, 24)
     values = ones(Float32, 3, 1)
-    cells = Vector{Tuple{Int,Int}}(undef, capacity^2)
+    cells = Vector{Int}(undef, capacity^2)
     args = (data, m2, weights, true, spec, lat, lon, values, n_override, cells)
     SatelliteGridding._accumulate_unit_vector_footprints!(args...)
     return @allocated SatelliteGridding._accumulate_unit_vector_footprints!(args...)
 end
 
 struct _HemisphereTestGrid <: AbstractSphericalGridSpec{Float32} end
-struct _LonLatDeviceTestGrid <: AbstractSphericalGridSpec{Float32} end
+struct _NonBitsLocatorTestGrid <: AbstractSphericalGridSpec{Float32} end
 struct _HemisphereTestLocator end
-SatelliteGridding._device_locator(::_HemisphereTestGrid) = _HemisphereTestLocator()
-SatelliteGridding._device_locator(::_LonLatDeviceTestGrid) = _HemisphereTestLocator()
-SatelliteGridding._spherical_subdivision(::_HemisphereTestGrid) = Val(:unit_vectors)
+SatelliteGridding._device_locator(::_HemisphereTestGrid, ::Type{F}) where {F} = _HemisphereTestLocator()
+SatelliteGridding._device_locator(::_NonBitsLocatorTestGrid, ::Type) = [_HemisphereTestLocator()]
 @inline SatelliteGridding.locate(::_HemisphereTestLocator, x, y, z) = z < 0 ? Int32(1) : Int32(2)
-SatelliteGridding._spherical_cell(::_HemisphereTestGrid, lat, lon) = (1, lat < 0 ? 1 : 2)
 SatelliteGridding.grid_shape(::_HemisphereTestGrid) = (1, 2)
 SatelliteGridding._output_spatial_shape(::_HemisphereTestGrid) = (2,)
 SatelliteGridding.payload_dims(::_HemisphereTestGrid) = ("hemisphere",)
@@ -142,11 +140,10 @@ end
         @test accumulator_shape(spec) == (2048^2, 12)
         @test spec.level == 11
         @test SatelliteGridding._storage_kwargs(NetCDFOptions(), spec).chunksizes == [2^20, 1]
-        linear_index = LinearIndices(accumulator_shape(spec))
+        locator = SatelliteGridding._device_locator(spec)
         for pix in rand(rng, 0:(nside2npix(spec.nside) - 1), 12)
             lon, lat = pix2ang_nest(spec.nside, pix)
-            col, row = SatelliteGridding._spherical_cell(spec, lat, lon)
-            @test linear_index[col, row] == pix + 1
+            @test SatelliteGridding.locate(locator, _healpix_unit_vector(lon, lat)...) == pix + 1
         end
     end
 
@@ -216,7 +213,7 @@ end
             shape = accumulator_shape(spec)
             data, m2, weights = zeros(T, shape..., 1), zeros(T, shape..., 1), zeros(T, shape)
             SatelliteGridding._accumulate_l2_spherical!(
-                SatelliteGridding._spherical_subdivision(spec), data, m2, weights,
+                data, m2, weights,
                 true, spec, observations, n_override)
             @test sum(weights) === T(n_footprints)
             @test weights[1, 1] === T(n_footprints)
@@ -453,9 +450,10 @@ end
     end
 
     @testset "Minimal spherical grid can write NetCDF" begin
+        @test resolve_backend("cpu"; grid_spec=_HemisphereTestGrid()) isa CPU
         for backend in ("cpu", "cuda", "metal")
-            @test_throws "requires _spherical_subdivision(spec) = Val(:unit_vectors)" resolve_backend(
-                backend; grid_spec=_LonLatDeviceTestGrid())
+            @test_throws "must be an isbits locator" resolve_backend(
+                backend; grid_spec=_NonBitsLocatorTestGrid())
         end
         mktempdir() do dir
             _accuracy_input(joinpath(dir, "demo_2020-01-01.nc"), [(15.0, 16.0, -2.0, 2.0)], Float32[10])
@@ -466,8 +464,8 @@ end
             date = DateTime(2020, 1, 1)
             times = TimeSpec(date, date, Day(1))
             output = joinpath(dir, "demo.nc")
-            @test_throws "requires _spherical_subdivision(spec) = Val(:unit_vectors)" grid_l2(
-                config, _LonLatDeviceTestGrid(), times; backend=CPU(), outfile=output)
+            @test_throws "must be an isbits locator" grid_l2(
+                config, _NonBitsLocatorTestGrid(), times; backend=CPU(), outfile=output)
             for backend in (nothing, resolve_backend("cpu"))
                 grid(config, _HemisphereTestGrid(), times; backend, outfile=output, progress=false)
                 Dataset(output) do ds

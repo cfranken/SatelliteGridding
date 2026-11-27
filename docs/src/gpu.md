@@ -62,14 +62,14 @@ uses a separate index kernel that masks samples outside the inferred circle or
 ellipse before scatter accumulation. Both footprints support `compute_std=true`
 (`--compSTD`) on KA CPU, CUDA, and Metal in tiled and rolling runs.
 
-For both rectangular and HEALPix grids, set `accumulator_precision=Float32`
+For rectangular, cubed-sphere, and HEALPix grids, set `accumulator_precision=Float32`
 or `--accumulator-precision float32` to select single precision for weights,
 shifted sums, and daily moments. KA CPU and CUDA default to Float64. Metal
 requires Float32 and rejects an explicit Float64 setting.
 
-### HEALPix
+### Spherical grids
 
-HEALPix supports quadrilateral Level-2 footprints on `cpu`, `cuda`, and
+HEALPix and cubed-sphere grids support quadrilateral Level-2 footprints on `cpu`, `cuda`, and
 `metal`, including standard deviations and centered rolling windows.
 
 ```julia
@@ -84,7 +84,11 @@ julia --project=. bin/grid.jl l2 --config examples/tropomi_sif.toml \
     --compSTD -o healpix.nc
 ```
 
-HEALPix geometry defaults to `Float64` on CUDA and KA CPU. To trade a small
+For the cube, pass `CubedSphereGridSpec(Nc=360)` in Julia or use
+`--gridType cs --Nc 360` on the CLI. See [cubed-sphere precision](cubed_sphere.md#backends-and-precision)
+for measured cell-assignment differences.
+
+Spherical geometry defaults to `Float64` on CUDA and KA CPU. To trade a small
 number of cell-assignment differences near edges for potentially faster
 execution, pass `geometry_precision=Float32` or `--geometry-precision float32`.
 This setting controls the adaptive sample count, unit-vector interpolation,
@@ -131,7 +135,7 @@ count.
 
 ### Spherical grids
 
-HEALPix filters invalid observations and converts the four corners to
+Spherical gridding filters invalid observations and converts the four corners to
 Cartesian unit vectors on the host. The geometry step orders the corners in
 the tangent plane, selects the sample count for each footprint, and locates
 the bilinear subpoints directly from their normalized vectors. A private
@@ -187,16 +191,9 @@ Float32 precision can still absorb an overlap weight smaller than half an
 ulp of the accumulated cell weight. Very small squared deviations can
 underflow in Float32.
 
-A new spherical grid opts in by defining
-`SatelliteGridding._spherical_subdivision(spec) = Val(:unit_vectors)` so
-the sequential path uses the same subdivision, and by defining
-`SatelliteGridding._device_locator(spec)` to return an isbits value and
-`SatelliteGridding.locate(locator, x, y, z)` to return the one-based linear
-accumulator index of a normalized vector. The locator must use device-safe
-operations for both geometry precisions the grid supports. Implement
-`SatelliteGridding._device_cell_spacing(locator, F)` to enable adaptive
-subdivision with angular cell spacing in radians. The default uses four
-samples per side. The cubed sphere uses the sequential CPU backend.
+A new spherical grid implements the [`AbstractSphericalGridSpec`](@ref)
+locator for use with both sequential and KA subdivision. Provide angular
+cell spacing in radians to enable adaptive sampling.
 
 ## Boundary Behavior and Geometry Precision
 
@@ -284,11 +281,12 @@ For a typical TROPOMI file (~500k soundings, n=10, 6 variables) in Float64:
 - Values: ~24 MB
 - Grid (360×180): ~3.6 MB for the mean and ~6.2 MB extra for standard deviation
 
-The HEALPix path uploads `n_fp × 4 × 3` corner components in the geometry
+The spherical path uploads `n_fp × 4 × 3` corner components in the geometry
 precision and `n_fp × n_vars` values in the accumulator precision per file.
-Dense accumulators dominate GPU memory for fine HEALPix grids. The weights
-and first-pass sums use `12 × nside² × (n_vars + 1) × sizeof(A)` bytes,
-where `A` is the accumulator precision. Float64 replay reuses the two
+Dense accumulators dominate GPU memory for fine spherical grids. The weights
+and first-pass sums use `n_cells × (n_vars + 1) × sizeof(A)` bytes,
+with `n_cells = 12 × nside²` for HEALPix and `6 × Nc²` for the cube.
+Float64 replay reuses the two
 observed-bound buffers for deviations. Float32 replay retains the two
 bound buffers and uses a separate buffer for linear deviations and another
 for squared deviations when computing standard deviation. At `nside=2048`

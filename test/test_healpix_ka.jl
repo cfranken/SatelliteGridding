@@ -20,7 +20,7 @@ function _healpix_accumulator_hash(T, nside, n)
     shape = accumulator_shape(spec)
     data, m2, weights = zeros(T, shape..., 2), zeros(T, shape..., 2), zeros(T, shape)
     observations = (lat_bounds=lat, lon_bounds=lon, values=values)
-    SatelliteGridding._accumulate_l2_spherical!(Val(:unit_vectors),
+    SatelliteGridding._accumulate_l2_spherical!(
         data, m2, weights, true, spec, observations, n)
     bits = reinterpret(T == Float32 ? UInt32 : UInt64, vcat(vec(data), vec(m2), vec(weights)))
     return bytes2hex(sha256(reinterpret(UInt8, htol.(bits))))
@@ -360,9 +360,9 @@ function _test_healpix_tiny_weight(backend, accumulator_precision)
         for rolling in (false, true)
             acc = S.new_accumulator(spec, backend, options, 1, true)
             bounds = S._start_pass!(acc)
-            S._accumulate_spherical_pass!(acc, obs, n, acc.moments.data, bounds)
+            S._accumulate_spherical_pass!(acc, spec, obs, n, acc.moments.data, bounds)
             S._finish_ka_pass!(acc.moments, bounds, rolling) do replay
-                S._accumulate_spherical_pass!(acc, obs, n, S._ka_m2(acc.moments.replay), replay)
+                S._accumulate_spherical_pass!(acc, spec, obs, n, S._ka_m2(acc.moments.replay), replay)
             end
             mean, std, weights = if rolling
                 window = S._window_moments(acc)
@@ -435,8 +435,7 @@ function _healpix_test_precision(backend)
             left, right = S._sphere_subpoint_edges(corners, j, n)
             for i in 1:n
                 x, y, z = S._sphere_subpoint(left, right, normal, i, n)
-                col, row = S._unit_vector_cell(spec, locator, x, y, z)
-                ref[i + (j - 1) * n, k] = col + (row - 1) * nside^2
+                ref[i + (j - 1) * n, k] = S.locate(locator, x, y, z)
             end
         end
     end

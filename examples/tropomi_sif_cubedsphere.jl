@@ -26,7 +26,6 @@ time_spec = TimeSpec(
     Dates.Day(16),
 )
 
-# Cubed-sphere gridding currently runs on the sequential CPU path only.
 grid(config, grid_spec, time_spec, SubpixelGridding();
      keep_going = true,
      outfile = "tropomi_sif_c24_2020-07-01.nc")

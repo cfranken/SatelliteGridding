@@ -20,12 +20,14 @@ GEOS-IT / GEOS-FP and by GCHP when driven by GMAO meteorology:
 An [`EquiangularCubedSphereDefinition`](@ref) (classic tan-spaced equiangular
 gnomonic, no offset) is also available for synthetic targets.
 
-A grid is named `C<Nc>`, where `Nc` is the number of cells per panel edge; the
-cube has `6·Nc²` cells total. For example, `Nc = 360` is **C360** (~25 km).
+A grid is named `C<Nc>`, where `Nc` is the number of cells per panel edge.
+The cube has `6·Nc²` cells total. For example, `Nc = 360` is **C360** (~25 km).
+Input geodetic latitudes are used directly as spherical latitudes, as on
+the HEALPix grid.
 
 !!! note "Projection provenance"
     The closed-form gnomonic projection and its inverse (`lonlat_to_panel_xy`)
-    are ported verbatim from the AtmosTransportModel package
+    are adapted from the AtmosTransportModel package
     (`src/Grids/CubedSphereMesh.jl`, commit `6522d85`). See
     [`src/cubed_sphere.jl`](https://github.com/cfranken/SatelliteGridding/blob/main/src/cubed_sphere.jl)
     for the full attribution.
@@ -67,23 +69,61 @@ NC=360 JOBS=8 bash bin/run_tropomi_c360.sh
 
 ## How footprints are gridded
 
-Because the lon/lat → cube map is nonlinear and discontinuous across panel
-edges, footprints are subdivided in **lon/lat space** (not in fractional-index
-space as for rectangular grids). Each footprint corner quadrilateral is split
-into `n × n` sub-points, each projected independently onto its `(panel, cell)`
-via `lonlat_to_panel_xy`, contributing weight `1/n²`. A footprint straddling a
-cube edge therefore correctly deposits weight onto both panels. Corner
-longitudes are unwrapped to a common branch first so the subdivision is sane for
-near-pole footprints that cross the ±180° seam.
+The cube and [HEALPix](healpix.md) share the same spherical footprint
+subdivision. The four corners become unit vectors and are ordered in the
+footprint's tangent plane. The sampler evaluates the centres of an `n × n`
+bilinear parameter grid and normalizes each interpolated vector. The cube
+locator projects each sample independently, so the same subdivision works
+across the antimeridian and panel edges and for footprints that enclose a pole.
+A cell hit by `k` samples receives one update with weight `k/n²`, its sampled
+fraction of the footprint's bilinear parameter domain. The weights for each
+valid footprint sum to one. Equal subpoint weights correspond to uniform angular
+sampling within the detector's instantaneous field of view (IFOV). For realistic
+OCO and TROPOMI pushbroom taper of up to about 0.5%, the estimated difference from
+spherical-area cell weights is about 0.1% or less. See the [HEALPix weighting
+discussion](healpix.md) for details.
 
-The default oversampling factor on the cube is a small fixed value (`n = 4`);
-override it with `--nOversample` / `SubpixelGridding(n_oversample=...)`.
+Automatic subdivision chooses `n = clamp(ceil(4 L_max / Δ), 4, 24)` for each
+footprint. Here `L_max` is the largest great-circle distance between any pair of
+corners and `Δ = sqrt(4πR²/(6 Nc²))` is the mean cell spacing on a sphere of
+radius `R`. At high resolution the largest cells have about `4/√3 ≈ 2.31`
+times the area of the smallest on GMAO and `√2 ≈ 1.41` times on equiangular
+grids. The narrowest GMAO corner cells are about `0.74 Δ` wide. Below the cap,
+the nominal sample spacing is at most `Δ/4` along the longest span, giving
+about three samples per narrow corner-cell width. The cap limits `n` to 24
+once `L_max` exceeds `6 Δ`, about 154 km at C360 or 77 km at C720 on a sphere of
+radius 6,371 km. Use `--nOversample` or `SubpixelGridding(n_oversample=...)` to
+set `n` explicitly for wide footprints.
 
-!!! warning "Sequential CPU only"
-    Cubed-sphere gridding currently runs on the sequential CPU path. The
-    KernelAbstractions GPU kernels are 2D-grid-specific; a CS GPU path is a
-    planned follow-up. Passing `--backend cuda/metal/cpu` with `--gridType cs`
-    raises a clear error.
+## Backends and precision
+
+Quadrilateral gridding supports the sequential backend and
+[KernelAbstractions](gpu.md) on KA CPU, CUDA, and Metal, including tiled and
+rolling windows and standard deviation. Select an accelerator with
+`backend=resolve_backend("cuda")` or `--backend cuda`.
+
+Sequential geometry uses Float64. KA CPU and CUDA default to Float64 for both
+geometry and accumulation. Set `geometry_precision` and `accumulator_precision`
+independently in `grid_l2` (CLI `--geometry-precision` and
+`--accumulator-precision`). Metal requires Float32 for both. As on HEALPix,
+Float32 geometry rounds the corner vectors, interpolation and projection.
+In a C720 test with 500,000 uniformly distributed points per definition, the
+Float32 locator changed 0.0030% of GMAO cell assignments and 0.0034% of
+equiangular assignments relative to Float64. A C720 scan of every panel's
+horizontal and vertical grid lines at each cell-edge midpoint found assignment
+changes up to about 1.42 m from a GMAO edge and 0.93 m from an equiangular edge,
+including Float32 rounding of the input unit vectors. The GMAO inverse adds
+opposite-signed terms near one panel edge to compute its fractional index, which
+contributes to the shift. Exact edge and corner ties can choose a different
+incident cell. Footprint interpolation and adaptive sample-count rounding can
+also affect weights close to cell boundaries. At very large `Nc` (around `2^23`
+and above), Float32 fractional cell indices can round by half a cell or more.
+Use Float64 geometry at those resolutions.
+
+The grid's `T` controls the precision of the precomputed cell centre and corner
+coordinates. `CubedSphereGridSpec` with `T=Float32` computes these in Float32
+and widens them to Float64 for NetCDF. Set `T=Float64` for double-precision
+coordinates and for Float64 accumulation in tiled sequential runs.
 
 ## Output layout
 
@@ -97,7 +137,7 @@ Panoply, xarray, and GCHP tooling:
 | Cell centers | 2D `lons(nf, Ydim, Xdim)`, `lats(...)` in degrees |
 | Cell corners | `corner_lons(nf, YCdim, XCdim)`, `corner_lats(...)` |
 | Fake 1D axes | `Xdim`/`Ydim` (degrees, GrADS compatibility); `nf = 1..6` |
-| Counts | `n(time, nf, Ydim, Xdim)` — pixel count per cell |
+| Weights | `n(time, nf, Ydim, Xdim)` stores the sum of fractional footprint weights |
 
 In xarray you can plot a face directly on its 2D coordinates:
 

@@ -40,14 +40,15 @@ function resolve_backend(name::AbstractString; grid_spec=nothing,
     end
     backend in supported_backend_names() ||
         error("Unknown backend '$name'. Use one of: $(join(supported_backend_names(), ", ")).")
-    locator = _validate_ka_grid(grid_spec)
+    _validate_precision_type(geometry_precision, :geometry_precision)
+    _validate_precision_type(accumulator_precision, :accumulator_precision)
+    backend == "metal" && _validate_metal_precision(geometry_precision, accumulator_precision)
+    geometry_type = something(geometry_precision, backend == "metal" ? Float32 : Float64)
+    locator = _validate_ka_grid(grid_spec, geometry_type)
     if grid_spec !== nothing && locator === nothing
         _require_spherical_ka_geometry(geometry_precision)
         grid_spec isa RectangularGridSpec || _require_ka_accumulator(accumulator_precision)
     end
-    _validate_precision_type(geometry_precision, :geometry_precision)
-    _validate_precision_type(accumulator_precision, :accumulator_precision)
-    backend == "metal" && _validate_metal_precision(geometry_precision, accumulator_precision)
     if backend == "cpu"
         return CPU()
     elseif backend == "cuda"
@@ -59,15 +60,12 @@ function resolve_backend(name::AbstractString; grid_spec=nothing,
     end
 end
 
-_validate_ka_grid(spec) = nothing
+_validate_ka_grid(spec, ::Type) = nothing
 
-function _validate_ka_grid(spec::AbstractSphericalGridSpec)
-    locator = _device_locator(spec)
-    locator === nothing &&
-        error("$(typeof(spec)) supports only the sequential CPU path. Omit `backend` or use --backend sequential.")
-    _spherical_subdivision(spec) === Val(:unit_vectors) ||
-        throw(ArgumentError("The device locator for $(typeof(spec)) requires _spherical_subdivision(spec) = Val(:unit_vectors)"))
-    isbits(locator) || throw(ArgumentError("The device locator for $(typeof(spec)) must be isbits"))
+function _validate_ka_grid(spec::AbstractSphericalGridSpec, ::Type{F}) where {F}
+    locator = _device_locator(spec, F)
+    (locator !== nothing && isbits(locator)) ||
+        throw(ArgumentError("The device locator for $(typeof(spec)) must be an isbits locator"))
     return locator
 end
 
@@ -102,9 +100,9 @@ struct _SphericalKAOptions{L,F,A}
     accumulator_precision::Type{A}
 end
 
-function _spherical_ka_options(spec, backend, geometry_precision, accumulator_precision)
-    locator = backend === nothing ? nothing : _validate_ka_grid(spec)
-    if locator === nothing
+function _spherical_ka_options(spec::AbstractSphericalGridSpec, backend,
+                               geometry_precision, accumulator_precision)
+    if backend === nothing
         _require_spherical_ka_geometry(geometry_precision)
         _require_ka_accumulator(accumulator_precision)
         return nothing
@@ -115,10 +113,18 @@ function _spherical_ka_options(spec, backend, geometry_precision, accumulator_pr
     F = something(geometry_precision, default)
     A = something(accumulator_precision, default)
     _validate_ka_precision(backend, F, A)
+    locator = _validate_ka_grid(spec, F)
     return _SphericalKAOptions(locator, F, A)
 end
 
-_ka_options(spec, backend, F, A) = _spherical_ka_options(spec, backend, F, A)
+_ka_options(spec::AbstractSphericalGridSpec, backend, F, A) =
+    _spherical_ka_options(spec, backend, F, A)
+
+function _ka_options(spec, backend, F, A)
+    _require_spherical_ka_geometry(F)
+    _require_ka_accumulator(A)
+    return nothing
+end
 
 function _ka_options(spec::RectangularGridSpec, backend, geometry_precision, accumulator_precision)
     _require_spherical_ka_geometry(geometry_precision)

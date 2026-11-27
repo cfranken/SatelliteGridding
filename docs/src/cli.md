@@ -45,7 +45,7 @@ julia --project=. bin/grid.jl l2 [options]
 | `--footprint` | String | `quad` | Footprint geometry: `quad` or `circle` |
 | `--compSTD` | Flag | false | Compute standard deviation |
 | `--backend` | String | `sequential` | Compute backend: `sequential`, `cpu`, `cuda`, or `metal` |
-| `--geometry-precision` | String | Backend default | HEALPix KA geometry precision, `float32` or `float64` |
+| `--geometry-precision` | String | Backend default | Spherical KA geometry precision, `float32` or `float64` |
 | `--accumulator-precision` | String | `float64` on CUDA and KA CPU, `float32` on Metal | KA precision for weights, sums, deviations, and cached daily moments. Metal rejects `float64`. |
 | `--keepGoing` | Flag | false | Continue after per-file processing errors |
 | `--noProgress` | Flag | false | Don't draw progress bars. By default they're drawn only when stderr is a terminal |
@@ -119,17 +119,16 @@ daily). Consecutive windows overlap, so the time series is smooth; `--dDays` and
 reused across overlapping windows (in-memory day cache), so finer sampling does
 not re-grid the same data. The `time` coordinate holds the window center, and
 every output also carries `window_start`/`window_end` recording the exact
-averaging interval (these clip naturally at the data edges). Rolling mode runs on
-`--backend sequential` on all grids. For rectangular and HEALPix grids,
-`--backend cpu`/`cuda`/`metal` support both the mean and `--compSTD`. Rolling
+averaging interval (these clip naturally at the data edges). All four backends
+support rolling means and `--compSTD` on all three grids. Rolling
 standard deviations merge centered daily moments in Float64.
 
-TROPOMI SIF onto a GEOS/GCHP C360 cubed sphere (sequential CPU only):
+TROPOMI SIF onto a GEOS/GCHP C360 cubed sphere with CUDA:
 
 ```bash
 julia --project=. bin/grid.jl l2 \
     --config examples/tropomi_sif.toml \
-    --gridType cs --Nc 360 \
+    --gridType cs --Nc 360 --backend cuda \
     --startDate 2020-07-01 --stopDate 2020-07-16 --dDays 16 \
     -o tropomi_sif_c360.nc
 ```
@@ -205,5 +204,4 @@ julia --project=. bin/generate_modis_geolocation.jl \
 | KA Metal | `--backend metal` | KernelAbstractions Metal backend. Requires Metal.jl on macOS/Apple GPU. |
 
 The KernelAbstractions backends use shifted sums and a replay pass for
-`--compSTD` on rectangular and HEALPix grids. Cubed-sphere grids use the
-sequential backend for both the mean and standard deviation.
+`--compSTD` on rectangular, cubed-sphere, and HEALPix grids.

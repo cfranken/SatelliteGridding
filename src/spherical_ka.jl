@@ -114,7 +114,7 @@ _SphericalKAHostBatch(::Type{F}) where {F} =
     _SphericalKAHostBatch(Matrix{NTuple{3,F}}(undef, 0, 0))
 
 """
-    _accumulate_spherical_batch!(backend, sums, weights, pass, locator, F,
+    _accumulate_spherical_batch!(backend, sums, weights, pass, spec, locator, F,
                                  lat, lon, values, n_override, reference, host_batch)
 
 Upload validated corners and values and scatter one contribution per
@@ -127,7 +127,7 @@ data. With `pass=(mean, residual)`, accumulate linear deviations into
 `residual` and squared deviations into `sums` when present. Both use the cell's
 first-pass mean.
 """
-function _accumulate_spherical_batch!(backend, sums, weights, pass, locator, ::Type{F},
+function _accumulate_spherical_batch!(backend, sums, weights, pass, spec, locator, ::Type{F},
                                       lat, lon, values, n_override, reference,
                                       host_batch::_SphericalKAHostBatch{F}) where {F}
     n_fp = size(values, 1)
@@ -137,7 +137,7 @@ function _accumulate_spherical_batch!(backend, sums, weights, pass, locator, ::T
     end
     vertices = host_batch.vertices
     @inbounds for j in axes(vertices, 2), i in axes(vertices, 1)
-        vertices[i, j] = map(F, _sphere_unit_vector(lat[i, j], lon[i, j]))
+        vertices[i, j] = map(F, _sphere_unit_vector(spec, lat[i, j], lon[i, j]))
     end
     device_vertices = _backend_input(backend, vertices)
     device_values = _ka_batch_values!(backend, reference, values)

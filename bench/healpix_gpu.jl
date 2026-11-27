@@ -71,8 +71,8 @@ end
 function time_sequential(spec, batches)
     shape = accumulator_shape(spec)
     data, weights = zeros(Float32, shape..., 1), zeros(Float32, shape)
-    n = SG._HEALPIX_MAX_OVERSAMPLE
-    cells = Vector{Tuple{Int,Int}}(undef, n^2)
+    n = SG._SPHERICAL_MAX_OVERSAMPLE
+    cells = Vector{Int}(undef, n^2)
     seconds = @elapsed for observations in batches
         SG._accumulate_unit_vector_footprints!(data, nothing, weights, false, spec,
             observations.lat_bounds, observations.lon_bounds, observations.values, nothing, cells)
@@ -90,7 +90,7 @@ function time_cuda(backend, spec, batches; geometry_precision, accumulator_preci
     host_batch = SG._SphericalKAHostBatch(F)
     KernelAbstractions.synchronize(backend)
     seconds = @elapsed for observations in batches
-        SG._accumulate_spherical_batch!(backend, data, weights, nothing, options.locator, F,
+        SG._accumulate_spherical_batch!(backend, data, weights, nothing, spec, options.locator, F,
             observations.lat_bounds, observations.lon_bounds, observations.values, nothing, reference, host_batch)
     end
     return seconds, sum(Float64, Array(weights))

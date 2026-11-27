@@ -106,7 +106,7 @@ close(ds)
 | `compute_std` | `false` | Compute per-cell standard deviation |
 | `outfile` | `"gridded_output.nc"` | Output NetCDF file path |
 | `backend` | `nothing` (sequential) | `CPU()`, `CUDABackend()`, `MetalBackend()`, or another compatible KernelAbstractions backend |
-| `accumulator_precision` | Backend default | KA weights and daily moments for rectangular and HEALPix grids. Float64 on KA CPU and CUDA, Float32 on Metal. |
+| `accumulator_precision` | Backend default | KA weights and daily moments. Float64 on KA CPU and CUDA, Float32 on Metal. |
 
 ## Quick Start — Command Line
 

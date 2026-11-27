@@ -5,8 +5,7 @@
 # Julia processes over time chunks, then `ncrcat` along the time dimension.
 #
 # A cubed sphere is global, so there are no LAT_MIN/LON_MIN-style bounds — only
-# the resolution Nc. Gridding uses the sequential CPU path (the cube does not yet
-# have a GPU/KA path); parallelism comes from the per-chunk processes.
+# the resolution Nc. This script runs sequential gridding in parallel time chunks.
 #
 # Run from the SatelliteGridding repo root:
 #   CONFIG=examples/tropomi_sif.toml NC=360 bash bin/run_tropomi_c360.sh
@@ -21,7 +20,7 @@
 #   START_DATE=2018-05-01
 #   STOP_DATE=2025-12-31
 #   DDAYS=16
-#   N_OVERSAMPLE=0                      0 means the cubed-sphere default (4)
+#   N_OVERSAMPLE=0                      0 selects adaptive footprint sampling
 #   KEEP_CHUNKS=0
 #   PROGRESS_INTERVAL=30
 
@@ -57,7 +56,7 @@ echo "Config:        $CONFIG"
 echo "Output:        $OUTFILE"
 echo "Grid:          cubed sphere C${NC} ($CS_CONVENTION convention)"
 echo "Window:        $START_DATE -> $STOP_DATE every $DDAYS days"
-echo "Oversample:    n_oversample=$N_OVERSAMPLE (0=cubed-sphere default)"
+echo "Oversample:    n_oversample=$N_OVERSAMPLE (0=adaptive)"
 echo "Total windows: $total_windows split across $JOBS jobs (~$windows_per_job each)"
 echo "Chunk dir:     $CHUNK_DIR"
 echo

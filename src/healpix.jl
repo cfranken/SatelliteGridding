@@ -12,9 +12,6 @@ const _HEALPIX_MAX_NSIDE = Int64(1) << 29
 const _HEALPIX_EARTH_RADIUS = 6.371e6  # metres
 const _HEALPIX_COORD_CHUNK = 1 << 16  # cells per coordinate write
 const _HEALPIX_VERTICES = 4
-const _HEALPIX_SAMPLES_PER_CELL = 4
-const _HEALPIX_MIN_OVERSAMPLE = 4
-const _HEALPIX_MAX_OVERSAMPLE = 24
 
 function _healpix_nside(nside)
     nside isa Integer && !(nside isa Bool) && ispow2(nside) &&
@@ -346,7 +343,6 @@ end
 grid_shape(spec::HEALPixGridSpec) = (spec.nside^2, _HEALPIX_FACE_COUNT)
 payload_dims(::HEALPixGridSpec) = ("cell",)
 _output_spatial_shape(spec::HEALPixGridSpec) = (nside2npix(spec.nside),)
-_spherical_subdivision(::HEALPixGridSpec) = Val(:unit_vectors)
 
 # Angular form of sqrt(4πR²/npix). The common radius also scales the
 # angular footprint span, so it cancels in the oversampling ratio.
@@ -367,26 +363,8 @@ end
     return sqrt(F(4pi) / F(_HEALPIX_FACE_COUNT * locator.nside^2))
 end
 
-@inline function _unit_vector_samples(corners, cell_spacing::F) where {F}
-    max_chord_squared = zero(F)
-    @inbounds for i in 1:_HEALPIX_VERTICES, j in (i + 1):_HEALPIX_VERTICES
-        a, b = corners[i], corners[j]
-        chord_squared = abs2(a[1] - b[1]) + abs2(a[2] - b[2]) + abs2(a[3] - b[3])
-        max_chord_squared = max(max_chord_squared, chord_squared)
-    end
-    span = F(2) * asin(min(one(F), _spherical_sqrt(max_chord_squared) / F(2)))
-    samples = Base.unsafe_trunc(Int, ceil(F(_HEALPIX_SAMPLES_PER_CELL) * span / cell_spacing))
-    return clamp(samples, _HEALPIX_MIN_OVERSAMPLE, _HEALPIX_MAX_OVERSAMPLE)
-end
-
 @inline in_bounds(::HEALPixGridSpec, lat::Real, lon::Real) =
     -90 <= lat <= 90 && isfinite(lon)
-
-@inline function _spherical_cell(spec::HEALPixGridSpec, lat::Real, lon::Real)
-    pix = _ang2pix_nest(spec.nside, spec.level, Float64(lon), Float64(lat))
-    face = pix >> (2 * spec.level)
-    return pix - (face << (2 * spec.level)) + 1, face + 1
-end
 
 function write_coordinates!(ds, spec::HEALPixGridSpec)
     npix = nside2npix(spec.nside)

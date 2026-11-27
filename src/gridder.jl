@@ -12,13 +12,15 @@ circular products such as GOSAT. Circular footprints can be read from
 
 To archive Float64 results exactly, use Float64 accumulators and set `[output]`
 `precision = "float64"`, `significant_digits_mean = "none"`, and
-`significant_digits_std = "none"`. Use Float64 bounds and spacings for
-`GridSpec`, or `T=Float64` for `CubedSphereGridSpec` and sequential
-`HEALPixGridSpec`. The CLI creates Float32 grids. KA CPU and CUDA
-accumulate in Float64 by default, as do sequential rolling runs. Use this
-configuration for aggregation inputs such as HEALPix 4:1 coarsening or regridding. At fine
-`nside`, quantization of nearly equal child means can dominate a small parent
-standard deviation.
+`significant_digits_std = "none"`. For tiled sequential runs, use Float64
+bounds and spacings for `GridSpec`, or `T=Float64` for `CubedSphereGridSpec`
+and `HEALPixGridSpec`. KA CPU and CUDA accumulate in Float64 by default, as do
+sequential rolling runs. The CLI creates Float32 grids. A `CubedSphereGridSpec`
+with `T=Float32` computes cell centre and corner coordinates in Float32 before
+widening them to Float64 for NetCDF. Set `T=Float64` to compute and write those
+coordinates in double precision. Use this configuration for aggregation inputs
+such as HEALPix 4:1 coarsening or regridding. At fine `nside`, quantization of
+nearly equal child means can dominate a small parent standard deviation.
 
 # Arguments
 - `config::DataSourceConfig`: Data source configuration (from TOML/JSON)

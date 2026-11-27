@@ -136,10 +136,7 @@ function _read_l2_geometry(fin, config::DataSourceConfig,
 end
 
 _order_l2_corners!(::RectangularGridSpec, lat, lon) = sort_corners_ccw!(lat, lon)
-_order_l2_corners!(spec::AbstractSphericalGridSpec, lat, lon) =
-    _order_l2_corners!(_spherical_subdivision(spec), lat, lon)
-_order_l2_corners!(::Val{:lonlat}, lat, lon) = sort_corners_ccw!(lat, lon)
-_order_l2_corners!(::Val{:unit_vectors}, lat, lon) = nothing
+_order_l2_corners!(::AbstractSphericalGridSpec, lat, lon) = nothing
 
 const _POLAR_LATITUDE_TOLERANCE = 1e-4 # degrees
 const _SPHERICAL_LONGITUDE_LIMIT = 720 # degrees

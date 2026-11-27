@@ -162,5 +162,3 @@ export, and coarsening or aggregation helpers are outside this support.
 
 - Outputs contain neither per-cell `sum_w2` nor counts of contributing soundings.
 - Per-cell WGS84 ellipsoidal areas are planned separately.
-- Cubed-sphere seam corner ordering, pole-enclosing footprints, and
-  longitude/latitude subdivision are planned for a separate review.
