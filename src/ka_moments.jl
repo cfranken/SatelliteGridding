@@ -88,6 +88,13 @@ end
     return nothing
 end
 
+@inline function _scatter_ka_cell!(sums, weights, pass::NamedTuple{(:bounds,:overlap)},
+                                   values, reference, fp, cell, w, n_vars, atomic)
+    _scatter_ka_cell!(sums, weights, pass.bounds, values, reference, fp, cell, w, n_vars, atomic)
+    _record_overlap!(pass.overlap, cell, w, atomic)
+    nothing
+end
+
 @inline _add_ka_squared_deviation!(::Nothing, index, w, delta, atomic) = nothing
 
 @inline _add_ka_squared_deviation!(m2, index, w, delta, atomic) =

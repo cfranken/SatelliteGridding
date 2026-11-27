@@ -10,6 +10,7 @@
 # For help:
 #   julia --project=. bin/grid.jl l2 --help
 #   julia --project=. bin/grid.jl center --help
+#   julia --project=. bin/grid.jl coarsen --help
 
 if abspath(PROGRAM_FILE) == abspath(@__FILE__)
     using Pkg
@@ -29,6 +30,7 @@ function main(argv=ARGS; default_progress=SatelliteGridding._default_progress())
         println("Commands:")
         println("  l2      Grid Level-2 data with footprint oversampling")
         println("  center  Grid data using center coordinates (MODIS-style)")
+        println("  coarsen Combine NESTED HEALPix cells into parent cells")
         println()
         println("Backends:")
         for line in backend_help_lines()
@@ -42,12 +44,18 @@ function main(argv=ARGS; default_progress=SatelliteGridding._default_progress())
     t_start = time()
     command_line = join(["julia", PROGRAM_FILE, argv...], " ")
     command = first(argv)
+    if command == "coarsen"
+        args = SatelliteGridding._parse_coarsen_args(argv[2:end])
+        return coarsen_healpix(args["input"], args["output"]; levels=args["levels"],
+                               nside=args["nside"], legacy_std=Symbol(args["legacy-std"]),
+                               command=command_line)
+    end
     args = if command == "l2"
         parse_l2_args(argv[2:end])
     elseif command == "center"
         parse_center_args(argv[2:end])
     else
-        error("Unknown command: $command. Use 'l2' or 'center'.")
+        error("Unknown command: $command. Use 'l2', 'center', or 'coarsen'.")
     end
     config = load_config(args["config"])
     grid_spec = args_to_grid_spec(args)
@@ -58,7 +66,8 @@ function main(argv=ARGS; default_progress=SatelliteGridding._default_progress())
 
     if command == "l2"
         geometry_precision = SatelliteGridding._cli_precision(args["geometry-precision"])
-        accumulator_precision = SatelliteGridding._cli_precision(args["accumulator-precision"])
+        accumulator_precision = SatelliteGridding._cli_sequential_backend(args) ? nothing :
+            SatelliteGridding._cli_precision(args["accumulator-precision"])
         method = SatelliteGridding._cli_footprint(args)
         backend = resolve_backend(args["backend"]; grid_spec, geometry_precision, accumulator_precision)
 

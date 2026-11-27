@@ -30,10 +30,9 @@ precisions here to validate them before loading a backend.
 """
 function resolve_backend(name::AbstractString; grid_spec=nothing,
                          geometry_precision=nothing, accumulator_precision=nothing)
-    backend = lowercase(strip(String(name)))
-    backend = replace(backend, "_" => "-", "ka-" => "")
+    backend = _normalize_backend_name(name)
 
-    if backend in ("", "none", "sequential")
+    if _is_sequential_backend(backend)
         _require_spherical_ka_geometry(geometry_precision)
         _require_ka_accumulator(accumulator_precision)
         return nothing
@@ -59,6 +58,9 @@ function resolve_backend(name::AbstractString; grid_spec=nothing,
                                       :metal_backend, "Metal.jl", "Metal")
     end
 end
+
+_normalize_backend_name(name) = replace(lowercase(strip(String(name))), "_" => "-", "ka-" => "")
+_is_sequential_backend(name) = name in ("", "none", "sequential")
 
 _validate_ka_grid(spec, ::Type) = nothing
 

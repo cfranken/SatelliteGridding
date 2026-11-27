@@ -236,6 +236,10 @@ function create_output_dataset(outfile::String, spec::AbstractGridSpec,
                                vegetation_names::Tuple{Vararg{String}}=())
     T = typeof(output_options.fill_value)
     storage = _storage_kwargs(output_options, spec)
+    for name in output_options.statistics
+        haskey(grid_vars, string(name)) &&
+            throw(ArgumentError("Grid variable '$name' conflicts with output.statistics"))
+    end
     _with_output_setup(outfile) do ds
         write_coordinates!(ds, spec)
         # Unlimited time supports concatenation with ncrcat. Placeholder times
@@ -248,6 +252,12 @@ function create_output_dataset(outfile::String, spec::AbstractGridSpec,
         ds.attrib["title"] = _output_title(spec)
         ds.attrib["created_with"] = "SatelliteGridding.jl"
         _set_provenance_attributes!(ds, command, filters)
+        if spec isa HEALPixGridSpec
+            ds.attrib["significant_digits_mean"] = _rounding_attribute(T, output_options.significant_digits_mean)
+            if compute_std
+                ds.attrib["significant_digits_std"] = _rounding_attribute(T, output_options.significant_digits_std)
+            end
+        end
 
         dims = (payload_dims(spec)..., "time")
         attributes = _payload_attributes(spec)
@@ -257,23 +267,57 @@ function create_output_dataset(outfile::String, spec::AbstractGridSpec,
         std_attributes = vcat(attributes, [
             "long_name" => "Weighted population standard deviation",
             "comment" => std_comment,
+            _STATISTIC_ROLE => "population_std",
         ])
+        mean_attributes = vcat(attributes, [_STATISTIC_ROLE => "mean"])
         nc_vars = Dict{String,Any}()
         for key in keys(grid_vars)
-            nc_vars[key] = defVar(ds, key, T, dims; storage..., attrib=attributes)
+            std_key = key * _STD_SUFFIX
+            attrs = compute_std ? vcat(mean_attributes, [_STATISTIC_STD => std_key]) : mean_attributes
+            nc_vars[key] = defVar(ds, key, T, dims; storage..., attrib=attrs)
             if compute_std
-                nc_vars[key * "_std"] = defVar(ds, key * "_std", T, dims;
-                                               storage..., attrib=std_attributes)
+                nc_vars[std_key] = defVar(ds, std_key, T, dims; storage...,
+                                         attrib=vcat(std_attributes, [_STATISTIC_MEAN => key]))
             end
         end
+        weight_attributes = vcat(["units" => "1", "long_name" => _weight_long_name(spec)], attributes)
+        push!(weight_attributes, _STATISTIC_ROLE => "weight_sum")
         nc_vars["n"] = defVar(ds, "n", T, dims; storage..., fillvalue=T(_NETCDF_WEIGHT_FILL),
-            attrib=vcat(["units" => "1", "long_name" => _weight_long_name(spec)], attributes))
+            attrib=weight_attributes)
+        for name in output_options.statistics
+            statistic = Val(name)
+            S = _overlap_type(T, statistic)
+            nc_vars[string(name)] = defVar(ds, string(name), S, dims; storage..., fillvalue=S(-1),
+                attrib=vcat(attributes, ["units" => "1", "long_name" => _overlap_long_name(statistic),
+                                         "comment" => _overlap_comment(statistic), _STATISTIC_ROLE => string(name)]))
+        end
         for name in vegetation_names
             nc_vars[name] = defVar(ds, name, T, dims; storage...)
         end
         ds, nc_vars
     end
 end
+
+const _STATISTIC_ROLE = "satellitegridding_role"
+const _STATISTIC_MEAN = "satellitegridding_mean"
+const _STATISTIC_STD = "satellitegridding_std"
+const _STD_SUFFIX = "_std"
+
+_rounding_attribute(T, digits) = string(something(_output_digits(T, digits), "none"))
+
+_overlap_long_name(::Val{:sum_w2}) = "Sum of squared fractional footprint overlap weights"
+_overlap_long_name(::Val{:n_soundings}) = "Number of footprints touching the grid cell"
+const _OVERLAP_ESTIMATOR_COMMENT =
+    "For independent soundings with a common mean and variance, fractional overlaps are reliability weights. " *
+    "Require n_soundings >= 2, sum_w2 > 0 and Kish N_eff = n^2/sum_w2 > 1. " *
+    "With M2 = n*std^2, use s^2 = M2/(n - sum_w2/n) = std^2*N_eff/(N_eff - 1) " *
+    "and SE = std/sqrt(N_eff - 1). Avoid M2/(n - 1) and std/sqrt(n). " *
+    "Do not use coarsened overlap statistics for s^2 or SE."
+_overlap_comment(::Val{:sum_w2}) =
+    "Sum of w_pc^2 over footprints, where w_pc is the fractional overlap of a footprint with this cell. " *
+    _OVERLAP_ESTIMATOR_COMMENT
+_overlap_comment(::Val{:n_soundings}) =
+    "Counts distinct footprints touching this cell, rather than sub-samples. " * _OVERLAP_ESTIMATOR_COMMENT
 
 _output_title(::AbstractGridSpec) = "Gridded satellite data"
 _output_title(::CubedSphereGridSpec) = "Gridded satellite data (cubed sphere)"
@@ -309,7 +353,7 @@ end
 
 const _SOURCE_VARIABLE_REFERENCE_ATTRIBUTES = (
     "coordinates", "grid_mapping", "cell_measures", "bounds", "ancillary_variables", "formula_terms",
-    "geometry", "node_coordinates", "climatology",
+    "geometry", "node_coordinates", "climatology", _STATISTIC_ROLE, _STATISTIC_MEAN, _STATISTIC_STD,
 )
 
 """
@@ -329,7 +373,7 @@ function copy_variable_attributes!(nc_vars::Dict, dataset, grid_vars::OrderedDic
             catch
             end
         end
-        std_key = key * "_std"
+        std_key = key * _STD_SUFFIX
         if haskey(nc_vars, std_key) && !haskey(grid_vars, std_key)
             try
                 nc_vars[std_key].attrib["units"] = read_nc_attribute(dataset, value, "units")

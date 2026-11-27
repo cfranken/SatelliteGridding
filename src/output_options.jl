@@ -1,12 +1,14 @@
 const _DEFAULT_MEAN_DIGITS = 8
 const _DEFAULT_STD_DIGITS = 6
 const _DEFAULT_CENTER_DIGITS = 5
+const _OVERLAP_STATISTICS = ("sum_w2", "n_soundings")
 
 """
     NetCDFOptions(; compression="deflate", deflate_level=4, shuffle=false,
                     fill_value=-999f0, chunksizes=nothing, checksum="none",
                     precision="float32", significant_digits_mean=8,
-                    significant_digits_std=6, significant_digits_center=5)
+                    significant_digits_std=6, significant_digits_center=5,
+                    statistics=[])
 
 NetCDF storage and rounding settings. `precision` selects `"float32"` or
 `"float64"` payloads. `compression` is `"deflate"` or `"none"`; levels are
@@ -21,6 +23,7 @@ Chunk sizes follow Julia dimension order, including time (last). By default,
 chunks contain at most 1024 × 1024 spatial cells (2^20 cells on a flat
 cell axis), one cube face, and one time.
 `checksum` is `"none"` or `"fletcher32"`.
+`statistics` selects optional L2 NetCDF fields `"sum_w2"` and `"n_soundings"`.
 """
 struct NetCDFOptions{T<:Union{Float32,Float64}}
     compression::String
@@ -32,12 +35,13 @@ struct NetCDFOptions{T<:Union{Float32,Float64}}
     significant_digits_mean::Union{Nothing,Int}
     significant_digits_std::Union{Nothing,Int}
     significant_digits_center::Union{Nothing,Int}
+    statistics::Tuple{Vararg{Symbol}}
 
     function NetCDFOptions(; compression="deflate", deflate_level=4, shuffle=false,
                             fill_value=-999f0, chunksizes=nothing, checksum="none",
                             precision="float32", significant_digits_mean=_DEFAULT_MEAN_DIGITS,
                             significant_digits_std=_DEFAULT_STD_DIGITS,
-                            significant_digits_center=_DEFAULT_CENTER_DIGITS)
+                            significant_digits_center=_DEFAULT_CENTER_DIGITS, statistics=[])
         compression in ("deflate", "none") ||
             throw(ArgumentError("output.compression must be deflate or none"))
         deflate_level isa Integer && !(deflate_level isa Bool) && 0 <= deflate_level <= 9 ||
@@ -62,8 +66,16 @@ struct NetCDFOptions{T<:Union{Float32,Float64}}
             checksum == "none" ? :nochecksum : :fletcher32,
             _significant_digits(significant_digits_mean, "significant_digits_mean"),
             _significant_digits(significant_digits_std, "significant_digits_std"),
-            _significant_digits(significant_digits_center, "significant_digits_center"))
+            _significant_digits(significant_digits_center, "significant_digits_center"),
+            _overlap_statistics(statistics))
     end
+end
+
+function _overlap_statistics(names)
+    (names isa AbstractVector || names isa Tuple) &&
+        all(name -> name isa AbstractString && name in _OVERLAP_STATISTICS, names) ||
+        throw(ArgumentError("output.statistics must be an array of names chosen from sum_w2 and n_soundings"))
+    Tuple(Symbol(name) for name in _OVERLAP_STATISTICS if name in names)
 end
 
 function _significant_digits(value, name)
@@ -78,7 +90,7 @@ function _output_options(options::AbstractDict)
     settings isa AbstractDict || throw(ArgumentError("output must be a table"))
     known = ("compression", "deflate_level", "shuffle", "fill_value", "chunksizes", "checksum",
              "precision", "significant_digits_mean", "significant_digits_std",
-             "significant_digits_center")
+             "significant_digits_center", "statistics")
     for key in keys(settings)
         key in known || throw(ArgumentError("Unknown [output] option: $key"))
     end

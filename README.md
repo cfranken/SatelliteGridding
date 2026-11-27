@@ -280,11 +280,13 @@ decoded before L2 science values and quality filters are used.
 To archive Float64 results exactly, accumulate in Float64, set
 `precision = "float64"`, and set `significant_digits_mean` and
 `significant_digits_std` to `"none"` for L2 or `significant_digits_center`
-to `"none"` for center mode. For tiled sequential L2, pass Float64 bounds and
+to `"none"` for center mode. Use `fill_value = nan` so finite science values
+can be distinguished from fill. For tiled sequential L2, pass Float64 bounds and
 spacings to `GridSpec` or set `T=Float64` on `CubedSphereGridSpec` or
 `HEALPixGridSpec` in Julia. KA CPU and CUDA use Float64 accumulators by default,
 and sequential rolling L2 accumulates daily moments in Float64. Metal uses
-Float32 accumulators. The CLI creates Float32 grids. A `CubedSphereGridSpec`
+Float32 accumulators. On the sequential CLI, pass `--accumulator-precision float64`
+to construct a Float64 grid. A `CubedSphereGridSpec`
 with `T=Float32` also computes cell centre and corner coordinates in Float32
 before widening them to Float64 for NetCDF. Set `T=Float64` to compute and
 write those coordinates in double precision. Use the Float64 configuration

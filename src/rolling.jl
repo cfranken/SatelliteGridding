@@ -1,66 +1,77 @@
 # Centered temporal windows and reusable daily moments.
 
 """Daily or window weight, centered M2, and mean with optional low-order correction."""
-struct DayMoments{T,M,C}
+struct DayMoments{T,M,C,S}
     weights::Matrix{T}
     mean::Array{T,3}
     m2::M
     correction::C
+    overlap::S
 end
 
 """Mean-only KA windows can add shifted sums using the common run reference."""
-struct ShiftedSums{T}
+struct ShiftedSums{T,S}
     weights::Matrix{T}
     sums::Array{T,3}
+    overlap::S
 end
 
 _host_copy(a) = Array(a)
 _host_copy(::Nothing) = nothing
 _window_buffer(a) = Array{Float64}(undef, size(a))
 _window_buffer(::Nothing) = nothing
+_window_overlap_buffer(a::AbstractMatrix{Int32}) = Matrix{Int32}(undef, size(a))
+_window_overlap_buffer(a) = _window_buffer(a)
 
-_day_moments_type(::WelfordAccumulator{T,M}) where {T,M} = DayMoments{T,M,Nothing}
+_day_moments_type(acc::WelfordAccumulator{T,M}) where {T,M} =
+    DayMoments{T,M,Nothing,_host_overlap_type(acc.overlap)}
 _day_moments_type(acc::AbstractKAAccumulator) = _day_moments_type(acc.moments)
-_day_moments_type(::KAMoments{B,D,W,Nothing}) where {B,D,W} = ShiftedSums{eltype(W)}
-_day_moments_type(acc::KAMoments) = _ka_day_moments_type(acc.replay, eltype(acc.weights))
-_ka_day_moments_type(::KAReplay{Nothing}, ::Type{T}) where {T} =
-    DayMoments{T,Nothing,Array{T,3}}
-_ka_day_moments_type(::KAReplay, ::Type{T}) where {T} =
-    DayMoments{T,Array{T,3},Array{T,3}}
+_day_moments_type(acc::KAMoments{B,D,W,Nothing}) where {B,D,W} =
+    ShiftedSums{eltype(W),_host_overlap_type(acc.overlap)}
+_day_moments_type(acc::KAMoments) =
+    _ka_day_moments_type(acc.replay, eltype(acc.weights), _host_overlap_type(acc.overlap))
+_ka_day_moments_type(::KAReplay{Nothing}, ::Type{T}, ::Type{S}) where {T,S} =
+    DayMoments{T,Nothing,Array{T,3},S}
+_ka_day_moments_type(::KAReplay, ::Type{T}, ::Type{S}) where {T,S} =
+    DayMoments{T,Array{T,3},Array{T,3},S}
 
 day_moments(acc::WelfordAccumulator) =
-    DayMoments(copy(acc.weights), copy(acc.data), _host_copy(acc.m2), nothing)
+    DayMoments(copy(acc.weights), copy(acc.data), _host_copy(acc.m2), nothing, _map_overlap(Array, acc.overlap))
 
 day_moments(acc::AbstractKAAccumulator) = day_moments(acc.moments)
 day_moments(acc::KAMoments{B,D,W,Nothing}) where {B,D,W} =
-    ShiftedSums(Array(acc.weights), Array(acc.data))
+    ShiftedSums(Array(acc.weights), Array(acc.data), _map_overlap(Array, acc.overlap))
 
 # Replay leaves Float64 means relative to the shared reference and Float32
 # means as absolute high and low parts.
 day_moments(acc::KAMoments) =
     DayMoments(Array(acc.weights), Array(acc.data), _host_copy(_ka_m2(acc.replay)),
-               Array(acc.replay.residual))
+               Array(acc.replay.residual), _map_overlap(Array, acc.overlap))
 
 _window_moments(acc::WelfordAccumulator) = _window_moments(acc, acc.m2, nothing)
 _window_moments(acc::AbstractKAAccumulator) = _window_moments(acc.moments)
 _window_moments(acc::KAMoments{B,D,W,Nothing}) where {B,D,W} =
-    ShiftedSums(_window_buffer(acc.weights), _window_buffer(acc.data))
+    ShiftedSums(_window_buffer(acc.weights), _window_buffer(acc.data),
+                _map_overlap(_window_overlap_buffer, acc.overlap))
 _window_moments(acc::KAMoments) = _window_moments(acc, _ka_m2(acc.replay), acc.replay.residual)
 _window_moments(acc, m2, correction) =
     DayMoments(_window_buffer(acc.weights), _window_buffer(acc.data),
-               _window_buffer(m2), _window_buffer(correction))
+               _window_buffer(m2), _window_buffer(correction),
+               _map_overlap(_window_overlap_buffer, acc.overlap))
 
 function reset!(win::DayMoments)
     _zero!(win.weights)
     _zero!(win.mean)
     _zero!(win.m2)
     _zero!(win.correction)
+    _map_overlap(_zero!, win.overlap)
     nothing
 end
 
 function reset!(win::ShiftedSums)
     _zero!(win.weights)
     _zero!(win.sums)
+    _map_overlap(_zero!, win.overlap)
     nothing
 end
 
@@ -117,6 +128,7 @@ end
 function _merge_day!(win::ShiftedSums, day::ShiftedSums)
     win.weights .+= day.weights
     win.sums .+= day.sums
+    _merge_overlap!(win.overlap, day.overlap)
     nothing
 end
 
@@ -126,7 +138,7 @@ function finish!(win::ShiftedSums, acc::AbstractKAAccumulator)
                             size(win.sums, 3), 0.0)
     end
     _restore_ka_reference!(win.sums, win.weights, acc.moments.reference)
-    win.sums, nothing, win.weights
+    win.sums, nothing, win.weights, win.overlap
 end
 
 _finalize_rolling_mean!(win, ::WelfordAccumulator) = nothing
@@ -144,7 +156,7 @@ _finalize_rolling_ka_mean!(win, reference::_KAReference{Float64}) =
 function finish!(win::DayMoments, acc)
     win.m2 === nothing || _finalize_centered_std!(win.m2, win.weights)
     _finalize_rolling_mean!(win, acc)
-    win.mean, win.m2, win.weights
+    win.mean, win.m2, win.weights, win.overlap
 end
 
 @inline _moment_at(::Nothing, i) = 0.0
@@ -192,5 +204,6 @@ function _merge_day!(win::DayMoments{Float64}, day::DayMoments)
         wb = Float64(day.weights[cell])
         wb > 0 && (weights[cell] += wb)
     end
+    _merge_overlap!(win.overlap, day.overlap)
     nothing
 end

@@ -12,10 +12,11 @@ circular products such as GOSAT. Circular footprints can be read from
 
 To archive Float64 results exactly, use Float64 accumulators and set `[output]`
 `precision = "float64"`, `significant_digits_mean = "none"`, and
-`significant_digits_std = "none"`. For tiled sequential runs, use Float64
+`significant_digits_std = "none"`, with `fill_value = nan`. For tiled sequential runs, use Float64
 bounds and spacings for `GridSpec`, or `T=Float64` for `CubedSphereGridSpec`
 and `HEALPixGridSpec`. KA CPU and CUDA accumulate in Float64 by default, as do
-sequential rolling runs. The CLI creates Float32 grids. A `CubedSphereGridSpec`
+sequential rolling runs. On the sequential CLI use `--accumulator-precision float64`
+to construct a Float64 grid. A `CubedSphereGridSpec`
 with `T=Float32` computes cell centre and corner coordinates in Float32 before
 widening them to Float64 for NetCDF. Set `T=Float64` to compute and write those
 coordinates in double precision. Use this configuration for aggregation inputs
@@ -162,7 +163,14 @@ function _grid_l2(backend, config, spec, time_spec, run, geometry_precision, acc
             zg = init_zarr_store(run.zarr_out, spec, config.grid_vars;
                                  epoch=run.zarr_epoch, compute_std=run.compute_std)
         end
-        acc = new_accumulator(spec, backend, ka_options, length(config.grid_vars), run.compute_std, step)
+        acc = new_accumulator(spec, backend, ka_options, length(config.grid_vars),
+                              run.compute_std, step, output_options.statistics)
+        if write_nc
+            ds.attrib["accumulator_precision"] = _precision_attribute(_l2_accumulator_precision(acc))
+            if spec isa AbstractSphericalGridSpec
+                ds.attrib["geometry_precision"] = _precision_attribute(_l2_geometry_precision(acc))
+            end
+        end
         ctx = L2Context(config, spec, run, output_options, ds, nc_vars, zg, metadata, Ref(true))
         total, successful = _run_l2_schedule!(acc, ctx, time_spec, snapshots, step)
         total > 0 || error("No input files matched pattern '$(config.file_pattern)' in folder '$(config.folder)'")
@@ -182,6 +190,8 @@ function _grid_l2(backend, config, spec, time_spec, run, geometry_precision, acc
     run.verbose && write_nc && @info "Output written to: $(run.outfile)"
     nothing
 end
+
+_precision_attribute(T) = lowercase(string(T))
 
 function _run_l2_schedule!(acc, ctx, time_spec, snapshots, ::Nothing)
     (; config, run) = ctx
@@ -226,7 +236,8 @@ function _accumulate_l2_files!(acc, ctx, files, p_files; keep_mean_parts)
 end
 
 function _emit_l2_snapshot!(ctx, arrays, ct, date, window_start, window_end)
-    data, std, weights = arrays
+    data, std, weights, overlap = arrays
     _emit_l2_snapshot!(ctx.ds, ctx.nc_vars, ctx.zg, ctx.config, ctx.spec, ctx.output_options,
-        data, std, weights, ctx.run.compute_std, ct, date; window_start, window_end, zarr_epoch=ctx.run.zarr_epoch)
+        data, std, weights, ctx.run.compute_std, ct, date;
+        window_start, window_end, overlap, zarr_epoch=ctx.run.zarr_epoch)
 end

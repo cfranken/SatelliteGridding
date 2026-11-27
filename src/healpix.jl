@@ -318,8 +318,9 @@ Cell centres and optional vertex bounds are computed when writing NetCDF.
 
 To archive Float64 results exactly, use `T=Float64` for tiled sequential gridding
 or Float64 KA accumulators, and set `[output]` `precision = "float64"`,
-`significant_digits_mean = "none"`, and `significant_digits_std = "none"`.
-The CLI creates Float32 grids. Both `--backend cpu` and `--backend cuda`
+`significant_digits_mean = "none"`, `significant_digits_std = "none"`, and
+`fill_value = nan`. On the sequential CLI, pass `--accumulator-precision float64`.
+Both `--backend cpu` and `--backend cuda`
 accumulate in Float64 by default. Use this configuration for
 HEALPix 4:1 coarsening and regridding because quantization of nearly equal
 child means can dominate a small parent standard deviation at fine `nside`.

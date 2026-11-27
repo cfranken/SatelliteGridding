@@ -79,6 +79,8 @@ _validate_zarr_grid(spec::AbstractGridSpec) =
     error("Zarr output requires a rectangular lat/lon grid (--gridType rect). Got $(typeof(spec)).")
 
 function _validate_zarr_output(spec, options::NetCDFOptions)
+    isempty(options.statistics) ||
+        throw(ArgumentError("Zarr output does not support output.statistics; use NetCDF"))
     _validate_zarr_grid(spec)
     options isa NetCDFOptions{Float64} &&
         throw(ArgumentError("Zarr output requires output.precision = \"float32\""))

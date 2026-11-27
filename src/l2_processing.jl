@@ -1,10 +1,11 @@
 # Backend-specific accumulation of prepared L2 observations.
 
 """Sequential weighted running means, with an optional Welford M2 array."""
-struct WelfordAccumulator{T,M}
+struct WelfordAccumulator{T,M,S}
     data::Array{T,3}
     weights::Matrix{T}
     m2::M
+    overlap::S
 end
 
 """Buffers shared by the first-pass bounds and the refinement replay."""
@@ -18,12 +19,13 @@ _ka_m2(::Nothing) = nothing
 _ka_m2(replay::KAReplay) = replay.squared
 
 """Shifted KA sums and weights with a shared reference and optional replay."""
-struct KAMoments{B,D,W,P,R}
+struct KAMoments{B,D,W,P,R,S}
     backend::B
     data::D
     weights::W
     replay::P
     reference::R
+    overlap::S
 end
 
 abstract type AbstractKAAccumulator end
@@ -38,14 +40,20 @@ struct SphericalKAAccumulator{M,O,H} <: AbstractKAAccumulator
     host_batch::H
 end
 
+_l2_accumulator_precision(acc) = eltype(acc.weights)
+_l2_accumulator_precision(acc::AbstractKAAccumulator) = _l2_accumulator_precision(acc.moments)
+_l2_geometry_precision(::WelfordAccumulator) = Float64
+_l2_geometry_precision(acc::SphericalKAAccumulator) = acc.options.geometry_precision
+
 function new_accumulator(spec::AbstractGridSpec{T}, ::Nothing, ::Nothing, n_vars, compute_std,
-                         step=nothing) where {T}
+                         step=nothing, statistics=()) where {T}
     # A Float64 merge cannot recover variation already lost in a day's mean
     # or in the input values. Keep tiled Welford accumulation in grid precision.
     A = step === nothing ? T : Float64
     shape = accumulator_shape(spec)
     data = zeros(A, shape..., n_vars)
-    WelfordAccumulator(data, zeros(A, shape), compute_std ? zeros(A, size(data)) : nothing)
+    overlap = _new_overlap(T -> zeros(T, shape), A, statistics)
+    WelfordAccumulator(data, zeros(A, shape), compute_std ? zeros(A, size(data)) : nothing, overlap)
 end
 
 function _ka_replay(backend, data::AbstractArray{A}, ::Val{Std}) where {A,Std}
@@ -69,21 +77,23 @@ _ka_replay_bounds(backend, shape, ::Type{Float64}, squared, residual) =
 _ka_refinement_bounds(replay, ::Type{Float32}) = replay.bounds
 _ka_refinement_bounds(replay, ::Type{Float64}) = nothing
 
-function KAMoments(backend, ::Type{A}, shape, n_vars, compute_std) where {A}
+function KAMoments(backend, ::Type{A}, shape, n_vars, compute_std, statistics) where {A}
     data = KernelAbstractions.zeros(backend, A, shape..., n_vars)
     weights = KernelAbstractions.zeros(backend, A, shape...)
     replay = _ka_replay(backend, data, Val(compute_std))
-    KAMoments(backend, data, weights, replay, _KAReference(backend, A, n_vars))
+    overlap = _new_overlap(T -> KernelAbstractions.zeros(backend, T, shape...), A, statistics)
+    KAMoments(backend, data, weights, replay, _KAReference(backend, A, n_vars), overlap)
 end
 
 function new_accumulator(spec::RectangularGridSpec, backend, ::Type{A}, n_vars, compute_std,
-                         step=nothing) where {A}
-    RectKAAccumulator(KAMoments(backend, A, accumulator_shape(spec), n_vars, compute_std))
+                         step=nothing, statistics=()) where {A}
+    RectKAAccumulator(KAMoments(backend, A, accumulator_shape(spec), n_vars, compute_std, statistics))
 end
 
 function new_accumulator(spec, backend, options::_SphericalKAOptions, n_vars, compute_std,
-                         step=nothing)
-    moments = KAMoments(backend, options.accumulator_precision, accumulator_shape(spec), n_vars, compute_std)
+                         step=nothing, statistics=())
+    moments = KAMoments(backend, options.accumulator_precision, accumulator_shape(spec),
+                        n_vars, compute_std, statistics)
     SphericalKAAccumulator(moments, options, _SphericalKAHostBatch(options.geometry_precision))
 end
 
@@ -95,6 +105,7 @@ reset!(acc::AbstractKAAccumulator) = reset!(acc.moments)
 function reset!(acc::KAMoments)
     _zero!(acc.data)
     _zero!(acc.weights)
+    _map_overlap(_zero!, acc.overlap)
     nothing
 end
 
@@ -102,6 +113,7 @@ function reset!(acc::WelfordAccumulator)
     _zero!(acc.data)
     _zero!(acc.m2)
     _zero!(acc.weights)
+    _map_overlap(_zero!, acc.overlap)
     nothing
 end
 
@@ -146,28 +158,28 @@ function _accumulate_rectangular!(acc::WelfordAccumulator, ::Type{T}, ilat, ilon
     lats0, lons0, lats1, lons1 = zeros(n), zeros(n), zeros(n), zeros(n)
     accumulate_footprint!(acc.data, acc.m2, acc.weights, acc.m2 !== nothing,
                           ilat, ilon, values, n_pixels, n_vars, n,
-                          points, ix, iy, lats0, lons0, lats1, lons1)
+                          points, ix, iy, lats0, lons0, lats1, lons1, acc.overlap)
 end
 
 function _accumulate_rectangular!(acc::WelfordAccumulator, ::Type, ilat, ilon,
                                   centers::Tuple, values, n)
     n_pixels, n_vars = size(values)
     accumulate_circular_footprint!(acc.data, acc.m2, acc.weights, acc.m2 !== nothing,
-                                   centers..., ilat, ilon, values, n_pixels, n_vars, n)
+                                   centers..., ilat, ilon, values, n_pixels, n_vars, n, acc.overlap)
 end
 
 function _accumulate!(acc::WelfordAccumulator, spec::AbstractSphericalGridSpec, obs, method::SubpixelGridding)
     _accumulate_l2_spherical!(acc.data, acc.m2, acc.weights, acc.m2 !== nothing,
-                              spec, obs, method.n_oversample)
+                              spec, obs, method.n_oversample, acc.overlap)
 end
 
 function _accumulate_l2_spherical!(data, m2, weights, compute_std,
-                                   spec, observations, n_override)
+                                   spec, observations, n_override, overlap=nothing)
     capacity = n_override === nothing ? _SPHERICAL_MAX_OVERSAMPLE : n_override
     cells = Vector{Int}(undef, capacity^2)
     _accumulate_unit_vector_footprints!(data, m2, weights, compute_std, spec,
                                        observations.lat_bounds, observations.lon_bounds,
-                                       observations.values, n_override, cells)
+                                       observations.values, n_override, cells, overlap)
 end
 
 _accumulate!(acc::AbstractKAAccumulator, spec, obs, method) =
@@ -179,9 +191,17 @@ _accumulate!(acc::AbstractKAAccumulator, spec, obs, method, bounds::NamedTuple) 
 _accumulate!(acc::AbstractKAAccumulator, spec, obs, method, replay::Tuple) =
     _accumulate_ka_pass!(acc, spec, obs, method, _ka_m2(acc.moments.replay), replay)
 
+_ka_scatter_pass(pass, ::Nothing) = pass
+_ka_scatter_pass(pass, overlap::NamedTuple) = (bounds=pass, overlap=overlap)
+_ka_scatter_pass(pass::Tuple, ::NamedTuple) = pass
+
+# Opted-in quads use one update per footprint and cell in both passes.
+_rect_sample_counts(counts, nsq, overlap) = counts
+_rect_sample_counts(::Nothing, nsq, ::NamedTuple) = nsq
+
 function _accumulate_ka_pass!(acc::RectKAAccumulator, spec::RectangularGridSpec{T}, obs, method,
                               data, pass) where {T}
-    (; backend, weights, reference) = acc.moments
+    (; backend, weights, reference, overlap) = acc.moments
     ilat, ilon, centers = _rectangular_indices(obs, spec, method)
     n = _l2_oversampling(ilat, ilon, method.n_oversample)
     # The points must round in grid precision to mirror sequential geometry.
@@ -189,7 +209,8 @@ function _accumulate_ka_pass!(acc::RectKAAccumulator, spec::RectangularGridSpec{
     (; ix, iy, counts, skip) = _rect_batch_geometry(backend, size(weights), T, centers,
                                                     ilat, ilon, n, false)
     values = _ka_batch_values!(backend, reference, obs.values)
-    _scatter_rectangular!(backend, data, weights, pass, ix, iy, counts, skip,
+    _scatter_rectangular!(backend, data, weights, _ka_scatter_pass(pass, overlap),
+                          ix, iy, _rect_sample_counts(counts, n^2, overlap), skip,
                           values, reference.device, n^2, size(values, 2))
 end
 
@@ -198,8 +219,9 @@ function _accumulate_ka_pass!(acc::SphericalKAAccumulator, spec, obs, method, da
 end
 
 function _accumulate_spherical_pass!(acc, spec, obs, n_override, data, pass)
-    (; backend, weights, reference) = acc.moments
-    _accumulate_spherical_batch!(backend, data, weights, pass, spec, acc.options.locator,
+    (; backend, weights, reference, overlap) = acc.moments
+    _accumulate_spherical_batch!(backend, data, weights, _ka_scatter_pass(pass, overlap),
+        spec, acc.options.locator,
         acc.options.geometry_precision, obs.lat_bounds, obs.lon_bounds, obs.values,
         n_override, reference, acc.host_batch)
 end
@@ -243,19 +265,19 @@ end
 
 function finish!(acc::WelfordAccumulator)
     acc.m2 === nothing || finalize_std!(acc.m2, acc.weights)
-    acc.data, acc.m2, acc.weights
+    acc.data, acc.m2, acc.weights, acc.overlap
 end
 
 finish!(acc::AbstractKAAccumulator) = finish!(acc.moments)
 
 function finish!(acc::KAMoments{B,D,W,Nothing}) where {B,D,W}
     _finalize_ka_mean!(acc.backend, acc.data, acc.weights, acc.reference)
-    Array(acc.data), nothing, Array(acc.weights)
+    Array(acc.data), nothing, Array(acc.weights), _map_overlap(Array, acc.overlap)
 end
 
 function finish!(acc::KAMoments)
     data, weights = Array(acc.data), Array(acc.weights)
-    data, _ka_std(_ka_m2(acc.replay), weights), weights
+    data, _ka_std(_ka_m2(acc.replay), weights), weights, _map_overlap(Array, acc.overlap)
 end
 
 _ka_std(::Nothing, weights) = nothing

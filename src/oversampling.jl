@@ -869,6 +869,9 @@ end
     return (k -> @inbounds cells[offset + k]), occupied
 end
 
+@inline _rect_sample_denominator(counts, fp) = @inbounds Int(counts[fp])
+@inline _rect_sample_denominator(count::Int, fp) = count
+
 @inline function _scatter_circular_footprint!(sums, weights, pass, ix, iy, counts, skip,
                                               values, reference, fp, nsq, n_vars, atomic,
                                               scratch, offset)
@@ -881,7 +884,7 @@ end
             _scatter_ka_cell!(sums, weights, pass, values, reference, fp, cell, one(T), n_vars, atomic)
         end
     elseif flag == 0
-        @inbounds denominator = Int(counts[fp])
+        denominator = _rect_sample_denominator(counts, fp)
         denominator > 0 || return nothing
         cell_at = k -> _rect_sample_cell(ix, iy, fp, k, n_lon, n_lat)
         ids = hits = _empty_ka_histogram()
@@ -987,7 +990,7 @@ function _scatter_rectangular!(::CPU, sums, weights, pass, ix, iy, ::Nothing, sk
     nothing
 end
 
-function _scatter_rectangular!(::CPU, sums, weights, pass, ix, iy, counts::AbstractVector, skip,
+function _scatter_rectangular!(::CPU, sums, weights, pass, ix, iy, counts::Union{Int,AbstractVector}, skip,
                                values, reference, nsq, n_vars)
     for fp in axes(ix, 1)
         scratch = _OwnedCircularIndices(ix, iy, fp)
@@ -1005,7 +1008,7 @@ function _scatter_rectangular!(backend, sums, weights, pass, ix, iy, ::Nothing, 
     nothing
 end
 
-function _scatter_rectangular!(backend, sums, weights, pass, ix, iy, counts::AbstractVector, skip,
+function _scatter_rectangular!(backend, sums, weights, pass, ix, iy, counts::Union{Int,AbstractVector}, skip,
                                values, reference, nsq, n_vars)
     _accumulate_circular_ka!(backend, _KA_WORKGROUP_SIZE)(
         sums, weights, pass, ix, iy, counts, skip, values, reference, nsq, n_vars, Val(true); ndrange=size(ix, 1))

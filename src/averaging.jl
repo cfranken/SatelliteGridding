@@ -47,7 +47,7 @@ function accumulate_footprint!(grid_data::AbstractArray{T,3},
                                lats0_buf::AbstractVector,
                                lons0_buf::AbstractVector,
                                lats1_buf::AbstractVector,
-                               lons1_buf::AbstractVector) where {T}
+                               lons1_buf::AbstractVector, overlap=nothing) where {T}
     n_lon, n_lat = size(grid_weights)
 
     # Compute grid-cell indices for all 4 corners
@@ -61,6 +61,7 @@ function accumulate_footprint!(grid_data::AbstractArray{T,3},
     dim_lon = max_lon .- min_lon
 
     fac = T(1 / n_oversample^2)
+    cells = _quad_cell_buffer(overlap, n_oversample^2)
 
     @inbounds for i in 1:n_pixels
         if (dim_lat[i] == 0) & (dim_lon[i] == 0)
@@ -68,8 +69,8 @@ function accumulate_footprint!(grid_data::AbstractArray{T,3},
             col = ilon[i, 1]
             row = ilat[i, 1]
             if 1 <= col <= n_lon && 1 <= row <= n_lat
-                _welford_update!(grid_data, grid_std, grid_weights, compute_std,
-                                 col, row, values, i, n_vars, T(1))
+                _welford_footprint!(grid_data, grid_std, grid_weights, compute_std,
+                                    col, row, values, i, n_vars, T(1), overlap)
             end
         elseif dim_lon[i] < n_oversample
             # Oversample path: footprint spans multiple cells
@@ -77,17 +78,41 @@ function accumulate_footprint!(grid_data::AbstractArray{T,3},
                                lats0_buf, lons0_buf, lats1_buf, lons1_buf)
             floor_indices!(ix_buf, iy_buf, points_buf)
 
-            @inbounds for j in eachindex(ix_buf)
-                col = iy_buf[j]
-                row = ix_buf[j]
-                if 1 <= col <= n_lon && 1 <= row <= n_lat
-                    _welford_update!(grid_data, grid_std, grid_weights, compute_std,
-                                     col, row, values, i, n_vars, fac)
-                end
-            end
+            _update_quad_samples!(grid_data, grid_std, grid_weights, compute_std,
+                                  ix_buf, iy_buf, values, i, n_vars, fac, cells, overlap)
         end
     end
     nothing
+end
+
+_quad_cell_buffer(::Nothing, n) = nothing
+_quad_cell_buffer(::NamedTuple, n) = Vector{Int}(undef, n)
+
+@inline function _update_quad_samples!(data, m2, weights, compute_std, ix, iy, values,
+                                      fp, n_vars, fac, ::Nothing, ::Nothing)
+    n_lon, n_lat = size(weights)
+    @inbounds for k in eachindex(ix)
+        col, row = iy[k], ix[k]
+        if 1 <= col <= n_lon && 1 <= row <= n_lat
+            _welford_update!(data, m2, weights, compute_std, col, row, values, fp, n_vars, fac)
+        end
+    end
+    nothing
+end
+
+function _update_quad_samples!(data, m2, weights, compute_std, ix, iy, values,
+                               fp, n_vars, fac, cells::Vector, overlap)
+    n_lon, n_lat = size(weights)
+    occupied = 0
+    @inbounds for k in eachindex(ix)
+        col, row = iy[k], ix[k]
+        if 1 <= col <= n_lon && 1 <= row <= n_lat
+            occupied += 1
+            cells[occupied] = _rect_cell_id(col, row, n_lon)
+        end
+    end
+    _update_footprint_cells!(data, m2, weights, compute_std, values, fp, n_vars,
+                             cells, occupied, length(ix), overlap)
 end
 
 """
@@ -208,15 +233,15 @@ Sample every footprint on the sphere at the cell centres of its bilinear
 parameter grid. The four input corners are in degrees and may be unordered.
 Count sub-point hits in each cell and add one weight `k/n²` per cell. This
 gives an exact unit weight for a single-cell footprint and the per-footprint
-overlap needed for a future sum of squared weights. Reuse the cell-index
+overlap used by the optional statistics. Reuse the cell-index
 buffer `cells`, sized for the largest sample count.
 """
 function _accumulate_unit_vector_footprints!(data::AbstractArray{T,3}, m2, weights,
                                              compute_std, spec::AbstractSphericalGridSpec,
-                                             lat_c, lon_c, values, n_override, cells) where {T}
+                                             lat_c, lon_c, values, n_override, cells,
+                                             overlap=nothing) where {T}
     locator = _device_locator(spec, Float64)
     cell_spacing = _device_cell_spacing(locator, Float64)
-    n_cols = size(weights, 1)
     n_pixels, n_vars = size(values)
     @inbounds for i in 1:n_pixels
         a = _sphere_unit_vector(spec, lat_c[i, 1], lon_c[i, 1])
@@ -233,22 +258,30 @@ function _accumulate_unit_vector_footprints!(data::AbstractArray{T,3}, m2, weigh
                 cells[k + (j - 1) * n] = locate(locator, x, y, z)
             end
         end
-        # Sort just this footprint's cell indices in place so repeats are
-        # contiguous, with a deterministic order of cell updates.
-        sort!(view(cells, 1:n_samples); alg=QuickSort)
-        first_hit = 1
-        while first_hit <= n_samples
-            cell = cells[first_hit]
-            next_hit = first_hit + 1
-            while next_hit <= n_samples && cells[next_hit] == cell
-                next_hit += 1
-            end
-            row, col = divrem(cell - 1, n_cols)
-            weight = T((next_hit - first_hit) / n_samples)
-            _welford_update!(data, m2, weights, compute_std, col + 1, row + 1,
-                             values, i, n_vars, weight)
-            first_hit = next_hit
+        _update_footprint_cells!(data, m2, weights, compute_std, values, i, n_vars,
+                                 cells, n_samples, n_samples, overlap)
+    end
+    nothing
+end
+
+function _update_footprint_cells!(data, m2, weights, compute_std, values, fp, n_vars,
+                                 cells, occupied, denominator, overlap)
+    n_cols = size(weights, 1)
+    T = eltype(weights)
+    # Sort one footprint's cell indices so repeats are contiguous.
+    sort!(view(cells, 1:occupied); alg=QuickSort)
+    first_hit = 1
+    @inbounds while first_hit <= occupied
+        cell = cells[first_hit]
+        next_hit = first_hit + 1
+        while next_hit <= occupied && cells[next_hit] == cell
+            next_hit += 1
         end
+        row, col = divrem(cell - 1, n_cols)
+        weight = T((next_hit - first_hit) / denominator)
+        _welford_footprint!(data, m2, weights, compute_std, col + 1, row + 1,
+                            values, fp, n_vars, weight, overlap)
+        first_hit = next_hit
     end
     nothing
 end
@@ -281,7 +314,7 @@ function accumulate_circular_footprint!(grid_data::AbstractArray{T,3},
                                         lon_idx::AbstractMatrix,
                                         values::AbstractMatrix,
                                         n_pixels::Int, n_vars::Int,
-                                        n_oversample::Int) where {T}
+                                        n_oversample::Int, overlap=nothing) where {T}
     n_lon, n_lat = size(grid_weights)
     hits = Dict{Tuple{Int,Int},Int}()
 
@@ -307,17 +340,24 @@ function accumulate_circular_footprint!(grid_data::AbstractArray{T,3},
             row = floor(Int, clat)
             col = floor(Int, clon)
             if 1 <= col <= n_lon && 1 <= row <= n_lat
-                _welford_update!(grid_data, grid_std, grid_weights, compute_std,
-                                 col, row, values, i, n_vars, one(T))
+                _welford_footprint!(grid_data, grid_std, grid_weights, compute_std,
+                                    col, row, values, i, n_vars, one(T), overlap)
             end
         else
             for ((col, row), count) in hits
                 weight = T(count / inside_count)
-                _welford_update!(grid_data, grid_std, grid_weights, compute_std,
-                                 col, row, values, i, n_vars, weight)
+                _welford_footprint!(grid_data, grid_std, grid_weights, compute_std,
+                                    col, row, values, i, n_vars, weight, overlap)
             end
         end
     end
+    nothing
+end
+
+Base.@propagate_inbounds function _welford_footprint!(data, m2, weights, compute_std, col, row,
+                                                      values, fp, n_vars, w, overlap)
+    _welford_update!(data, m2, weights, compute_std, col, row, values, fp, n_vars, w)
+    _record_overlap!(overlap, _rect_cell_id(col, row, size(weights, 1)), w, Val(false))
     nothing
 end
 

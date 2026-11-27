@@ -66,6 +66,29 @@ function _parse_grid_args(args, settings)
     parsed
 end
 
+function _parse_coarsen_args(args)
+    s = ArgParseSettings(description="Coarsen a NESTED HEALPix NetCDF archive")
+    @add_arg_table! s begin
+        "--input"
+            help = "Input HEALPix NetCDF file"
+            required = true
+        "--output"
+            help = "Output HEALPix NetCDF file"
+            required = true
+        "--levels"
+            help = "Number of parent levels to coarsen (default: 1)"
+            arg_type = Int
+        "--nside"
+            help = "Target nside, a power of two smaller than the input nside"
+            arg_type = Int
+        "--legacy-std"
+            help = "Untagged <name>_std pairs: error (default), by_name (population standard deviations), or none (independent means). Tagged archives use their explicit links."
+            default = "error"
+            range_tester = x -> x in ("error", "by_name", "none")
+    end
+    parse_args(args, s)
+end
+
 """
     parse_l2_args(args=ARGS) -> Dict
 
@@ -126,7 +149,7 @@ function parse_l2_args(args=ARGS)
             arg_type = String
             range_tester = x -> lowercase(x) in ("float32", "float64")
         "--accumulator-precision"
-            help = "KA accumulator precision: float32 or float64 (default: float32 on Metal, float64 elsewhere)"
+            help = "Accumulator precision: float32 or float64. Sets grid precision on the sequential backend. Sequential rolling requires Float64 daily accumulation and rejects explicit float32."
             arg_type = String
             range_tester = x -> lowercase(x) in ("float32", "float64")
         "--zarrOut"
@@ -143,6 +166,10 @@ function parse_l2_args(args=ARGS)
             default = "2021-01-01"
     end
     parsed = _parse_grid_args(args, s)
+    if parsed["sample_step"] > 0 && _cli_sequential_backend(parsed) &&
+       _cli_precision(parsed["accumulator-precision"]) === Float32
+        throw(ArgumentError("--accumulator-precision float32 is unsupported for sequential rolling, which accumulates daily moments in Float64"))
+    end
     n = parsed["nOversample"]
     parsed["nOversample"] = _validate_n_oversample(n == 0 ? nothing : n,
         "--nOversample must be 0 (automatic) or an integer in 1:$N_OVERRIDE_MAX")
@@ -189,10 +216,13 @@ for `--gridType healpix` with `--nside`.
 """
 function args_to_grid_spec(args::Dict)::AbstractGridSpec
     gtype = lowercase(strip(get(args, "gridType", "rect")))
+    precision = _cli_sequential_backend(args) ? _cli_precision(get(args, "accumulator-precision", nothing)) : nothing
+    T = something(precision, Float32)
     if gtype in ("rect", "rectangular", "latlon", "lonlat")
-        return GridSpec(lat_min=args["latMin"], lat_max=args["latMax"],
-                        lon_min=args["lonMin"], lon_max=args["lonMax"],
-                        dlat=args["dLat"], dlon=args["dLon"])
+        convert_bound = something(precision, identity)
+        return GridSpec(lat_min=convert_bound(args["latMin"]), lat_max=convert_bound(args["latMax"]),
+                        lon_min=convert_bound(args["lonMin"]), lon_max=convert_bound(args["lonMax"]),
+                        dlat=convert_bound(args["dLat"]), dlon=convert_bound(args["dLon"]))
     elseif gtype in ("cs", "cube", "cubed", "cubedsphere", "cubed_sphere")
         Nc = get(args, "Nc", 0)
         Nc > 0 || error("--gridType cs requires --Nc > 0 (e.g. --Nc 360 for C360)")
@@ -204,9 +234,9 @@ function args_to_grid_spec(args::Dict)::AbstractGridSpec
         else
             error("Unknown --csConvention '$conv'. Use gmao or equiangular.")
         end
-        return CubedSphereGridSpec(; Nc=Nc, definition=definition, T=Float32)
+        return CubedSphereGridSpec(; Nc=Nc, definition, T)
     elseif gtype == "healpix"
-        return HEALPixGridSpec(; nside=get(args, "nside", 0))
+        return HEALPixGridSpec(; nside=get(args, "nside", 0), T)
     else
         error("Unknown --gridType '$gtype'. Use rect, cs, or healpix.")
     end
@@ -235,6 +265,7 @@ end
 
 _cli_precision(::Nothing) = nothing
 _cli_precision(arg::AbstractString) = lowercase(arg) == "float32" ? Float32 : Float64
+_cli_sequential_backend(args) = _is_sequential_backend(_normalize_backend_name(get(args, "backend", "sequential")))
 
 function _cli_footprint(args)
     footprint = lowercase(args["footprint"])

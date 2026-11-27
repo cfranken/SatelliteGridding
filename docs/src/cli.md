@@ -46,7 +46,7 @@ julia --project=. bin/grid.jl l2 [options]
 | `--compSTD` | Flag | false | Compute standard deviation |
 | `--backend` | String | `sequential` | Compute backend: `sequential`, `cpu`, `cuda`, or `metal` |
 | `--geometry-precision` | String | Backend default | Spherical KA geometry precision, `float32` or `float64` |
-| `--accumulator-precision` | String | `float64` on CUDA and KA CPU, `float32` on Metal | KA precision for weights, sums, deviations, and cached daily moments. Metal rejects `float64`. |
+| `--accumulator-precision` | String | `float32` for tiled sequential and Metal, `float64` for sequential rolling, CUDA, and KA CPU | Precision for weights, sums, and deviations. On sequential runs it also sets the grid precision when supplied. Sequential rolling accumulates daily moments in Float64 and rejects an explicit `float32` request. Metal requires `float32`. |
 | `--keepGoing` | Flag | false | Continue after per-file processing errors |
 | `--noProgress` | Flag | false | Don't draw progress bars. By default they're drawn only when stderr is a terminal |
 | `--quiet` | Flag | false | Suppress progress bars and run status messages |
@@ -193,6 +193,34 @@ julia --project=. bin/generate_modis_geolocation.jl \
     --tiles h08v04,h09v04 \
     --cacheDir ~/.cache/SatelliteGridding/modis/sinusoidal_2400px_v1
 ```
+
+### `coarsen` — Combine NESTED HEALPix Cells
+
+```bash
+julia --project=. bin/grid.jl coarsen --input fine.nc --output coarse.nc --levels 2
+```
+
+| Flag | Type | Description |
+|:-----|:-----|:------------|
+| `--input` | String | Required input NESTED HEALPix NetCDF |
+| `--output` | String | Required output NetCDF path |
+| `--levels` | Int | Number of levels to coarsen. Defaults to one when the target is omitted. |
+| `--nside` | Int | Target power-of-two resolution, smaller than the input `nside` |
+| `--legacy-std` | String | `error` (default), `by_name`, or `none` |
+
+Supply either `--levels` or `--nside`. Coarsening processes every time
+slice and writes unrounded Float64 moments. To prepare a fine archive on
+the sequential backend, pass `--accumulator-precision float64` along with
+the output settings in the [exact-archive recipe](healpix.md#exact-archive-recipe).
+For L2 NetCDF, request the optional overlap fields with
+[`output.statistics`](config.md#netcdf-storage-and-provenance).
+
+Tagged archives use their explicit standard deviation links. An untagged
+`<name>` and `<name>_std` pair raises an error by default before any output
+is created. Pass `--legacy-std by_name` for a legacy archive with complete,
+disjoint population standard deviation pairs, or `--legacy-std none` to
+treat all science fields as independent means. Untagged archives without
+pairs coarsen as means.
 
 ## Backends
 

@@ -54,8 +54,8 @@ tests.
 The gridding loop counts the `k` subpoints in each cell and updates its
 statistics once per footprint with weight `k/n²`. Footprints entirely
 inside one cell contribute exactly one unit of weight. The resulting
-per-footprint cell overlaps also provide the weights needed for a future
-sum of squared weights (`Σw²`).
+per-footprint cell overlaps also supply the optional `sum_w2` and
+`n_soundings` statistics.
 
 By default `n = clamp(ceil(Int, 4 * L_max / d_cell), 4, 24)` per footprint.
 `L_max` is the largest great-circle distance between any two footprint
@@ -125,15 +125,18 @@ NetCDF stores `n = 0` for unobserved cells, including entirely empty time
 slices, and reserves `-1` for unwritten weights. A cell with `n > 0` can
 still contain science fill, for example when its standard deviation overflows.
 
-To archive Float64 results exactly, accumulate in Float64 and set
-`[output] precision = "float64"`, `significant_digits_mean = "none"`, and
-`significant_digits_std = "none"`. In Julia, use
-`HEALPixGridSpec(; nside=..., T=Float64)` for tiled sequential gridding.
-KA CPU and CUDA accumulate in Float64 by default. Sequential rolling runs
-also accumulate in Float64. Use this Float64 configuration
-for outputs that feed HEALPix 4:1 coarsening or regridding. At fine `nside`,
-quantization of nearly equal child means can dominate a small parent standard
-deviation.
+L2 NetCDF records `accumulator_precision` and `geometry_precision` as global
+attributes. For gridding inputs to coarsening or regridding, use the
+[exact-archive recipe](#exact-archive-recipe).
+
+With the optional `sum_w2` and `n_soundings` fields, fractional overlaps act
+as reliability weights for independent soundings with a common mean and variance.
+Require `sum_w2 > 0`, `n_soundings ≥ 2`, and `N_eff > 1`, where Kish
+`N_eff = n² / sum_w2`. The unbiased sample variance is
+`s² = M2 / (n − sum_w2/n) = std² * N_eff / (N_eff − 1)` and the standard
+error is `SE = std / √(N_eff − 1)`. Avoid `M2 / (n − 1)` and `std / √n`.
+Overlapping rolling slices reuse soundings, and soundings shared across
+cells induce covariance. [Overlap statistics configuration](config.md#netcdf-storage-and-provenance).
 
 All rolling windows with standard deviation merge centered daily moments
 in Float64, as do mean-only Float32 KA runs. Float64 KA restores the shared
@@ -154,11 +157,91 @@ in chunks during file creation.
 Gridding uses dense accumulators, so memory still grows with the cell count
 and the number of variables.
 
+## Coarsening a NESTED archive
+
+Use `coarsen_healpix("fine.nc", "coarse.nc"; levels=2)` in Julia, or
+pass `nside=…` to select a parent resolution directly. Each level halves
+`nside` and combines four consecutive NESTED cells into one parent.
+The output includes every time slice, the original time and window
+coordinates, and recomputed HEALPix coordinates and bounds (if present).
+The global attributes `coarsen_source`, `coarsen_source_nside`,
+`coarsen_target_nside`, and `coarsen_levels` record the original archive,
+its resolution, the output resolution, and the total levels removed across
+all coarsening steps.
+
+The coarsener uses `satellitegridding_role` to identify weights and science
+fields and `satellitegridding_mean` and `satellitegridding_std` to link each
+mean and its deviation. These tags take precedence over `legacy_std`.
+Untagged archives without `<name>` and `<name>_std` pairs coarsen as means.
+When a pair exists, the default `legacy_std=:error` stops before creating
+output because `<name>_std` could be an independent science field.
+
+- Use `legacy_std=:by_name` for archives written with `compute_std=true`.
+  Every science mean must have a matching population standard deviation
+  on `(cell, time)`, and the pairs must be disjoint.
+- Use `legacy_std=:none` to coarsen every science field as an independent
+  mean, including fields whose names end in `_std`.
+
+For each parent, the coarsener sums child weights and combines child means
+and central moments with Chan's formula in Float64. It recovers each
+child's central moment as `M2 = n * std^2` and writes the parent's weighted
+population standard deviation as `sqrt(M2 / n)`. It skips cells with
+`n = 0`. A missing mean in a positive-weight child propagates to the parent
+mean and standard deviation for that variable. A missing child standard
+deviation propagates to the parent standard deviation.
+
+### Exact-archive recipe
+
+Grid the fine archive with Float64 accumulation and spherical geometry.
+In Julia, use `HEALPixGridSpec(; nside=..., T=Float64)` for sequential
+gridding. On the sequential CLI, use `--accumulator-precision float64`.
+KA CPU and CUDA default to Float64 for both precisions. Enable standard
+deviations with `compute_std=true` in Julia or `--compSTD` on the CLI.
+
+```toml
+[output]
+precision = "float64"
+significant_digits_mean = "none"
+significant_digits_std = "none"
+fill_value = nan
+```
+
+Coarsening preserves the moments of the archived sub-sample set up to
+Float64 summation and serialization roundoff, including with adaptive
+oversampling. To reproduce those moments by gridding directly at the parent
+resolution, use the same fixed `n_oversample` (`--nOversample` on the CLI),
+geometry precision, and time windows for the two runs. Adaptive oversampling
+can choose different sub-samples at each resolution. Quantization of nearly
+equal serialized child means can dominate a small parent standard deviation.
+Coarsening writes Float64 without decimal rounding and warns about Float32
+accumulation, Float32 storage, decimal rounding, and missing precision or
+rounding metadata.
+
+### Coarsened overlap statistics
+
+When present, `sum_w2` and `n_soundings` are summed across descendants and
+marked with `coarsening_approximation`. A missing statistic in any observed
+child propagates to that parent statistic. For `L` total levels removed,
+compare with parent statistics for the same archived sub-samples. The summed
+`sum_w2` is between `4⁻ᴸ` and `1` times the true parent value, while the summed
+`n_soundings` is between `1` and `4ᴸ` times the true parent count. A footprint
+touching multiple descendants contributes multiple counts and loses the
+cross-products of its weights. This can inflate `N_eff` by up to `4ᴸ`.
+**Do not use these sums for sample variance or SE.** Even one footprint can
+pass both estimator guards after coarsening and give a spurious zero SE.
+Grid directly at the parent resolution for these estimates.
+
+In a one-day OCO-2 run on CUDA with Float64 and no decimal rounding, using
+`n_oversample=4`, coarsening from `nside=512` to `128` matched direct
+`nside=128` gridding with zero difference in `n`, a maximum mean difference
+of `6 × 10⁻¹⁴ ppm`, and a maximum relative standard deviation difference of
+`9 × 10⁻¹⁴`. The summed `n_soundings` was 20% higher (97,157 vs 81,077) and
+the summed `sum_w2` was 6.6% lower (69,099 vs 73,950).
+
 ## Known limitations and planned work
 
 HEALPix supports quadrilateral Level-2 footprints to NetCDF. Circular
-footprints, centre-coordinate gridding such as MODIS, Zarr output, UGRID
-export, and coarsening or aggregation helpers are outside this support.
+footprints, centre-coordinate gridding such as MODIS, Zarr output, and
+UGRID export are outside this support.
 
-- Outputs contain neither per-cell `sum_w2` nor counts of contributing soundings.
 - Per-cell WGS84 ellipsoidal areas are planned separately.

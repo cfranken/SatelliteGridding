@@ -29,4 +29,6 @@ include("fixtures.jl")
     include("test_l2_hashes.jl")
     include("test_zarr_ordering.jl")
     include("test_progress.jl")
+    include("test_overlap_statistics.jl")
+    include("test_coarsen_healpix.jl")
 end

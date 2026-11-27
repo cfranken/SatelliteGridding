@@ -40,6 +40,7 @@ significant_digits_mean = 8   # L2 means; or "none"
 significant_digits_std = 6    # L2 standard deviations; or "none"
 significant_digits_center = 5 # center means and vegetation indices; or "none"
 checksum = "none"        # or "fletcher32"
+statistics = []          # optional L2 fields: "sum_w2", "n_soundings"
 # chunksizes = [256, 256, 1]  # lon, lat, time; must fit spatial dimensions
 ```
 
@@ -56,6 +57,29 @@ slices also store `n = 0`. A positive `n` can accompany missing science data,
 for example in center cells below `min_count` or when a standard deviation
 overflows. When aggregating a variable, mask its weights where it is missing.
 
+Use `statistics = ["sum_w2", "n_soundings"]` to write either or both
+overlap statistics alongside `n` in L2 NetCDF, shared by all science
+variables. `sum_w2` is the sum of squared fractional footprint weights,
+stored in the selected output precision without decimal rounding. `n_soundings`
+counts distinct contributing footprints per cell, regardless of the number
+of sub-samples. It is stored as Int32. Gridding and HEALPix coarsening raise
+an overflow error if the count exceeds 2,147,483,647. Both fields store
+zero for empty cells and sum over disjoint days within each rolling window.
+Center-coordinate and Zarr output reject these options.
+
+For independent soundings with a common mean and variance, use the fractional overlaps
+as reliability weights. With `M2 = n * std²`, compute Kish effective sample
+size `N_eff = n² / sum_w2`, unbiased sample variance
+`s² = M2 / (n − sum_w2/n) = std² * N_eff / (N_eff − 1)`, and standard error
+`SE = std / √(N_eff − 1)`. Require `sum_w2 > 0`, `n_soundings ≥ 2`, and
+`N_eff > 1`. Mask a variable's missing mean or `std` even where the shared
+overlap statistics are present. Avoid `M2 / (n − 1)` and `std / √n`.
+
+Overlapping rolling slices reuse soundings. A footprint shared by adjacent
+cells induces covariance, and correlated retrievals weaken the independence
+assumption. **Do not use coarsened HEALPix `sum_w2` or `n_soundings` for sample
+variance or SE.** [HEALPix coarsening](healpix.md#coarsening-a-nested-archive).
+
 Each significant-digit setting accepts a positive integer or `"none"`.
 Requests above 9 digits for Float32 or 17 for Float64 leave the output value
 unrounded. Rounding uses the output type, with the default Float32 digit
@@ -66,18 +90,21 @@ rounding or conversion to the output type.
 To archive Float64 results exactly, accumulate in Float64, set
 `precision = "float64"`, and set `significant_digits_mean` and
 `significant_digits_std` to `"none"` for L2 or `significant_digits_center`
-to `"none"` for center mode. In Julia, use Float64 bounds and spacings in
+to `"none"` for center mode. Set `fill_value = nan` to preserve finite
+science values that coincide with a finite fill marker. In Julia, use Float64 bounds and spacings in
 `GridSpec` (`RectangularGridSpec`), or pass `T=Float64` to
 `CubedSphereGridSpec` or `HEALPixGridSpec` for sequential gridding.
-The CLI creates Float32 grids. KA CPU and CUDA accumulate in Float64 by
-default. Set `accumulator_precision` in Julia
-or `--accumulator-precision` on the CLI to choose the daily precision. Metal
-requires Float32. Sequential rolling runs accumulate daily moments in Float64
+On the sequential CLI, `--accumulator-precision float64` constructs a Float64 grid.
+KA CPU and CUDA accumulate in Float64 by default. Set `accumulator_precision`
+in Julia or `--accumulator-precision` on the CLI to choose the KA accumulator
+precision. Metal requires Float32. Sequential rolling runs accumulate daily moments in Float64
 for both mean and standard deviation. All rolling standard deviations merge centered
 daily moments in Float64 before applying the output settings.
 Use this Float64 configuration for outputs that feed aggregation, including
 HEALPix 4:1 coarsening and regridding. Quantization of nearly equal child
 means can dominate a small parent standard deviation at fine `nside`.
+L2 NetCDF records `accumulator_precision` and, for spherical grids,
+`geometry_precision` as global attributes.
 
 Zarr output requires `precision = "float32"` and ignores
 `significant_digits_*`. It narrows science values and standard errors to

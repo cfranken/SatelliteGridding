@@ -63,6 +63,8 @@ function _grid_center(config, grid_spec::RectangularGridSpec{T}, time_spec;
                       geo_table, geo_cache, geo_provider, veg_indices, compute_std,
                       outfile, keep_going, progress, verbose, command) where {T}
     output_options = _output_options(config.options)
+    isempty(output_options.statistics) ||
+        throw(ArgumentError("output.statistics requires L2 footprint gridding"))
     metadata = InputMetadata(config)
     dates = collect(time_spec.start_date:time_spec.time_step:time_spec.stop_date)
     n_times = length(dates)
